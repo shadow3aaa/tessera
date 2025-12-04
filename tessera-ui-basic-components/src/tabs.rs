@@ -9,11 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use closure::closure;
 use derive_builder::Builder;
 use parking_lot::RwLock;
 use tessera_ui::{
-    Color, ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Px, PxPosition,
-    place_node, tessera,
+    Color, ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Px, PxPosition, tessera,
 };
 
 use crate::{
@@ -348,7 +348,7 @@ fn tabs_content_container(scroll_offset: Px, children: Vec<Box<dyn FnOnce() + Se
 
             let mut current_x = scroll_offset;
             for &child_id in input.children_ids.iter() {
-                place_node(child_id, PxPosition::new(current_x, Px(0)), input.metadatas);
+                input.place_child(child_id, PxPosition::new(current_x, Px(0)));
                 current_x += container_width;
             }
 
@@ -477,7 +477,6 @@ where
 
     for (index, child) in title_closures.into_iter().enumerate() {
         let ripple_state = state.ripple_state(index);
-        let state_clone = state.clone();
 
         let label_color = if index == active_tab {
             args.active_content_color
@@ -491,12 +490,9 @@ where
                 .hover_color(Some(hover_color))
                 .padding(args.tab_padding)
                 .ripple_color(args.state_layer_color)
-                .on_click({
-                    let state_clone = state_clone.clone();
-                    Arc::new(move || {
-                        state_clone.set_active_tab(index);
-                    })
-                })
+                .on_click(Arc::new(closure!(clone state, || {
+                    state.set_active_tab(index);
+                })))
                 .width(DimensionValue::FILLED)
                 .shape(Shape::RECTANGLE)
                 .build()
@@ -646,27 +642,18 @@ where
 
             let mut current_x = Px(0);
             for (i, &title_id) in title_ids.iter().enumerate() {
-                place_node(
-                    title_id,
-                    PxPosition::new(current_x, title_offset_y),
-                    input.metadatas,
-                );
+                input.place_child(title_id, PxPosition::new(current_x, title_offset_y));
                 if let Some(title_size) = title_sizes.get(i) {
                     current_x += title_size.width;
                 }
             }
 
-            place_node(
+            input.place_child(
                 indicator_id,
                 PxPosition::new(indicator_x, tab_bar_height - indicator_height),
-                input.metadatas,
             );
 
-            place_node(
-                content_container_id,
-                PxPosition::new(Px(0), tab_bar_height),
-                input.metadatas,
-            );
+            input.place_child(content_container_id, PxPosition::new(Px(0), tab_bar_height));
 
             Ok(ComputedData {
                 width: final_width,

@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use closure::closure;
 use derive_builder::Builder;
 use parking_lot::RwLock;
 use tessera_ui::{
@@ -26,7 +27,7 @@ use crate::{
 
 const RADIO_ANIMATION_DURATION: Duration = Duration::from_millis(200);
 const HOVER_STATE_LAYER_OPACITY: f32 = 0.08;
-const RIPPLE_OPACITY: f32 = 0.12;
+const RIPPLE_OPACITY: f32 = 0.1;
 
 /// Shared state for the `radio_button` component, including ripple feedback and selection animation.
 #[derive(Clone)]
@@ -130,16 +131,16 @@ pub struct RadioButtonArgs {
     #[builder(default = "Arc::new(|_| {})")]
     pub on_select: Arc<dyn Fn(bool) + Send + Sync>,
     /// Visual diameter of the radio glyph (outer ring) in density-independent pixels.
-    #[builder(default = "Dp(18.0)")]
+    #[builder(default = "Dp(20.0)")]
     pub size: Dp,
     /// Minimum interactive touch target for the control.
-    #[builder(default = "Dp(30.0)")]
+    #[builder(default = "Dp(48.0)")]
     pub touch_target_size: Dp,
     /// Stroke width applied to the outer ring.
-    #[builder(default = "Dp(1.5)")]
+    #[builder(default = "Dp(2.0)")]
     pub stroke_width: Dp,
     /// Diameter of the inner dot when fully selected.
-    #[builder(default = "Dp(9.0)")]
+    #[builder(default = "Dp(10.0)")]
     pub dot_size: Dp,
     /// Ring and dot color when selected.
     #[builder(default = "material_color::global_material_scheme().primary")]
@@ -326,13 +327,11 @@ pub fn radio_button(args: impl Into<RadioButtonArgs>, state: RadioButtonState) {
     };
 
     let on_click = if args.enabled {
-        let on_select = args.on_select.clone();
-        let state_for_click = state.clone();
-        Some(Arc::new(move || {
-            if state_for_click.select() {
+        Some(Arc::new(closure!(clone args.on_select, clone state, || {
+            if state.select() {
                 on_select(true);
             }
-        }) as Arc<dyn Fn() + Send + Sync>)
+        })) as Arc<dyn Fn() + Send + Sync>)
     } else {
         None
     };

@@ -17,7 +17,7 @@ image = { version = "0.25.9", default-features = false, features = [
     "jpeg",
 ] }
 glyphon = { package = "glyphon-tessera-fork", version = "0.9.6" }
-tracing = "0.1.41"
+tracing = "0.1.43"
 parking_lot = "0.12.5"
 tessera-ui = { path = "../tessera-ui" }
 unicode-segmentation = "1.12.0"
@@ -31,3 +31,4 @@ lyon_tessellation = "1.0.16"
 thiserror = "2.0.17"
 lyon_geom = "1.0.18"
 material-color-utilities = "1.0.0-dev.18"
+closure = "0.3.0"

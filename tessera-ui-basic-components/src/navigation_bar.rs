@@ -9,18 +9,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+use closure::closure;
 use derive_builder::Builder;
 use parking_lot::RwLock;
 use tessera_ui::{Color, DimensionValue, Dp, tessera};
 
 use crate::{
-    RippleState,
+    RippleState, ShadowProps,
     alignment::{Alignment, CrossAxisAlignment, MainAxisAlignment},
     animation,
     boxed::{BoxedArgsBuilder, boxed},
     column::{ColumnArgsBuilder, column},
     material_color::{MaterialColorScheme, global_material_scheme},
-    pipelines::ShadowProps,
     row::{RowArgsBuilder, row},
     shape_def::Shape,
     spacer::{SpacerArgsBuilder, spacer},
@@ -253,9 +253,8 @@ fn render_navigation_item(
     let indicator_color = scheme.secondary_container.with_alpha(indicator_alpha);
 
     let ripple_state = state.ripple_state(index);
-    let on_click = item.on_click.clone();
-    let state_for_click = state.clone();
     let icon_only_indicator_color = indicator_color;
+    let on_click = item.on_click.clone();
 
     surface(
         SurfaceArgsBuilder::default()
@@ -269,12 +268,12 @@ fn render_navigation_item(
             .ripple_color(ripple_color)
             .hover_style(None)
             .accessibility_label(label_text.clone())
-            .on_click(Arc::new(move || {
-                if index != state_for_click.selected() {
-                    state_for_click.set_selected(index);
+            .on_click(Arc::new(closure!(clone state, clone on_click, || {
+                if index != state.selected() {
+                    state.set_selected(index);
                     on_click();
                 }
-            }))
+            })))
             .build()
             .expect("SurfaceArgsBuilder failed with required fields set"),
         Some(ripple_state),

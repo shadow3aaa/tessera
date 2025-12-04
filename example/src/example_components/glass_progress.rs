@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use closure::closure;
 use tessera_ui::{DimensionValue, Dp, shard, tessera};
 use tessera_ui_basic_components::{
     column::{ColumnArgsBuilder, column},
@@ -93,7 +94,7 @@ fn test_content(state: Arc<GlassProgressShowcaseState>) {
                 glass_progress(
                     GlassProgressArgsBuilder::default()
                         .value(progress_val)
-                        .width(Dp(250.0))
+                        .width(DimensionValue::Fixed(Dp(250.0).to_px()))
                         .build()
                         .unwrap(),
                 );
@@ -105,15 +106,14 @@ fn test_content(state: Arc<GlassProgressShowcaseState>) {
 
             let state_clone = state.clone();
             scope.child(move || {
-                let progress_clone = state_clone.progress.clone();
-                let on_change = Arc::new(move |new_value| {
-                    *progress_clone.lock().unwrap() = new_value;
-                });
+                let on_change = Arc::new(closure!(clone state_clone.progress, |new_value| {
+                    *progress.lock().unwrap() = new_value;
+                }));
                 slider(
                     SliderArgsBuilder::default()
                         .value(*state_clone.progress.lock().unwrap())
                         .on_change(on_change)
-                        .width(Dp(250.0))
+                        .width(DimensionValue::Fixed(Dp(250.0).to_px()))
                         .build()
                         .unwrap(),
                     state_clone.slider_state.clone(),

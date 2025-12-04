@@ -5,8 +5,8 @@
 //! Use to stack children horizontally.
 use derive_builder::Builder;
 use tessera_ui::{
-    ComponentNodeMetaDatas, ComputedData, Constraint, DimensionValue, MeasureInput,
-    MeasurementError, NodeId, Px, PxPosition, place_node, tessera,
+    ComputedData, Constraint, DimensionValue, MeasureInput, MeasurementError, NodeId, Px,
+    PxPosition, tessera,
 };
 
 use crate::alignment::{CrossAxisAlignment, MainAxisAlignment};
@@ -66,7 +66,7 @@ impl<'a> RowScope<'a> {
 struct PlaceChildrenArgs<'a> {
     children_sizes: &'a [Option<ComputedData>],
     children_ids: &'a [NodeId],
-    metadatas: &'a ComponentNodeMetaDatas,
+    input: &'a MeasureInput<'a>,
     final_row_width: Px,
     final_row_height: Px,
     total_children_width: Px,
@@ -143,12 +143,14 @@ where
             let row_intrinsic_constraint = Constraint::new(args.width, args.height);
             let row_effective_constraint = row_intrinsic_constraint.merge(input.parent_constraint);
 
-            let should_use_weight_for_width = matches!(
-                row_effective_constraint.width,
-                DimensionValue::Fixed(_)
-                    | DimensionValue::Fill { max: Some(_), .. }
-                    | DimensionValue::Wrap { max: Some(_), .. }
-            );
+            let has_weighted_children = child_weights.iter().any(|w| w.unwrap_or(0.0) > 0.0);
+            let should_use_weight_for_width = has_weighted_children
+                && matches!(
+                    row_effective_constraint.width,
+                    DimensionValue::Fixed(_)
+                        | DimensionValue::Fill { max: Some(_), .. }
+                        | DimensionValue::Wrap { max: Some(_), .. }
+                );
 
             if should_use_weight_for_width {
                 measure_weighted_row(input, &args, &child_weights, &row_effective_constraint, n)
@@ -214,7 +216,7 @@ fn measure_weighted_row(
     place_children_with_alignment(&PlaceChildrenArgs {
         children_sizes: &children_sizes,
         children_ids: input.children_ids,
-        metadatas: input.metadatas,
+        input,
         final_row_width,
         final_row_height,
         total_children_width: total_measured_children_width,
@@ -274,7 +276,7 @@ fn measure_unweighted_row(
     place_children_with_alignment(&PlaceChildrenArgs {
         children_sizes: &children_sizes,
         children_ids: input.children_ids,
-        metadatas: input.metadatas,
+        input,
         final_row_width,
         final_row_height,
         total_children_width: total_children_measured_width,
@@ -472,11 +474,8 @@ fn place_children_with_alignment(args: &PlaceChildrenArgs) {
                 args.cross_axis_alignment,
             );
 
-            place_node(
-                child_id,
-                PxPosition::new(current_x, y_offset),
-                args.metadatas,
-            );
+            args.input
+                .place_child(child_id, PxPosition::new(current_x, y_offset));
             current_x += child_actual_size.width;
             if i < args.child_count - 1 {
                 current_x += spacing;

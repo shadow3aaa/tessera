@@ -6,7 +6,12 @@
 use derive_builder::Builder;
 use tessera_ui::{Color, ComputedData, DimensionValue, Dp, Px, accesskit::Role, tessera};
 
-use crate::pipelines::{TextCommand, TextConstraint, TextData};
+use crate::pipelines::text::{
+    command::{TextCommand, TextConstraint},
+    pipeline::TextData,
+};
+
+pub use crate::pipelines::text::pipeline::{read_font_system, write_font_system};
 
 /// Configuration arguments for the `text` component.
 #[derive(Debug, Default, Builder, Clone)]

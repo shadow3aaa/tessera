@@ -5,8 +5,8 @@
 //! Use to stack children vertically.
 use derive_builder::Builder;
 use tessera_ui::{
-    ComponentNodeMetaDatas, ComputedData, Constraint, DimensionValue, MeasureInput,
-    MeasurementError, NodeId, Px, PxPosition, place_node, tessera,
+    ComputedData, Constraint, DimensionValue, MeasureInput, MeasurementError, NodeId, Px,
+    PxPosition, tessera,
 };
 
 use crate::alignment::{CrossAxisAlignment, MainAxisAlignment};
@@ -122,12 +122,14 @@ where
             let mut children_sizes = vec![None; n];
             let mut max_child_width = Px(0);
 
-            let should_use_weight_for_height = matches!(
-                column_effective_constraint.height,
-                DimensionValue::Fixed(_)
-                    | DimensionValue::Fill { max: Some(_), .. }
-                    | DimensionValue::Wrap { max: Some(_), .. }
-            );
+            let has_weighted_children = child_weights.iter().any(|w| w.unwrap_or(0.0) > 0.0);
+            let should_use_weight_for_height = has_weighted_children
+                && matches!(
+                    column_effective_constraint.height,
+                    DimensionValue::Fixed(_)
+                        | DimensionValue::Fill { max: Some(_), .. }
+                        | DimensionValue::Wrap { max: Some(_), .. }
+                );
 
             let (final_column_width, final_column_height, total_measured_children_height) =
                 if should_use_weight_for_height {
@@ -152,7 +154,7 @@ where
             place_children_with_alignment(&PlaceChildrenArgs {
                 children_sizes: &children_sizes,
                 children_ids: input.children_ids,
-                metadatas: input.metadatas,
+                input,
                 final_column_width,
                 final_column_height,
                 total_children_height: total_measured_children_height,
@@ -177,7 +179,7 @@ where
 struct PlaceChildrenArgs<'a> {
     children_sizes: &'a [Option<ComputedData>],
     children_ids: &'a [NodeId],
-    metadatas: &'a ComponentNodeMetaDatas,
+    input: &'a MeasureInput<'a>,
     final_column_width: Px,
     final_column_height: Px,
     total_children_height: Px,
@@ -495,11 +497,8 @@ fn place_children_with_alignment(args: &PlaceChildrenArgs) {
                 args.final_column_width,
                 args.cross_axis_alignment,
             );
-            place_node(
-                child_id,
-                PxPosition::new(x_offset, current_y),
-                args.metadatas,
-            );
+            args.input
+                .place_child(child_id, PxPosition::new(x_offset, current_y));
             current_y += child_actual_size.height;
             if i < args.child_count - 1 {
                 current_y += spacing_between_children;
