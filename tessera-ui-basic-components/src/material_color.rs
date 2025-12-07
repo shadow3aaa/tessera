@@ -105,6 +105,16 @@ pub struct MaterialColorScheme {
     pub inverse_on_surface: Color,
     /// An inverse of the primary color.
     pub inverse_primary: Color,
+    /// A container color for surfaces.
+    pub surface_container: Color,
+    /// A high container color for surfaces.
+    pub surface_container_high: Color,
+    /// A low container color for surfaces.
+    pub surface_container_highest: Color,
+    /// A low container color for surfaces.
+    pub surface_container_low: Color,
+    /// A lowest container color for surfaces.
+    pub surface_container_lowest: Color,
 }
 
 impl MaterialColorScheme {
@@ -117,22 +127,6 @@ impl MaterialColorScheme {
     pub fn dark_from_seed(seed: Color) -> Self {
         scheme_from_seed(seed, true)
     }
-}
-
-/// Backward-compatible alias for the previous material naming.
-#[deprecated(note = "Use MaterialColorScheme instead.")]
-pub type Md3ColorScheme = MaterialColorScheme;
-
-/// Backward-compatible global getter using the previous material naming.
-#[deprecated(note = "Use global_material_scheme instead.")]
-pub fn global_md3_scheme() -> MaterialColorScheme {
-    global_material_scheme()
-}
-
-/// Backward-compatible global setter using the previous material naming.
-#[deprecated(note = "Use set_global_material_scheme instead.")]
-pub fn set_global_md3_scheme(seed: Color, is_dark: bool) {
-    set_global_material_scheme(seed, is_dark);
 }
 
 fn scheme_from_seed(seed: Color, is_dark: bool) -> MaterialColorScheme {
@@ -181,6 +175,19 @@ fn scheme_from_seed(seed: Color, is_dark: bool) -> MaterialColorScheme {
         inverse_surface: argb_to_color(dynamic_colors.inverse_surface().get_argb(&scheme)),
         inverse_on_surface: argb_to_color(dynamic_colors.inverse_on_surface().get_argb(&scheme)),
         inverse_primary: argb_to_color(dynamic_colors.inverse_primary().get_argb(&scheme)),
+        surface_container: argb_to_color(dynamic_colors.surface_container().get_argb(&scheme)),
+        surface_container_high: argb_to_color(
+            dynamic_colors.surface_container_high().get_argb(&scheme),
+        ),
+        surface_container_highest: argb_to_color(
+            dynamic_colors.surface_container_highest().get_argb(&scheme),
+        ),
+        surface_container_low: argb_to_color(
+            dynamic_colors.surface_container_low().get_argb(&scheme),
+        ),
+        surface_container_lowest: argb_to_color(
+            dynamic_colors.surface_container_lowest().get_argb(&scheme),
+        ),
     }
 }
 
