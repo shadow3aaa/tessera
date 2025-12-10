@@ -1,12 +1,13 @@
 //! Physical pixel coordinate system for Tessera UI framework.
 //!
-//! This module provides types and operations for working with physical pixel coordinates,
-//! positions, and sizes. Physical pixels represent actual screen pixels and are used
-//! internally by the rendering system.
+//! This module provides types and operations for working with physical pixel
+//! coordinates, positions, and sizes. Physical pixels represent actual screen
+//! pixels and are used internally by the rendering system.
 //!
 //! # Key Types
 //!
-//! - [`Px`] - A single physical pixel coordinate value that supports negative values for scrolling
+//! - [`Px`] - A single physical pixel coordinate value that supports negative
+//!   values for scrolling
 //! - [`PxPosition`] - A 2D position in physical pixel space (x, y coordinates)
 //! - [`PxSize`] - A 2D size in physical pixel space (width, height dimensions)
 //!
@@ -16,19 +17,21 @@
 //! - Origin (0, 0) at the top-left corner
 //! - X-axis increases to the right
 //! - Y-axis increases downward
-//! - Negative coordinates are supported for scrolling and off-screen positioning
+//! - Negative coordinates are supported for scrolling and off-screen
+//!   positioning
 //!
 //! # Conversion
 //!
-//! Physical pixels can be converted to and from density-independent pixels ([`Dp`]):
+//! Physical pixels can be converted to and from density-independent pixels
+//! ([`Dp`]):
 //! - Use [`Px::from_dp`] to convert from Dp to Px
 //! - Use [`Px::to_dp`] to convert from Px to Dp
 //!
 //! # Example
 //!
 //! ```
-//! use tessera_ui::px::{Px, PxPosition, PxSize};
 //! use tessera_ui::dp::Dp;
+//! use tessera_ui::px::{Px, PxPosition, PxSize};
 //!
 //! // Create pixel values
 //! let x = Px::new(100);
@@ -54,15 +57,16 @@ use crate::dp::{Dp, SCALE_FACTOR};
 
 /// A physical pixel coordinate value.
 ///
-/// This type represents a single coordinate value in physical pixel space. Physical pixels
-/// correspond directly to screen pixels and are used internally by the rendering system.
-/// Unlike density-independent pixels ([`Dp`]), physical pixels are not scaled based on
-/// screen density.
+/// This type represents a single coordinate value in physical pixel space.
+/// Physical pixels correspond directly to screen pixels and are used internally
+/// by the rendering system. Unlike density-independent pixels ([`Dp`]),
+/// physical pixels are not scaled based on screen density.
 ///
 /// # Features
 ///
 /// - Supports negative values for scrolling and off-screen positioning
-/// - Provides arithmetic operations (addition, subtraction, multiplication, division)
+/// - Provides arithmetic operations (addition, subtraction, multiplication,
+///   division)
 /// - Includes saturating arithmetic to prevent overflow
 /// - Converts to/from density-independent pixels ([`Dp`])
 /// - Converts to/from floating-point values with overflow protection
@@ -134,9 +138,9 @@ impl Px {
 
     /// Converts from density-independent pixels ([`Dp`]) to physical pixels.
     ///
-    /// This conversion uses the current scale factor to determine how many physical
-    /// pixels correspond to the given Dp value. The scale factor is typically
-    /// determined by the screen's pixel density.
+    /// This conversion uses the current scale factor to determine how many
+    /// physical pixels correspond to the given Dp value. The scale factor
+    /// is typically determined by the screen's pixel density.
     ///
     /// # Arguments
     ///
@@ -145,8 +149,8 @@ impl Px {
     /// # Examples
     ///
     /// ```
-    /// use tessera_ui::px::Px;
     /// use tessera_ui::dp::Dp;
+    /// use tessera_ui::px::Px;
     ///
     /// let dp_value = Dp(16.0);
     /// let px_value = Px::from_dp(dp_value);
@@ -175,8 +179,9 @@ impl Px {
 
     /// Returns the absolute value as a u32
     ///
-    /// This method is primarily used for coordinate conversion during rendering,
-    /// where negative coordinates need to be handled appropriately.
+    /// This method is primarily used for coordinate conversion during
+    /// rendering, where negative coordinates need to be handled
+    /// appropriately.
     ///
     /// # Examples
     ///
@@ -259,10 +264,11 @@ impl Px {
         Px(value as i32)
     }
 
-    /// Creates a `Px` from an f32 value, saturating at the numeric bounds instead of overflowing.
+    /// Creates a `Px` from an f32 value, saturating at the numeric bounds
+    /// instead of overflowing.
     ///
-    /// This is the safe alternative to [`from_f32`](Self::from_f32) that handles overflow
-    /// by clamping the value to the valid i32 range.
+    /// This is the safe alternative to [`from_f32`](Self::from_f32) that
+    /// handles overflow by clamping the value to the valid i32 range.
     ///
     /// # Examples
     ///
@@ -285,8 +291,9 @@ impl Px {
 
     /// Saturating integer addition.
     ///
-    /// Computes `self + rhs`, saturating at the numeric bounds instead of overflowing.
-    /// This prevents integer overflow by clamping the result to the valid i32 range.
+    /// Computes `self + rhs`, saturating at the numeric bounds instead of
+    /// overflowing. This prevents integer overflow by clamping the result
+    /// to the valid i32 range.
     ///
     /// # Arguments
     ///
@@ -311,8 +318,9 @@ impl Px {
 
     /// Saturating integer subtraction.
     ///
-    /// Computes `self - rhs`, saturating at the numeric bounds instead of overflowing.
-    /// This prevents integer underflow by clamping the result to the valid i32 range.
+    /// Computes `self - rhs`, saturating at the numeric bounds instead of
+    /// overflowing. This prevents integer underflow by clamping the result
+    /// to the valid i32 range.
     ///
     /// # Arguments
     ///
@@ -370,7 +378,8 @@ impl Px {
     ///
     /// # Panics
     ///
-    /// This function may panic if `rhs` is zero, as division by zero is undefined.
+    /// This function may panic if `rhs` is zero, as division by zero is
+    /// undefined.
     ///
     /// # Examples
     ///
@@ -388,16 +397,17 @@ impl Px {
 
 /// A 2D position in physical pixel space.
 ///
-/// This type represents a position with x and y coordinates in physical pixel space.
-/// Physical pixels correspond directly to screen pixels and are used internally
-/// by the rendering system.
+/// This type represents a position with x and y coordinates in physical pixel
+/// space. Physical pixels correspond directly to screen pixels and are used
+/// internally by the rendering system.
 ///
 /// # Coordinate System
 ///
 /// - Origin (0, 0) is at the top-left corner
 /// - X-axis increases to the right
 /// - Y-axis increases downward
-/// - Negative coordinates are supported for scrolling and off-screen positioning
+/// - Negative coordinates are supported for scrolling and off-screen
+///   positioning
 ///
 /// # Examples
 ///
@@ -479,7 +489,8 @@ impl PxPosition {
 
     /// Offsets the position with saturating arithmetic.
     ///
-    /// This prevents overflow by clamping the result to the valid coordinate range.
+    /// This prevents overflow by clamping the result to the valid coordinate
+    /// range.
     ///
     /// # Arguments
     ///
@@ -769,8 +780,8 @@ impl PxSize {
 
 /// A 2D rectangle in physical pixel space.
 ///
-/// This type represents a rectangle with a position (top-left corner) and dimensions
-/// in physical pixel space.
+/// This type represents a rectangle with a position (top-left corner) and
+/// dimensions in physical pixel space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PxRect {
     /// The x-coordinate of the top-left corner
@@ -812,11 +823,13 @@ impl PxRect {
         }
     }
 
-    /// Checks if this rectangle is orthogonal (non-overlapping) with another rectangle.
+    /// Checks if this rectangle is orthogonal (non-overlapping) with another
+    /// rectangle.
     ///
-    /// Two rectangles are orthogonal if they do not overlap in either the x or y axis.
-    /// This is useful for barrier batching optimization where non-overlapping rectangles
-    /// can be processed together without requiring barriers.
+    /// Two rectangles are orthogonal if they do not overlap in either the x or
+    /// y axis. This is useful for barrier batching optimization where
+    /// non-overlapping rectangles can be processed together without
+    /// requiring barriers.
     ///
     /// # Arguments
     ///
@@ -824,7 +837,8 @@ impl PxRect {
     ///
     /// # Returns
     ///
-    /// `true` if the rectangles are orthogonal (non-overlapping), `false` otherwise
+    /// `true` if the rectangles are orthogonal (non-overlapping), `false`
+    /// otherwise
     ///
     /// # Examples
     ///
@@ -850,8 +864,9 @@ impl PxRect {
         !x_overlap || !y_overlap
     }
 
-    /// Creates a new rectangle that is the union of this rectangle and another rectangle.
-    /// Which is the smallest rectangle that contains both rectangles.
+    /// Creates a new rectangle that is the union of this rectangle and another
+    /// rectangle. Which is the smallest rectangle that contains both
+    /// rectangles.
     ///
     /// # Arguments
     ///
@@ -859,7 +874,8 @@ impl PxRect {
     ///
     /// # Returns
     ///
-    /// A new `PxRect` that is the union of this rectangle and the other rectangle
+    /// A new `PxRect` that is the union of this rectangle and the other
+    /// rectangle
     ///
     /// # Examples
     ///
@@ -869,7 +885,10 @@ impl PxRect {
     /// let rect1 = PxRect::new(Px::new(0), Px::new(0), Px::new(100), Px::new(100));
     /// let rect2 = PxRect::new(Px::new(50), Px::new(50), Px::new(100), Px::new(100));
     /// let union_rect = rect1.union(&rect2);
-    /// assert_eq!(union_rect, PxRect::new(Px::new(0), Px::new(0), Px::new(150), Px::new(150)));
+    /// assert_eq!(
+    ///     union_rect,
+    ///     PxRect::new(Px::new(0), Px::new(0), Px::new(150), Px::new(150))
+    /// );
     /// ```
     pub fn union(&self, other: &Self) -> Self {
         let x = self.x.0.min(other.x.0);
@@ -917,7 +936,15 @@ impl PxRect {
     /// let rect1 = PxRect::new(Px::new(0), Px::new(0), Px::new(100), Px::new(100));
     /// let rect2 = PxRect::new(Px::new(50), Px::new(50), Px::new(100), Px::new(100));
     /// let intersection = rect1.intersection(&rect2);
-    /// assert_eq!(intersection, Some(PxRect::new(Px::new(50), Px::new(50), Px::new(50), Px::new(50))));
+    /// assert_eq!(
+    ///     intersection,
+    ///     Some(PxRect::new(
+    ///         Px::new(50),
+    ///         Px::new(50),
+    ///         Px::new(50),
+    ///         Px::new(50)
+    ///     ))
+    /// );
     /// ```
     pub fn intersection(&self, other: &Self) -> Option<Self> {
         let x1 = self.x.0.max(other.x.0);

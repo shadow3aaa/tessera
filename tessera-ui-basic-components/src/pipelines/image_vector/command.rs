@@ -73,8 +73,8 @@ pub enum VectorTintMode {
     /// Result = Image * Tint
     #[default]
     Multiply,
-    /// Ignores the image's color channels, using only its alpha to mask the tint color.
-    /// Result = Tint * Image.Alpha
+    /// Ignores the image's color channels, using only its alpha to mask the
+    /// tint color. Result = Tint * Image.Alpha
     Solid,
 }
 
@@ -91,4 +91,8 @@ pub struct ImageVectorCommand {
     pub rotation: f32,
 }
 
-impl DrawCommand for ImageVectorCommand {}
+impl DrawCommand for ImageVectorCommand {
+    fn apply_opacity(&mut self, opacity: f32) {
+        self.tint = self.tint.with_alpha(self.tint.a * opacity.clamp(0.0, 1.0));
+    }
+}

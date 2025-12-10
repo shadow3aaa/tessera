@@ -4,11 +4,14 @@
 //!
 //! Use to indicate the completion of a task or a specific value in a range.
 use derive_builder::Builder;
-use tessera_ui::{Color, ComputedData, Constraint, DimensionValue, Dp, Px, PxPosition, tessera};
+use tessera_ui::{
+    Color, ComputedData, Constraint, DimensionValue, Dp, Px, PxPosition, tessera, use_context,
+};
 
 use crate::{
     shape_def::Shape,
     surface::{SurfaceArgsBuilder, surface},
+    theme::MaterialColorScheme,
 };
 
 /// Arguments for the `progress` component.
@@ -28,11 +31,11 @@ pub struct ProgressArgs {
     pub height: Dp,
 
     /// The color of the active part of the track.
-    #[builder(default = "crate::material_color::global_material_scheme().primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary")]
     pub progress_color: Color,
 
     /// The color of the inactive part of the track.
-    #[builder(default = "crate::material_color::global_material_scheme().surface_variant")]
+    #[builder(default = "use_context::<MaterialColorScheme>().surface_variant")]
     pub track_color: Color,
 }
 
@@ -42,24 +45,26 @@ pub struct ProgressArgs {
 ///
 /// ## Usage
 ///
-/// Display the status of an ongoing operation, such as a download or a setup process.
+/// Display the status of an ongoing operation, such as a download or a setup
+/// process.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the progress bar's value and appearance; see [`ProgressArgs`].
+/// - `args` — configures the progress bar's value and appearance; see
+///   [`ProgressArgs`].
 ///
 /// ## Examples
 ///
 /// ```
-/// use tessera_ui_basic_components::progress::{progress, ProgressArgsBuilder};
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
+/// use tessera_ui_basic_components::progress::{ProgressArgsBuilder, progress};
 ///
 /// // Creates a progress bar that is 75% complete.
-/// progress(
-///     ProgressArgsBuilder::default()
-///         .value(0.75)
-///         .build()
-///         .unwrap(),
-/// );
+/// progress(ProgressArgsBuilder::default().value(0.75).build().unwrap());
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn progress(args: impl Into<ProgressArgs>) {
@@ -108,7 +113,8 @@ pub fn progress(args: impl Into<ProgressArgs>) {
         let track_id = input.children_ids[0];
         let progress_id = input.children_ids[1];
 
-        // Measure and place the background track to take the full size of the component.
+        // Measure and place the background track to take the full size of the
+        // component.
         let track_constraint = Constraint::new(
             DimensionValue::Fixed(self_width),
             DimensionValue::Fixed(self_height),
@@ -126,7 +132,8 @@ pub fn progress(args: impl Into<ProgressArgs>) {
         input.measure_child(progress_id, &progress_constraint)?;
         input.place_child(progress_id, PxPosition::new(Px(0), Px(0)));
 
-        // The progress component itself is a container, its size is defined by the args.
+        // The progress component itself is a container, its size is defined by the
+        // args.
         Ok(ComputedData {
             width: self_width,
             height: self_height,

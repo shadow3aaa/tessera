@@ -1,44 +1,72 @@
-//! Material Design color utilities for HCT and dynamic scheme generation.
-//! ## Usage Generate Material-compliant dynamic palettes for consistent UI theming.
-
-use std::sync::OnceLock;
-
+//! Provide theme contexts
 use material_color_utilities::{
     dynamiccolor::{DynamicSchemeBuilder, MaterialDynamicColors, SpecVersion, Variant},
     hct::Hct,
 };
-use parking_lot::RwLock;
-use tessera_ui::Color;
+use tessera_ui::{Color, provide_context, tessera};
 
 const DEFAULT_COLOR: Color = Color::from_rgb(0.4039, 0.3137, 0.6431); // #6750A4
 
-static GLOBAL_SCHEME: OnceLock<RwLock<MaterialColorScheme>> = OnceLock::new();
-
-/// Returns the global Material Design 3 color scheme.
-///
-/// If no scheme has been set, it initializes a default light scheme
-/// with a seed color of #6750A4.
-pub fn global_material_scheme() -> MaterialColorScheme {
-    GLOBAL_SCHEME
-        .get_or_init(|| RwLock::new(MaterialColorScheme::light_from_seed(DEFAULT_COLOR)))
-        .read()
-        .clone()
+/// Ambient content color used by text and icons when no explicit tint is
+/// provided.
+#[derive(Clone, Copy, Debug)]
+pub struct ContentColor {
+    /// Current content color used by text/icons when no explicit tint is
+    /// provided.
+    pub current: Color,
 }
 
-/// Sets the global Material Design 3 color scheme.
-///
-/// The scheme is generated based on the provided `seed` color and `is_dark` flag.
-pub fn set_global_material_scheme(seed: Color, is_dark: bool) {
-    let scheme = if is_dark {
-        MaterialColorScheme::dark_from_seed(seed)
-    } else {
-        MaterialColorScheme::light_from_seed(seed)
-    };
+impl Default for ContentColor {
+    fn default() -> Self {
+        ContentColor {
+            current: Color::BLACK,
+        }
+    }
+}
 
-    GLOBAL_SCHEME
-        .get_or_init(|| RwLock::new(scheme.clone()))
-        .write()
-        .clone_from(&scheme);
+/// Maps a container color to an appropriate foreground color from the scheme.
+pub fn content_color_for(container: Color, scheme: &MaterialColorScheme) -> Color {
+    if container == scheme.primary {
+        scheme.on_primary
+    } else if container == scheme.primary_container {
+        scheme.on_primary_container
+    } else if container == scheme.secondary {
+        scheme.on_secondary
+    } else if container == scheme.secondary_container {
+        scheme.on_secondary_container
+    } else if container == scheme.tertiary {
+        scheme.on_tertiary
+    } else if container == scheme.tertiary_container {
+        scheme.on_tertiary_container
+    } else if container == scheme.error {
+        scheme.on_error
+    } else if container == scheme.error_container {
+        scheme.on_error_container
+    } else if container == scheme.surface_variant {
+        scheme.on_surface_variant
+    } else if container == scheme.inverse_surface {
+        scheme.inverse_on_surface
+    } else {
+        scheme.on_surface
+    }
+}
+
+/// Provides a Material theme to descendants.
+#[tessera]
+pub fn material_theme_provider(scheme: MaterialColorScheme, child: impl FnOnce()) {
+    let content_color = ContentColor {
+        current: scheme.on_surface,
+    };
+    provide_context(scheme, || {
+        provide_context(content_color, child);
+    });
+}
+
+/// Generates a Material theme from a seed color and provides it to descendants.
+#[tessera]
+pub fn material_theme_from_seed(seed: Color, is_dark: bool, child: impl FnOnce()) {
+    let scheme = scheme_from_seed(seed, is_dark);
+    material_theme_provider(scheme, child);
 }
 
 /// A Material Design color scheme, which can be light or dark,
@@ -129,6 +157,12 @@ impl MaterialColorScheme {
     }
 }
 
+impl Default for MaterialColorScheme {
+    fn default() -> Self {
+        MaterialColorScheme::light_from_seed(DEFAULT_COLOR)
+    }
+}
+
 fn scheme_from_seed(seed: Color, is_dark: bool) -> MaterialColorScheme {
     let scheme = DynamicSchemeBuilder::default()
         .source_color_hct(Hct::from_int(color_to_argb(seed)))
@@ -189,19 +223,6 @@ fn scheme_from_seed(seed: Color, is_dark: bool) -> MaterialColorScheme {
             dynamic_colors.surface_container_lowest().get_argb(&scheme),
         ),
     }
-}
-
-/// Blends two colors, `overlay` drawn over `base`, using the provided `overlay_alpha`.
-///
-/// The `overlay_alpha` parameter controls the opacity of the `overlay` color,
-/// ranging from 0.0 (fully transparent) to 1.0 (fully opaque).
-pub fn blend_over(base: Color, overlay: Color, overlay_alpha: f32) -> Color {
-    let alpha = overlay_alpha.clamp(0.0, 1.0);
-    let r = overlay.r * alpha + base.r * (1.0 - alpha);
-    let g = overlay.g * alpha + base.g * (1.0 - alpha);
-    let b = overlay.b * alpha + base.b * (1.0 - alpha);
-    let a = overlay.a * alpha + base.a * (1.0 - alpha);
-    Color::new(r, g, b, a)
 }
 
 fn linear_to_srgb_channel(v: f32) -> f32 {

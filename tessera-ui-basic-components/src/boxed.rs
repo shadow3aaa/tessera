@@ -47,7 +47,8 @@ impl<'a> BoxedScope<'a> {
         self.child_alignments.push(None);
     }
 
-    /// Adds a child component with a custom alignment overriding the container default.
+    /// Adds a child component with a custom alignment overriding the container
+    /// default.
     pub fn child_with_alignment<F>(&mut self, alignment: Alignment, child_closure: F)
     where
         F: FnOnce() + Send + Sync + 'static,
@@ -57,8 +58,8 @@ impl<'a> BoxedScope<'a> {
     }
 }
 
-/// Helper: resolve an effective final dimension from a DimensionValue and the largest child size.
-/// Keeps logic concise and documented in one place.
+/// Helper: resolve an effective final dimension from a DimensionValue and the
+/// largest child size. Keeps logic concise and documented in one place.
 fn resolve_final_dimension(dv: DimensionValue, largest_child: Px) -> Px {
     match dv {
         DimensionValue::Fixed(v) => v,
@@ -87,7 +88,8 @@ fn center_axis(container: Px, child: Px) -> Px {
     (container - child) / 2
 }
 
-/// Helper: compute child placement (x, y) inside the container according to alignment.
+/// Helper: compute child placement (x, y) inside the container according to
+/// alignment.
 fn compute_child_offset(
     alignment: Alignment,
     container_w: Px,
@@ -113,32 +115,46 @@ fn compute_child_offset(
 
 /// # boxed
 ///
-/// A container that overlays its children, aligning them relative to each other.
+/// A container that overlays its children, aligning them relative to each
+/// other.
 ///
 /// ## Usage
 ///
-/// Stack children on top of each other to create layered interfaces, such as a badge on an icon or text over an image.
+/// Stack children on top of each other to create layered interfaces, such as a
+/// badge on an icon or text over an image.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the container's dimensions and default alignment; see [`BoxedArgs`].
-/// - `scope_config` — a closure that receives a [`BoxedScope`] for adding children.
+/// - `args` — configures the container's dimensions and default alignment; see
+///   [`BoxedArgs`].
+/// - `scope_config` — a closure that receives a [`BoxedScope`] for adding
+///   children.
 ///
 /// ## Examples
 ///
 /// ```
-/// use tessera_ui_basic_components::boxed::{boxed, BoxedArgs};
-/// use tessera_ui_basic_components::text::{text, TextArgsBuilder};
 /// use tessera_ui_basic_components::alignment::Alignment;
+/// use tessera_ui_basic_components::boxed::{BoxedArgs, boxed};
+/// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
 ///
 /// boxed(BoxedArgs::default(), |scope| {
 ///     // Add a child that will be in the background (rendered first).
 ///     scope.child(|| {
-///         text(TextArgsBuilder::default().text("Background".to_string()).build().expect("builder construction failed"));
+///         text(
+///             TextArgsBuilder::default()
+///                 .text("Background".to_string())
+///                 .build()
+///                 .expect("builder construction failed"),
+///         );
 ///     });
 ///     // Add another child aligned to the center, which will appear on top.
 ///     scope.child_with_alignment(Alignment::Center, || {
-///         text(TextArgsBuilder::default().text("Foreground".to_string()).build().expect("builder construction failed"));
+///         text(
+///             TextArgsBuilder::default()
+///                 .text("Foreground".to_string())
+///                 .build()
+///                 .expect("builder construction failed"),
+///         );
 ///     });
 /// });
 /// ```

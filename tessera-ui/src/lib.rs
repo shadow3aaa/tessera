@@ -1,4 +1,5 @@
-//! tessera is a cross-platform UI library focused on performance and extensibility.
+//! tessera is a cross-platform UI library focused on performance and
+//! extensibility.
 //!
 //! # Guide
 //!
@@ -8,7 +9,8 @@
 //!
 //! The tessera-ui crate itself does not contain built-in components, but the official project provides a [basic component library](https://crates.io/crates/tessera-ui-basic-components).
 //!
-//! It contains commonly used UI components such as buttons, text boxes, labels, etc., which help developers quickly build user interfaces.
+//! It contains commonly used UI components such as buttons, text boxes, labels,
+//! etc., which help developers quickly build user interfaces.
 //!
 //! # Components
 //!
@@ -25,7 +27,8 @@
 //!
 //! Functions marked with the `#[tessera]` macro are tessera components.
 //!
-//! Component functions may contain other component functions, enabling nesting and composition.
+//! Component functions may contain other component functions, enabling nesting
+//! and composition.
 //!
 //! ```
 //! use tessera_ui::tessera;
@@ -43,11 +46,12 @@
 //!
 //! # Memoized State
 //!
-//! The `remember` and `remember_with_key` functions can be used to create persistent state across frames within a component.
+//! The `remember` and `remember_with_key` functions can be used to create
+//! persistent state across frames within a component.
 //!
 //! ```
 //! use std::sync::atomic::AtomicUsize;
-//! use tessera_ui::{tessera, remember};
+//! use tessera_ui::{remember, tessera};
 //!
 //! #[tessera]
 //! fn counter() {
@@ -55,9 +59,13 @@
 //! }
 //! ```
 //!
-//! Memoized state is implemented via macro-based control-flow analysis and cannot be used outside of functions marked with `#[tessera]`. It also must not be used inside measurement closures or event handler implementations.
+//! Memoized state is implemented via macro-based control-flow analysis and
+//! cannot be used outside of functions marked with `#[tessera]`. It also must
+//! not be used inside measurement closures or event handler implementations.
 //!
-//! `remember` handles most control flow situations, but it cannot guarantee stable identity inside loops. If you need to use memoized state within a loop, use `remember_with_key` and provide a stable key.
+//! `remember` handles most control flow situations, but it cannot guarantee
+//! stable identity inside loops. If you need to use memoized state within a
+//! loop, use `remember_with_key` and provide a stable key.
 //!
 //! ```
 //! use std::sync::atomic::AtomicUsize;
@@ -82,6 +90,96 @@
 //!
 //!         /* component implementation */
 //!     }
+//! }
+//! ```
+//!
+//! Or use the `key` function to influence the `remember` calls inside it.
+//!
+//! ```
+//! use std::sync::atomic::AtomicUsize;
+//! use tessera_ui::{key, remember, tessera};
+//!
+//! #[tessera]
+//! fn my_list(items: Vec<String>) {
+//!     for item in items {
+//!         key(item.clone(), || {
+//!             let state = remember(|| AtomicUsize::new(0));
+//!         });
+//!     }
+//! }
+//! ```
+//!
+//! This is equivalent to using `remember_with_key(item.clone(), ||
+//! AtomicUsize::new(0))`, but it is transparent to child components and
+//! necessary for virtual container-like components.
+//!
+//! However, `remember_with_key` is a litte cheaper than `key` + `remember`, so
+//! prefer it in simple cases.
+//!
+//! # Context
+//!
+//! The context mechanism is used to pass data down the component tree, avoiding
+//! the need to thread it through parameters.
+//!
+//! ```
+//! use tessera_ui::{Color, provide_context, tessera, use_context};
+//!
+//! #[derive(Default)]
+//! struct Theme {
+//!     color: Color,
+//! }
+//!
+//! #[tessera]
+//! fn parent() {
+//!     provide_context(Theme { color: Color::RED }, || {
+//!         child();
+//!     });
+//! }
+//!
+//! #[tessera]
+//! fn child() {
+//!     let theme = use_context::<Theme>();
+//!     assert_eq!(theme.color, Color::RED);
+//! }
+//! ```
+//!
+//! A context corresponds to a type. In the component tree, a component will
+//! receive the nearest parent-provided context of the same type; if none is
+//! provided, the type's default value will be used.
+//!
+//! ```
+//! use tessera_ui::{Color, provide_context, tessera, use_context};
+//!
+//! #[derive(Default)]
+//! struct Theme {
+//!     color: Color,
+//! }
+//!
+//! #[tessera]
+//! fn parent() {
+//!     provide_context(Theme { color: Color::RED }, || {
+//!         child();
+//!     });
+//! }
+//!
+//! #[tessera]
+//! fn child() {
+//!     let theme = use_context::<Theme>();
+//!     assert_eq!(theme.color, Color::RED);
+//!     provide_context(
+//!         Theme {
+//!             color: Color::GREEN,
+//!         },
+//!         || {
+//!             grandchild();
+//!         },
+//!     );
+//! }
+//!
+//! #[tessera]
+//! fn grandchild() {
+//!     let theme = use_context::<Theme>();
+//!     assert_eq!(theme.color, Color::GREEN);
 //! }
 //! ```
 //!
@@ -111,6 +209,7 @@ pub mod accessibility;
 pub mod clipboard;
 pub mod color;
 mod component_tree;
+pub mod context;
 mod cursor;
 pub mod dp;
 pub mod dyn_eq;
@@ -143,6 +242,7 @@ pub use crate::{
         ComponentTree, ComputedData, Constraint, DimensionValue, ImeRequest, InputHandlerFn,
         InputHandlerInput, MeasureFn, MeasureInput, MeasurementError,
     },
+    context::{provide_context, use_context},
     cursor::{CursorEvent, CursorEventContent, GestureState, PressKeyEventType, ScrollEventConent},
     dp::Dp,
     focus_state::Focus,
@@ -155,7 +255,7 @@ pub use crate::{
         },
         drawer::{self, DrawCommand, DrawablePipeline, PipelineRegistry, command},
     },
-    runtime::{GroupGuard, TesseraRuntime, remember, remember_with_key},
+    runtime::{key, remember, remember_with_key},
 };
 
 use ime_state::ImeState;

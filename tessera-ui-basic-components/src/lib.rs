@@ -5,6 +5,9 @@
 //! First, you need to register the pipelines provided by this crate.
 //!
 //! ```no_run
+//! # use tessera_ui::tessera;
+//! # #[tessera]
+//! # fn component() {
 //! use tessera_ui::renderer::Renderer;
 //! use tessera_ui_basic_components::pipelines::register_pipelines;
 //!
@@ -13,8 +16,10 @@
 //!     # || {}, // Placeholder for root component
 //!     |app| {
 //!         tessera_ui_basic_components::pipelines::register_pipelines(app);
-//!     }
+//!     },
 //! );
+//! # }
+//! # component();
 //! ```
 //!
 //! Then you can use the components in your UI.
@@ -22,14 +27,17 @@
 //! # Example
 //!
 //! ```
-//! use std::sync::Arc;
+//! # use tessera_ui::tessera;
+//! # #[tessera]
+//! # fn component() {
 //! use parking_lot::RwLock;
+//! use std::sync::Arc;
 //!
 //! use tessera_ui::Dp;
 //! use tessera_ui_basic_components::{
-//!     button::{button, ButtonArgs},
+//!     button::{ButtonArgs, button},
 //!     text::text,
-//!     text_editor::{text_editor, TextEditorArgs, TextEditorController},
+//!     text_editor::{TextEditorArgs, TextEditorController, text_editor},
 //! };
 //!
 //! // Button example
@@ -43,6 +51,8 @@
 //!
 //! // Text editor example
 //! text_editor(TextEditorArgs::default());
+//! # }
+//! # component();
 //! ```
 #![deny(missing_docs, clippy::unwrap_used)]
 
@@ -69,8 +79,8 @@ pub mod icon_button;
 pub mod image;
 pub mod image_vector;
 pub mod lazy_list;
-pub mod material_color;
 pub mod material_icons;
+pub mod theme;
 pub use pipelines::shape::command::{RippleProps, ShadowProps};
 pub use ripple_state::RippleState;
 pub mod menus;

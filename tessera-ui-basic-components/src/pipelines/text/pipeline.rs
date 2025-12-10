@@ -1,13 +1,18 @@
 //! Text Rendering Pipeline for UI Components
 //!
-//! This module implements the GPU pipeline and related utilities for efficient text rendering in Tessera UI components.
-//! It leverages the Glyphon engine for font management, shaping, and rasterization, providing high-quality and performant text output.
-//! Typical use cases include rendering static labels, paragraphs, and editable text fields within the UI.
+//! This module implements the GPU pipeline and related utilities for efficient
+//! text rendering in Tessera UI components. It leverages the Glyphon engine for
+//! font management, shaping, and rasterization, providing high-quality and
+//! performant text output. Typical use cases include rendering static labels,
+//! paragraphs, and editable text fields within the UI.
 //!
-//! The pipeline is designed to be reusable and efficient, sharing a static font system across the application to minimize resource usage.
-//! It exposes APIs for preparing, measuring, and rendering text, supporting advanced features such as font fallback, shaping, and multi-line layout.
+//! The pipeline is designed to be reusable and efficient, sharing a static font
+//! system across the application to minimize resource usage. It exposes APIs
+//! for preparing, measuring, and rendering text, supporting advanced features
+//! such as font fallback, shaping, and multi-line layout.
 //!
-//! This module is intended for integration into custom UI components and rendering flows that require flexible and robust text display.
+//! This module is intended for integration into custom UI components and
+//! rendering flows that require flexible and robust text display.
 
 use std::{num::NonZero, sync::OnceLock};
 
@@ -25,7 +30,8 @@ use super::command::{TextCommand, TextConstraint};
 /// to share it every where and avoid creating it multiple times.
 static FONT_SYSTEM: OnceLock<RwLock<glyphon::FontSystem>> = OnceLock::new();
 
-/// Create TextData is a heavy operation, so we provide a lru cache to store recently used TextData.
+/// Create TextData is a heavy operation, so we provide a lru cache to store
+/// recently used TextData.
 static TEXT_DATA_CACHE: OnceLock<RwLock<lru::LruCache<LruKey, TextData>>> = OnceLock::new();
 
 #[derive(PartialEq)]
@@ -98,7 +104,8 @@ pub fn write_font_system() -> RwLockWriteGuard<'static, glyphon::FontSystem> {
 /// A text renderer
 /// Pipeline for rendering text using the Glyphon engine.
 ///
-/// This struct manages font atlas, cache, viewport, and swash cache for efficient text rendering.
+/// This struct manages font atlas, cache, viewport, and swash cache for
+/// efficient text rendering.
 pub struct GlyphonTextRender {
     /// Glyphon font atlas, a heavy-weight, shared resource.
     atlas: glyphon::TextAtlas,
@@ -201,6 +208,12 @@ pub struct TextData {
     text_buffer: glyphon::Buffer,
     /// text area size
     pub size: [u32; 2],
+    base_color: Color,
+    current_color: Color,
+    text: String,
+    font_size: f32,
+    line_height: f32,
+    constraint: TextConstraint,
 }
 
 impl TextData {
@@ -231,49 +244,18 @@ impl TextData {
             return cache.clone();
         }
 
-        // Create text buffer
-        let mut text_buffer = glyphon::Buffer::new(
-            &mut write_font_system(),
-            glyphon::Metrics::new(size, line_height),
-        );
-        let color = glyphon::Color::rgba(
-            (color.r * 255.0) as u8,
-            (color.g * 255.0) as u8,
-            (color.b * 255.0) as u8,
-            (color.a * 255.0) as u8,
-        );
-        text_buffer.set_wrap(&mut write_font_system(), glyphon::Wrap::Glyph);
-        text_buffer.set_size(
-            &mut write_font_system(),
-            constraint.max_width,
-            constraint.max_height,
-        );
-        text_buffer.set_text(
-            &mut write_font_system(),
-            &text,
-            &glyphon::Attrs::new()
-                .family(fontdb::Family::SansSerif)
-                .color(color),
-            glyphon::Shaping::Advanced,
-            None,
-        );
-        text_buffer.shape_until_scroll(&mut write_font_system(), false);
-        // Calculate text bounds
-        // Get the layout runs
-        let mut run_width: f32 = 0.0;
-        // Calculate total height including descender for the last line
-        let metrics = text_buffer.metrics();
-        let num_lines = text_buffer.layout_runs().count() as f32;
-        let descent_amount = (metrics.line_height - metrics.font_size).max(0.0);
-        let total_height = num_lines * metrics.line_height + descent_amount;
-        for run in text_buffer.layout_runs() {
-            // Take the max. width of all lines.
-            run_width = run_width.max(run.line_w);
-        }
+        let (text_buffer, bounds) =
+            Self::build_buffer(&text, color, size, line_height, &constraint);
         // build text data
         let result = Self {
             text_buffer,
-            size: [run_width as u32, total_height.ceil() as u32],
+            size: bounds,
+            base_color: color,
+            current_color: color,
+            text,
+            font_size: size,
+            line_height,
+            constraint,
         };
         // Insert into cache
         write_lru_cache().put(key, result.clone());
@@ -298,6 +280,12 @@ impl TextData {
         Self {
             text_buffer,
             size: [run_width as u32, total_height.ceil() as u32],
+            base_color: Color::WHITE,
+            current_color: Color::WHITE,
+            text: String::new(),
+            font_size: metrics.font_size,
+            line_height: metrics.line_height,
+            constraint: TextConstraint::NONE,
         }
     }
 
@@ -315,8 +303,82 @@ impl TextData {
             top: start_pos.y.to_f32(),
             scale: 1.0,
             bounds,
-            default_color: glyphon::Color::rgb(0, 0, 0), // Black by default
+            default_color: glyphon::Color::rgba(
+                (self.current_color.r * 255.0) as u8,
+                (self.current_color.g * 255.0) as u8,
+                (self.current_color.b * 255.0) as u8,
+                (self.current_color.a * 255.0) as u8,
+            ),
             custom_glyphs: &[],
         }
+    }
+
+    fn build_buffer(
+        text: &str,
+        color: Color,
+        size: f32,
+        line_height: f32,
+        constraint: &TextConstraint,
+    ) -> (glyphon::Buffer, [u32; 2]) {
+        // Create text buffer
+        let mut text_buffer = glyphon::Buffer::new(
+            &mut write_font_system(),
+            glyphon::Metrics::new(size, line_height),
+        );
+        let color = glyphon::Color::rgba(
+            (color.r * 255.0) as u8,
+            (color.g * 255.0) as u8,
+            (color.b * 255.0) as u8,
+            (color.a * 255.0) as u8,
+        );
+        text_buffer.set_wrap(&mut write_font_system(), glyphon::Wrap::Glyph);
+        text_buffer.set_size(
+            &mut write_font_system(),
+            constraint.max_width,
+            constraint.max_height,
+        );
+        text_buffer.set_text(
+            &mut write_font_system(),
+            text,
+            &glyphon::Attrs::new()
+                .family(fontdb::Family::SansSerif)
+                .color(color),
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        text_buffer.shape_until_scroll(&mut write_font_system(), false);
+        // Calculate text bounds
+        let mut run_width: f32 = 0.0;
+        let metrics = text_buffer.metrics();
+        let num_lines = text_buffer.layout_runs().count() as f32;
+        let descent_amount = (metrics.line_height - metrics.font_size).max(0.0);
+        let total_height = num_lines * metrics.line_height + descent_amount;
+        for run in text_buffer.layout_runs() {
+            run_width = run_width.max(run.line_w);
+        }
+        (text_buffer, [run_width as u32, total_height.ceil() as u32])
+    }
+
+    pub(crate) fn apply_opacity(&mut self, opacity: f32) {
+        let target_alpha = (self.base_color.a * opacity).clamp(0.0, 1.0);
+        let target_color = self.base_color.with_alpha(target_alpha);
+        if (target_color.a - self.current_color.a).abs() <= f32::EPSILON
+            && (target_color.r - self.current_color.r).abs() <= f32::EPSILON
+            && (target_color.g - self.current_color.g).abs() <= f32::EPSILON
+            && (target_color.b - self.current_color.b).abs() <= f32::EPSILON
+        {
+            return;
+        }
+
+        let (buffer, bounds) = Self::build_buffer(
+            &self.text,
+            target_color,
+            self.font_size,
+            self.line_height,
+            &self.constraint,
+        );
+        self.text_buffer = buffer;
+        self.size = bounds;
+        self.current_color = target_color;
     }
 }

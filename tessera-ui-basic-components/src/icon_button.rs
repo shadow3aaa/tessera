@@ -1,4 +1,4 @@
-//! An interactive button that displays an icon, following Material Design 3 specifications.
+//! An interactive button that displays an icon.
 //!
 //! ## Usage
 //!
@@ -6,14 +6,14 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
-use tessera_ui::{Color, Dp, tessera};
+use tessera_ui::{Color, Dp, tessera, use_context};
 
 use crate::{
     button::{ButtonArgsBuilder, button},
     glass_button::{GlassButtonArgs, glass_button},
     icon::{IconArgs, icon},
-    material_color::{blend_over, global_material_scheme},
     shape_def::Shape,
+    theme::MaterialColorScheme,
 };
 
 /// Variations of the icon button as per Material Design 3.
@@ -75,7 +75,8 @@ pub struct GlassIconButtonArgs {
 }
 
 impl GlassIconButtonArgsBuilder {
-    /// Override the [`GlassButtonArgs`] using either a ready instance or a builder-produced value.
+    /// Override the [`GlassButtonArgs`] using either a ready instance or a
+    /// builder-produced value.
     pub fn button(mut self, button: impl Into<GlassButtonArgs>) -> Self {
         self.button = Some(button.into());
         self
@@ -94,28 +95,33 @@ impl GlassIconButtonArgsBuilder {
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the button variant, icon, and behavior; see [`IconButtonArgs`].
+/// - `args` — configures the button variant, icon, and behavior; see
+///   [`IconButtonArgs`].
 ///
 /// ## Examples
 ///
 /// ```no_run
 /// use std::sync::Arc;
 /// use tessera_ui_basic_components::{
-///     icon_button::{icon_button, IconButtonArgsBuilder, IconButtonVariant},
 ///     icon::IconArgsBuilder,
+///     icon_button::{IconButtonArgsBuilder, IconButtonVariant, icon_button},
 ///     image_vector::{ImageVectorSource, load_image_vector_from_source},
 /// };
 ///
 /// let svg_path = "../assets/emoji_u1f416.svg";
-/// let vector_data = load_image_vector_from_source(
-///     &ImageVectorSource::Path(svg_path.to_string())
-/// ).unwrap();
+/// let vector_data =
+///     load_image_vector_from_source(&ImageVectorSource::Path(svg_path.to_string())).unwrap();
 ///
 /// icon_button(
 ///     IconButtonArgsBuilder::default()
 ///         .variant(IconButtonVariant::Filled)
 ///         .on_click(|| println!("Clicked!"))
-///         .icon(IconArgsBuilder::default().content(vector_data.clone()).build().expect("builder construction failed"))
+///         .icon(
+///             IconArgsBuilder::default()
+///                 .content(vector_data.clone())
+///                 .build()
+///                 .expect("builder construction failed"),
+///         )
 ///         .build()
 ///         .unwrap(),
 /// );
@@ -123,7 +129,7 @@ impl GlassIconButtonArgsBuilder {
 #[tessera]
 pub fn icon_button(args: impl Into<IconButtonArgs>) {
     let args: IconButtonArgs = args.into();
-    let scheme = global_material_scheme();
+    let scheme = use_context::<MaterialColorScheme>();
 
     // Determine colors based on variant
     let (default_container_color, default_content_color, border_width, border_color) =
@@ -158,7 +164,7 @@ pub fn icon_button(args: impl Into<IconButtonArgs>) {
     {
         Some(hover_overlay_color.with_alpha(0.08))
     } else {
-        Some(blend_over(container_color, hover_overlay_color, 0.08))
+        Some(container_color.blend_over(hover_overlay_color, 0.08))
     };
 
     let ripple_color = hover_overlay_color.with_alpha(0.12);
@@ -189,9 +195,14 @@ pub fn icon_button(args: impl Into<IconButtonArgs>) {
     icon_args.size = Dp(24.0);
     icon_args.tint = content_color;
 
-    button(button_builder.build().unwrap(), move || {
-        icon(icon_args);
-    });
+    button(
+        button_builder
+            .build()
+            .expect("failed to build icon button args"),
+        move || {
+            icon(icon_args);
+        },
+    );
 }
 
 /// # glass_icon_button
@@ -204,23 +215,23 @@ pub fn icon_button(args: impl Into<IconButtonArgs>) {
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the underlying glass button and the icon; see [`GlassIconButtonArgs`].
+/// - `args` — configures the underlying glass button and the icon; see
+///   [`GlassIconButtonArgs`].
 ///
 /// ## Examples
 ///
 /// ```no_run
 /// use std::sync::Arc;
 /// use tessera_ui_basic_components::{
-///     icon_button::{glass_icon_button, GlassIconButtonArgsBuilder},
 ///     glass_button::GlassButtonArgsBuilder,
 ///     icon::IconArgsBuilder,
+///     icon_button::{GlassIconButtonArgsBuilder, glass_icon_button},
 ///     image_vector::{ImageVectorSource, load_image_vector_from_source},
 /// };
 ///
 /// let svg_path = "../assets/emoji_u1f416.svg";
-/// let vector_data = load_image_vector_from_source(
-///     &ImageVectorSource::Path(svg_path.to_string())
-/// ).unwrap();
+/// let vector_data =
+///     load_image_vector_from_source(&ImageVectorSource::Path(svg_path.to_string())).unwrap();
 ///
 /// glass_icon_button(
 ///     GlassIconButtonArgsBuilder::default()
@@ -228,9 +239,14 @@ pub fn icon_button(args: impl Into<IconButtonArgs>) {
 ///             GlassButtonArgsBuilder::default()
 ///                 .on_click(Arc::new(|| {}))
 ///                 .build()
-///                 .unwrap()
+///                 .unwrap(),
 ///         )
-///         .icon(IconArgsBuilder::default().content(vector_data).build().expect("builder construction failed"))
+///         .icon(
+///             IconArgsBuilder::default()
+///                 .content(vector_data)
+///                 .build()
+///                 .expect("builder construction failed"),
+///         )
 ///         .build()
 ///         .unwrap(),
 /// );

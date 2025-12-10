@@ -9,7 +9,7 @@ use derive_builder::Builder;
 use glyphon::{Action as GlyphonAction, Edit};
 use tessera_ui::{
     Color, CursorEventContent, DimensionValue, Dp, ImeRequest, Px, PxPosition, accesskit::Role,
-    remember, tessera, winit,
+    remember, tessera, use_context, winit,
 };
 
 use crate::{
@@ -18,9 +18,11 @@ use crate::{
     shape_def::{RoundedCorner, Shape},
     surface::{SurfaceArgsBuilder, surface},
     text_edit_core::{ClickType, text_edit_core},
+    theme::MaterialColorScheme,
 };
 
-/// State structure for the text editor, managing text content, cursor, selection, and editing logic.
+/// State structure for the text editor, managing text content, cursor,
+/// selection, and editing logic.
 pub use crate::text_edit_core::{TextEditorController, TextEditorControllerInner};
 
 /// Arguments for configuring the [`text_editor`] component.
@@ -33,23 +35,26 @@ pub struct TextEditorArgs {
     /// Height constraint for the text editor. Defaults to `Wrap`.
     #[builder(default = "DimensionValue::WRAP", setter(into))]
     pub height: DimensionValue,
-    /// Called when the text content changes. The closure receives the new text content and returns the updated content.
+    /// Called when the text content changes. The closure receives the new text
+    /// content and returns the updated content.
     #[builder(default = "Arc::new(|_| { String::new() })")]
     pub on_change: Arc<dyn Fn(String) -> String + Send + Sync>,
-    /// Minimum width in density-independent pixels. Defaults to 120dp if not specified.
+    /// Minimum width in density-independent pixels. Defaults to 120dp if not
+    /// specified.
     #[builder(default = "None")]
     pub min_width: Option<Dp>,
-    /// Minimum height in density-independent pixels. Defaults to line height + padding if not specified.
+    /// Minimum height in density-independent pixels. Defaults to line height +
+    /// padding if not specified.
     #[builder(default = "None")]
     pub min_height: Option<Dp>,
     /// Background color of the text editor (RGBA). Defaults to light gray.
-    #[builder(default = "Some(crate::material_color::global_material_scheme().surface_variant)")]
+    #[builder(default = "Some(use_context::<MaterialColorScheme>().surface_variant)")]
     pub background_color: Option<Color>,
     /// Border width in Dp. Defaults to 1.0 Dp.
     #[builder(default = "Dp(1.0)")]
     pub border_width: Dp,
     /// Border color (RGBA). Defaults to gray.
-    #[builder(default = "Some(crate::material_color::global_material_scheme().outline_variant)")]
+    #[builder(default = "Some(use_context::<MaterialColorScheme>().outline_variant)")]
     pub border_color: Option<Color>,
     /// The shape of the text editor container.
     #[builder(default = "Shape::RoundedRectangle {
@@ -63,15 +68,14 @@ pub struct TextEditorArgs {
     #[builder(default = "Dp(5.0)")]
     pub padding: Dp,
     /// Border color when focused (RGBA). Defaults to blue.
-    #[builder(default = "Some(crate::material_color::global_material_scheme().primary)")]
+    #[builder(default = "Some(use_context::<MaterialColorScheme>().primary)")]
     pub focus_border_color: Option<Color>,
     /// Background color when focused (RGBA). Defaults to white.
-    #[builder(default = "Some(crate::material_color::global_material_scheme().surface)")]
+    #[builder(default = "Some(use_context::<MaterialColorScheme>().surface)")]
     pub focus_background_color: Option<Color>,
-    /// Color for text selection highlight (RGBA). Defaults to light blue with transparency.
-    #[builder(
-        default = "Some(crate::material_color::global_material_scheme().primary.with_alpha(0.35))"
-    )]
+    /// Color for text selection highlight (RGBA). Defaults to light blue with
+    /// transparency.
+    #[builder(default = "Some(use_context::<MaterialColorScheme>().primary.with_alpha(0.35))")]
     pub selection_color: Option<Color>,
     /// Optional label announced by assistive technologies.
     #[builder(default, setter(strip_option, into))]
@@ -104,17 +108,22 @@ impl Default for TextEditorArgs {
 ///
 /// # Usage
 ///
-/// Create an interactive text editor for forms, note-taking, or other text input scenarios.
+/// Create an interactive text editor for forms, note-taking, or other text
+/// input scenarios.
 ///
 /// # Parameters
 ///
-/// - `args` — configures the editor's appearance and layout; see [`TextEditorArgs`].
+/// - `args` — configures the editor's appearance and layout; see
+///   [`TextEditorArgs`].
 ///
 /// # Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use tessera_ui::Dp;
-/// use tessera_ui_basic_components::text_editor::{text_editor, TextEditorArgsBuilder};
+/// use tessera_ui_basic_components::text_editor::{TextEditorArgsBuilder, text_editor};
 ///
 /// text_editor(
 ///     TextEditorArgsBuilder::default()
@@ -123,6 +132,8 @@ impl Default for TextEditorArgs {
 ///         .build()
 ///         .unwrap(),
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn text_editor(args: impl Into<TextEditorArgs>) {
@@ -148,23 +159,28 @@ pub fn text_editor(args: impl Into<TextEditorArgs>) {
 ///
 /// # Usage
 ///
-/// Use this component when you need to control the text editor state externally,
-/// for example to synchronize text with other components or to programmatically
-/// modify the text content or selection.
+/// Use this component when you need to control the text editor state
+/// externally, for example to synchronize text with other components or to
+/// programmatically modify the text content or selection.
 ///
 /// # Parameters
 ///
-/// - `args` — configures the editor's appearance and layout; see [`TextEditorArgs`].
-/// - `controller` — a `TextEditorController` to manage the editor's content, cursor, and selection.
+/// - `args` — configures the editor's appearance and layout; see
+///   [`TextEditorArgs`].
+/// - `controller` — a `TextEditorController` to manage the editor's content,
+///   cursor, and selection.
 ///
 /// # Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
 /// use tessera_ui::Dp;
 /// use tessera_ui_basic_components::{
-///     text_editor::{text_editor_with_controller, TextEditorArgsBuilder, TextEditorController},
 ///     text::write_font_system,
+///     text_editor::{TextEditorArgsBuilder, TextEditorController, text_editor_with_controller},
 /// };
 ///
 /// let controller = Arc::new(TextEditorController::new(Dp(14.0), None));
@@ -181,6 +197,8 @@ pub fn text_editor(args: impl Into<TextEditorArgs>) {
 ///         .unwrap(),
 ///     controller,
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn text_editor_with_controller(
@@ -258,7 +276,8 @@ pub fn text_editor_with_controller(
                     let text_relative_x_px = cursor_pos.x - padding_px - border_width_px;
                     let text_relative_y_px = cursor_pos.y - padding_px - border_width_px;
 
-                    // Only process if the click is within the text area (non-negative relative coords)
+                    // Only process if the click is within the text area (non-negative relative
+                    // coords)
                     if text_relative_x_px >= Px(0) && text_relative_y_px >= Px(0) {
                         let text_relative_pos =
                             PxPosition::new(text_relative_x_px, text_relative_y_px);
@@ -399,7 +418,8 @@ pub fn text_editor_with_controller(
                 editor.set_selection(glyphon::cosmic_text::Selection::Normal(
                     glyphon::Cursor::new(0, 0),
                 ));
-                // Move cursor to the end, which extends the selection (use BufferEnd for full document)
+                // Move cursor to the end, which extends the selection (use BufferEnd for full
+                // document)
                 editor.action(
                     &mut write_font_system(),
                     GlyphonAction::Motion(glyphon::cosmic_text::Motion::BufferEnd),
@@ -567,23 +587,22 @@ fn determine_background_color(args: &TextEditorArgs, state: &TextEditorControlle
     if state.read().focus_handler().is_focused() {
         args.focus_background_color
             .or(args.background_color)
-            .unwrap_or(crate::material_color::global_material_scheme().surface)
+            .unwrap_or(use_context::<MaterialColorScheme>().surface)
     } else {
         args.background_color
-            .unwrap_or(crate::material_color::global_material_scheme().surface_variant)
+            .unwrap_or(use_context::<MaterialColorScheme>().surface_variant)
     }
 }
 
 /// Determine border color based on focus state
 fn determine_border_color(args: &TextEditorArgs, state: &TextEditorController) -> Option<Color> {
     if state.read().focus_handler().is_focused() {
-        args.focus_border_color.or(args.border_color).or(Some(
-            crate::material_color::global_material_scheme().primary,
-        ))
+        args.focus_border_color
+            .or(args.border_color)
+            .or(Some(use_context::<MaterialColorScheme>().primary))
     } else {
-        args.border_color.or(Some(
-            crate::material_color::global_material_scheme().outline_variant,
-        ))
+        args.border_color
+            .or(Some(use_context::<MaterialColorScheme>().outline_variant))
     }
 }
 
@@ -598,19 +617,20 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple();
+    /// # }
+    /// # component();
     /// ```
     pub fn simple() -> Self {
         TextEditorArgsBuilder::default()
             .min_width(Some(Dp(120.0)))
-            .background_color(Some(
-                crate::material_color::global_material_scheme().surface_variant,
-            ))
+            .background_color(Some(use_context::<MaterialColorScheme>().surface_variant))
             .border_width(Dp(1.0))
-            .border_color(Some(
-                crate::material_color::global_material_scheme().outline_variant,
-            ))
+            .border_color(Some(use_context::<MaterialColorScheme>().outline_variant))
             .shape(Shape::RoundedRectangle {
                 top_left: RoundedCorner::manual(Dp(0.0), 3.0),
                 top_right: RoundedCorner::manual(Dp(0.0), 3.0),
@@ -627,8 +647,13 @@ impl TextEditorArgs {
     ///
     /// # Example
     /// ```
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::outlined();
+    /// # }
+    /// # component();
     /// ```
     pub fn outlined() -> Self {
         Self::simple()
@@ -642,8 +667,13 @@ impl TextEditorArgs {
     ///
     /// # Example
     /// ```
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::minimal();
+    /// # }
+    /// # component();
     /// ```
     pub fn minimal() -> Self {
         TextEditorArgsBuilder::default()
@@ -667,9 +697,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::{DimensionValue, Px};
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_width(DimensionValue::Fixed(Px(200)));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_width(mut self, width: DimensionValue) -> Self {
         self.width = width;
@@ -681,9 +716,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::{DimensionValue, Px};
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_height(DimensionValue::Fixed(Px(100)));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_height(mut self, height: DimensionValue) -> Self {
         self.height = height;
@@ -695,9 +735,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Dp;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_min_width(Dp(80.0));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_min_width(mut self, min_width: Dp) -> Self {
         self.min_width = Some(min_width);
@@ -709,9 +754,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Dp;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_min_height(Dp(40.0));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_min_height(mut self, min_height: Dp) -> Self {
         self.min_height = Some(min_height);
@@ -722,9 +772,14 @@ impl TextEditorArgs {
     ///
     /// # Example
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Color;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_background_color(Color::WHITE);
+    /// # }
+    /// # component();
     /// ```
     pub fn with_background_color(mut self, color: Color) -> Self {
         self.background_color = Some(color);
@@ -736,10 +791,15 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Dp;
     /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     ///
     /// let args = TextEditorArgs::simple().with_border_width(Dp(1.0));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_border_width(mut self, width: Dp) -> Self {
         self.border_width = width;
@@ -751,9 +811,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Color;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_border_color(Color::BLACK);
+    /// # }
+    /// # component();
     /// ```
     pub fn with_border_color(mut self, color: Color) -> Self {
         self.border_color = Some(color);
@@ -765,15 +830,20 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Dp;
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// use tessera_ui_basic_components::shape_def::{RoundedCorner, Shape};
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_shape(Shape::RoundedRectangle {
     ///     top_left: RoundedCorner::manual(Dp(8.0), 3.0),
     ///     top_right: RoundedCorner::manual(Dp(8.0), 3.0),
     ///     bottom_right: RoundedCorner::manual(Dp(8.0), 3.0),
     ///     bottom_left: RoundedCorner::manual(Dp(8.0), 3.0),
     /// });
+    /// # }
+    /// # component();
     /// ```
     pub fn with_shape(mut self, shape: Shape) -> Self {
         self.shape = shape;
@@ -785,9 +855,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Dp;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_padding(Dp(12.0));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_padding(mut self, padding: Dp) -> Self {
         self.padding = padding;
@@ -799,9 +874,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Color;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_focus_border_color(Color::new(0.0, 0.5, 1.0, 1.0));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_focus_border_color(mut self, color: Color) -> Self {
         self.focus_border_color = Some(color);
@@ -813,9 +893,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Color;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_focus_background_color(Color::WHITE);
+    /// # }
+    /// # component();
     /// ```
     pub fn with_focus_background_color(mut self, color: Color) -> Self {
         self.focus_background_color = Some(color);
@@ -827,9 +912,14 @@ impl TextEditorArgs {
     /// # Example
     ///
     /// ```
-    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
+    /// # use tessera_ui::tessera;
+    /// # #[tessera]
+    /// # fn component() {
     /// use tessera_ui::Color;
+    /// use tessera_ui_basic_components::text_editor::TextEditorArgs;
     /// let args = TextEditorArgs::simple().with_selection_color(Color::new(0.5, 0.7, 1.0, 0.4));
+    /// # }
+    /// # component();
     /// ```
     pub fn with_selection_color(mut self, color: Color) -> Self {
         self.selection_color = Some(color);

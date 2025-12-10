@@ -4,7 +4,7 @@ use closure::closure;
 use tessera_ui::{
     Color, DimensionValue, Dp,
     router::{Router, router_root},
-    shard, tessera,
+    shard, tessera, use_context,
 };
 use tessera_ui_basic_components::{
     ShadowProps,
@@ -14,7 +14,7 @@ use tessera_ui_basic_components::{
         bottom_sheet_provider_with_controller,
     },
     boxed::{BoxedArgsBuilder, boxed},
-    button::{ButtonArgsBuilder, button},
+    button::{ButtonArgs, ButtonArgsBuilder, button},
     column::{ColumnArgs, column},
     dialog::{
         BasicDialogArgsBuilder, DialogController, DialogProviderArgsBuilder, DialogStyle,
@@ -22,7 +22,6 @@ use tessera_ui_basic_components::{
     },
     icon::{IconArgsBuilder, icon},
     lazy_list::{LazyColumnArgsBuilder, lazy_column},
-    material_color::global_material_scheme,
     material_icons::filled,
     navigation_bar::{NavigationBarItemBuilder, navigation_bar},
     row::{RowArgsBuilder, row},
@@ -32,8 +31,10 @@ use tessera_ui_basic_components::{
         SideBarController, SideBarProviderArgsBuilder, SideBarStyle,
         side_bar_provider_with_controller,
     },
-    surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
+    spacer::{SpacerArgs, spacer},
+    surface::{SurfaceArgs, SurfaceArgsBuilder, SurfaceStyle, surface},
     text::{TextArgsBuilder, text},
+    theme::MaterialColorScheme,
 };
 
 use crate::example_components::{
@@ -87,7 +88,7 @@ pub fn app(#[state] app_state: AppState) {
                             bottom_sheet_controller.close();
                         }),
                     ))
-                    .style(BottomSheetStyle::Glass)
+                    .style(BottomSheetStyle::Material)
                     .build()
                     .unwrap(),
                 app_state.bottom_sheet_controller.clone(),
@@ -98,7 +99,7 @@ pub fn app(#[state] app_state: AppState) {
                             .on_close_request(Arc::new(closure!(clone dialog_controller, || {
                                 dialog_controller.close();
                             })))
-                            .style(DialogStyle::Glass)
+                            .style(DialogStyle::Material)
                             .build()
                             .unwrap(),
                         dialog_controller.clone(),
@@ -196,30 +197,24 @@ pub fn app(#[state] app_state: AppState) {
                             basic_dialog(
                                 BasicDialogArgsBuilder::default()
                                     .headline("Basic Dialog")
-                                    .supporting_text("This is a basic dialog component following Material Design 3 specifications.")
+                                    .supporting_text("This is a basic dialog component.")
                                     .icon(Arc::new(|| {
                                         let icon_content = filled::info_icon();
                                         icon(IconArgsBuilder::default().content(icon_content).build().unwrap());
                                     }))
                                     .confirm_button(closure!(clone dialog_controller, || {
                                         button(
-                                            ButtonArgsBuilder::default()
-                                                .on_click(Arc::new(closure!(clone dialog_controller, || {
+                                            ButtonArgs::text(Arc::new(closure!(clone dialog_controller, || {
                                                     dialog_controller.close();
-                                                })))
-                                                .build()
-                                                .unwrap(),
+                                                }))),
                                             || text("Confirm"),
                                         );
                                     }))
                                     .dismiss_button(closure!(clone dialog_controller, || {
                                         button(
-                                            ButtonArgsBuilder::default()
-                                                .on_click(Arc::new(closure!(clone dialog_controller, || {
+                                            ButtonArgs::text(Arc::new(closure!(clone dialog_controller, || {
                                                     dialog_controller.close();
-                                                })))
-                                                .build()
-                                                .unwrap(),
+                                                }))),
                                             || text("Dismiss"),
                                         );
                                     }))
@@ -230,10 +225,26 @@ pub fn app(#[state] app_state: AppState) {
                     );
                 },
                 || {
-                    text(
-                        r#"Hi, I'm bottom sheet!
+                    surface(
+                        SurfaceArgs {
+                            style: Color::TRANSPARENT.into(),
+                            padding: Dp(16.0),
+                            ..Default::default()
+                        },
+                        || {
+                            column(ColumnArgs::default(), |scope| {
+                                scope.child(|| {
+                                    text("Hello from bottom sheet!");
+                                });
 
-Bottom sheets are sheets at bottom, bottom at sheets, sheets bottom at, at bottom sheets..."#,
+                                scope.child(|| {
+                                    spacer(SpacerArgs {
+                                        height: Dp(250.0).into(),
+                                        ..Default::default()
+                                    });
+                                });
+                            });
+                        },
                     );
                 },
             );
@@ -530,7 +541,7 @@ fn component_card(title: &str, description: &str, on_click: Arc<dyn Fn() + Send 
             .padding(Dp(25.0))
             .on_click(on_click)
             .style(SurfaceStyle::Filled {
-                color: global_material_scheme().primary_container,
+                color: use_context::<MaterialColorScheme>().primary_container,
             })
             .shape(Shape::rounded_rectangle(Dp(25.0)))
             .shadow(ShadowProps::default())
@@ -552,7 +563,7 @@ fn component_card(title: &str, description: &str, on_click: Arc<dyn Fn() + Send 
                         TextArgsBuilder::default()
                             .text(description)
                             .size(Dp(14.0))
-                            .color(global_material_scheme().on_surface_variant)
+                            .color(use_context::<MaterialColorScheme>().on_surface_variant)
                             .build()
                             .unwrap(),
                     );
@@ -587,7 +598,11 @@ fn top_app_bar() {
                             .padding(Dp(5.0))
                             .shape(Shape::Ellipse)
                             .color(Color::TRANSPARENT)
-                            .hover_color(Some(global_material_scheme().on_surface.with_alpha(0.1)))
+                            .hover_color(Some(
+                                use_context::<MaterialColorScheme>()
+                                    .on_surface
+                                    .with_alpha(0.1),
+                            ))
                             .width(DimensionValue::Fixed(Dp(40.0).into()))
                             .height(DimensionValue::Fixed(Dp(40.0).into()));
                         if Router::with(|router| router.len()) > 1 {
@@ -655,7 +670,7 @@ Copyright 2025 Tessera UI Framework Developers
                                     .to_string(),
                                 )
                                 .size(Dp(20.0))
-                                .color(global_material_scheme().on_surface)
+                                .color(use_context::<MaterialColorScheme>().on_surface)
                                 .build()
                                 .unwrap(),
                         );

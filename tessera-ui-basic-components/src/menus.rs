@@ -7,7 +7,7 @@ use derive_builder::Builder;
 use parking_lot::RwLock;
 use tessera_ui::{
     Color, ComputedData, Constraint, CursorEvent, CursorEventContent, DimensionValue, Dp, Px,
-    PxPosition, PxSize, accesskit::Role, remember, tessera, winit,
+    PxPosition, PxSize, accesskit::Role, remember, tessera, use_context, winit,
 };
 
 use crate::{
@@ -15,13 +15,13 @@ use crate::{
     alignment::CrossAxisAlignment,
     checkmark::{CheckmarkArgsBuilder, checkmark},
     column::{ColumnArgsBuilder, column},
-    material_color::{blend_over, global_material_scheme},
     pos_misc::is_position_in_rect,
     row::{RowArgsBuilder, row},
     shape_def::Shape,
     spacer::{SpacerArgsBuilder, spacer},
     surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
     text::{TextArgsBuilder, text},
+    theme::MaterialColorScheme,
 };
 
 const MENU_MIN_WIDTH: Dp = Dp(112.0);
@@ -49,7 +49,7 @@ fn default_menu_shape() -> Shape {
 }
 
 fn default_menu_shadow() -> Option<ShadowProps> {
-    let scheme = global_material_scheme();
+    let scheme = use_context::<MaterialColorScheme>();
     Some(ShadowProps {
         color: scheme.shadow.with_alpha(0.12),
         offset: [0.0, 3.0],
@@ -58,12 +58,12 @@ fn default_menu_shadow() -> Option<ShadowProps> {
 }
 
 fn default_menu_color() -> Color {
-    global_material_scheme().surface
+    use_context::<MaterialColorScheme>().surface
 }
 
 fn default_hover_color() -> Color {
-    let scheme = global_material_scheme();
-    blend_over(scheme.surface, scheme.on_surface, 0.08)
+    let scheme = use_context::<MaterialColorScheme>();
+    scheme.surface.blend_over(scheme.on_surface, 0.08)
 }
 
 fn default_scrim_color() -> Color {
@@ -159,8 +159,9 @@ impl MenuController {
 
     /// Opens the menu.
     ///
-    /// If an anchor was previously set via [`open_at`](Self::open_at), it is reused.
-    /// Otherwise, the menu defaults to anchoring to the provider's content.
+    /// If an anchor was previously set via [`open_at`](Self::open_at), it is
+    /// reused. Otherwise, the menu defaults to anchoring to the provider's
+    /// content.
     pub fn open(&self) {
         self.inner.write().is_open = true;
     }
@@ -218,7 +219,8 @@ pub struct MenuProviderArgs {
     /// Additional x/y offset applied after placement relative to the anchor.
     #[builder(default = "[Dp(0.0), MENU_VERTICAL_GAP]")]
     pub offset: [Dp; 2],
-    /// Width behavior of the menu container. Defaults to the Material 112–280 dp range.
+    /// Width behavior of the menu container. Defaults to the Material 112–280
+    /// dp range.
     #[builder(default = "default_menu_width()")]
     pub width: DimensionValue,
     /// Maximum height of the menu before scrolling is required.
@@ -227,13 +229,15 @@ pub struct MenuProviderArgs {
     /// Shape of the menu container.
     #[builder(default = "default_menu_shape()")]
     pub shape: Shape,
-    /// Optional shadow representing elevation. Defaults to a soft Material shadow.
+    /// Optional shadow representing elevation. Defaults to a soft Material
+    /// shadow.
     #[builder(default = "default_menu_shadow()", setter(strip_option))]
     pub shadow: Option<ShadowProps>,
     /// Background color of the menu container.
     #[builder(default = "default_menu_color()")]
     pub container_color: Color,
-    /// Color of the invisible background layer. Defaults to transparent (menus do not dim content).
+    /// Color of the invisible background layer. Defaults to transparent (menus
+    /// do not dim content).
     #[builder(default = "default_scrim_color()")]
     pub scrim_color: Color,
     /// Whether a background click should dismiss the menu.
@@ -371,23 +375,29 @@ fn apply_close_action(
 ///
 /// # Usage
 ///
-/// Wrap page content and show contextual or overflow actions aligned to a trigger element.
+/// Wrap page content and show contextual or overflow actions aligned to a
+/// trigger element.
 ///
 /// # Parameters
 ///
-/// - `args` — configures placement, styling, and dismissal behavior; see [`MenuProviderArgs`].
+/// - `args` — configures placement, styling, and dismissal behavior; see
+///   [`MenuProviderArgs`].
 /// - `main_content` — closure rendering the underlying page UI.
-/// - `menu_content` — closure that receives a [`MenuScope`] to register menu items.
+/// - `menu_content` — closure that receives a [`MenuScope`] to register menu
+///   items.
 ///
 /// # Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
 /// use tessera_ui::Dp;
 /// use tessera_ui_basic_components::{
 ///     menus::{
-///         menu_provider, MenuAnchor, MenuItemArgsBuilder, MenuPlacement,
-///         MenuProviderArgsBuilder, MenuScope,
+///         MenuAnchor, MenuItemArgsBuilder, MenuPlacement, MenuProviderArgsBuilder, MenuScope,
+///         menu_provider,
 ///     },
 ///     text::text,
 /// };
@@ -413,6 +423,8 @@ fn apply_close_action(
 ///         );
 ///     },
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn menu_provider(
@@ -436,29 +448,36 @@ pub fn menu_provider(
 
 /// # menu_provider_with_controller
 ///
-/// Provides a Material Design 3 menu overlay anchored to a rectangle with an external controller.
+/// Provides a Material Design 3 menu overlay anchored to a rectangle with an
+/// external controller.
 ///
 /// # Usage
 ///
-/// Wrap page content and show contextual or overflow actions aligned to a trigger element,
-/// controlled via a shared [`MenuController`].
+/// Wrap page content and show contextual or overflow actions aligned to a
+/// trigger element, controlled via a shared [`MenuController`].
 ///
 /// # Parameters
 ///
-/// - `args` — configures placement, styling, and dismissal behavior; see [`MenuProviderArgs`].
-/// - `controller` — A [`MenuController`] controlling open/close and anchor position.
+/// - `args` — configures placement, styling, and dismissal behavior; see
+///   [`MenuProviderArgs`].
+/// - `controller` — A [`MenuController`] controlling open/close and anchor
+///   position.
 /// - `main_content` — closure rendering the underlying page UI.
-/// - `menu_content` — closure that receives a [`MenuScope`] to register menu items.
+/// - `menu_content` — closure that receives a [`MenuScope`] to register menu
+///   items.
 ///
 /// # Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
-/// use tessera_ui::{Dp, tessera, remember};
+/// use tessera_ui::{Dp, remember, tessera};
 /// use tessera_ui_basic_components::{
 ///     menus::{
-///         menu_provider_with_controller, MenuAnchor, MenuController,
-///         MenuItemArgsBuilder, MenuPlacement, MenuProviderArgsBuilder, MenuScope,
+///         MenuAnchor, MenuController, MenuItemArgsBuilder, MenuPlacement,
+///         MenuProviderArgsBuilder, MenuScope, menu_provider_with_controller,
 ///     },
 ///     text::text,
 /// };
@@ -473,9 +492,7 @@ pub fn menu_provider(
 ///     menu_provider_with_controller(
 ///         args,
 ///         menu_controller,
-///         || {
-///             /* Main content */
-///         },
+///         || { /* Main content */ },
 ///         move |menu_scope| {
 ///             menu_scope.menu_item(
 ///                 MenuItemArgsBuilder::default()
@@ -489,6 +506,8 @@ pub fn menu_provider(
 ///         },
 ///     );
 /// }
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn menu_provider_with_controller(
@@ -660,7 +679,8 @@ pub fn menu_provider_with_controller(
     }));
 }
 
-/// Convenience wrapper for rendering only the menu overlay without extra main content.
+/// Convenience wrapper for rendering only the menu overlay without extra main
+/// content.
 #[tessera]
 pub fn menu(
     args: impl Into<MenuProviderArgs>,
@@ -669,7 +689,8 @@ pub fn menu(
     menu_provider(args, || {}, content);
 }
 
-/// Convenience wrapper for rendering only the menu overlay without extra main content with an external controller.
+/// Convenience wrapper for rendering only the menu overlay without extra main
+/// content with an external controller.
 #[tessera]
 pub fn menu_with_controller(
     args: impl Into<MenuProviderArgs>,
@@ -698,7 +719,8 @@ pub struct MenuItemArgs {
     /// Trailing icon displayed on the right edge.
     #[builder(default, setter(strip_option))]
     pub trailing_icon: Option<crate::icon::IconArgs>,
-    /// Whether the item is currently selected (renders a checkmark instead of a leading icon).
+    /// Whether the item is currently selected (renders a checkmark instead of a
+    /// leading icon).
     #[builder(default)]
     pub selected: bool,
     /// Whether the item can be interacted with.
@@ -711,15 +733,13 @@ pub struct MenuItemArgs {
     #[builder(default = "MENU_ITEM_HEIGHT")]
     pub height: Dp,
     /// Tint applied to the label text.
-    #[builder(default = "crate::material_color::global_material_scheme().on_surface")]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_surface")]
     pub label_color: Color,
     /// Tint applied to supporting or trailing text.
-    #[builder(default = "crate::material_color::global_material_scheme().on_surface_variant")]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_surface_variant")]
     pub supporting_color: Color,
     /// Tint applied when the item is disabled.
-    #[builder(
-        default = "crate::material_color::global_material_scheme().on_surface.with_alpha(0.38)"
-    )]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_surface.with_alpha(0.38)")]
     pub disabled_color: Color,
     /// Callback invoked when the item is activated.
     #[builder(default, setter(strip_option))]
@@ -897,7 +917,7 @@ fn menu_item(args: impl Into<MenuItemArgs>) {
         .accessibility_label(args.label.clone())
         .block_input(true)
         .ripple_color(
-            crate::material_color::global_material_scheme()
+            use_context::<MaterialColorScheme>()
                 .on_surface
                 .with_alpha(0.12),
         );

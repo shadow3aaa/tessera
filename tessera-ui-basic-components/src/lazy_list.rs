@@ -3,12 +3,17 @@
 //! ## Usage
 //!
 //! Use `lazy_column` or `lazy_row` to efficiently display large datasets.
-use std::{ops::Range, sync::Arc};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 
 use derive_builder::Builder;
 use parking_lot::RwLock;
 use tessera_ui::{
-    ComputedData, Constraint, DimensionValue, Dp, MeasurementError, NodeId, Px, PxPosition,
+    ComputedData, Constraint, DimensionValue, Dp, MeasurementError, NodeId, Px, PxPosition, key,
     remember, tessera,
 };
 
@@ -65,14 +70,15 @@ pub struct LazyColumnArgs {
     /// Number of extra items instantiated before/after the viewport.
     #[builder(default = "2")]
     pub overscan: usize,
-    /// Estimated main-axis size for each item, used before real measurements exist.
+    /// Estimated main-axis size for each item, used before real measurements
+    /// exist.
     #[builder(default = "Dp(48.0)")]
     pub estimated_item_size: Dp,
     /// Symmetric padding applied around the lazy list content.
     #[builder(default = "Dp(0.0)")]
     pub content_padding: Dp,
-    /// Maximum viewport length reported back to parents. Prevents gigantic textures
-    /// when nesting the list inside wrap/auto-sized surfaces.
+    /// Maximum viewport length reported back to parents. Prevents gigantic
+    /// textures when nesting the list inside wrap/auto-sized surfaces.
     #[builder(default = "Some(Px(8192))")]
     pub max_viewport_main: Option<Px>,
 }
@@ -85,7 +91,8 @@ impl Default for LazyColumnArgs {
     }
 }
 
-/// Arguments for `lazy_row`. Identical to [`LazyColumnArgs`] but horizontal scrolling is enforced.
+/// Arguments for `lazy_row`. Identical to [`LazyColumnArgs`] but horizontal
+/// scrolling is enforced.
 #[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct LazyRowArgs {
@@ -101,7 +108,8 @@ pub struct LazyRowArgs {
     /// Number of extra items instantiated before/after the viewport.
     #[builder(default = "2")]
     pub overscan: usize,
-    /// Estimated main-axis size for each item, used before real measurements exist.
+    /// Estimated main-axis size for each item, used before real measurements
+    /// exist.
     #[builder(default = "Dp(48.0)")]
     pub estimated_item_size: Dp,
     /// Symmetric padding applied around the lazy list content.
@@ -131,7 +139,24 @@ impl<'a> LazyListScope<'a> {
     where
         F: Fn(usize) + Send + Sync + 'static,
     {
-        self.slots.push(LazySlot::items(count, builder));
+        self.slots.push(LazySlot::items(count, builder, None));
+    }
+
+    /// Adds a batch of lazily generated items with a key provider.
+    pub fn items_with_key<K, KF, F>(&mut self, count: usize, key_provider: KF, builder: F)
+    where
+        K: Hash,
+        KF: Fn(usize) -> K + Send + Sync + 'static,
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        let key_provider = Arc::new(move |idx| {
+            let key = key_provider(idx);
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        });
+        self.slots
+            .push(LazySlot::items(count, builder, Some(key_provider)));
     }
 
     /// Add a single lazily generated item.
@@ -144,9 +169,11 @@ impl<'a> LazyListScope<'a> {
         });
     }
 
-    /// Adds lazily generated items from an iterator, providing both index and element reference.
+    /// Adds lazily generated items from an iterator, providing both index and
+    /// element reference.
     ///
-    /// The iterator is eagerly collected so it can be accessed on demand while virtualizing.
+    /// The iterator is eagerly collected so it can be accessed on demand while
+    /// virtualizing.
     pub fn items_from_iter<I, T, F>(&mut self, iter: I, builder: F)
     where
         I: IntoIterator<Item = T>,
@@ -159,15 +186,72 @@ impl<'a> LazyListScope<'a> {
         }
         let builder = Arc::new(builder);
         let count = items.len();
-        self.slots.push(LazySlot::items(count, {
+        self.slots.push(LazySlot::items(
+            count,
+            {
+                let items = items.clone();
+                let builder = builder.clone();
+                move |idx| {
+                    if let Some(item) = items.get(idx) {
+                        builder(idx, item);
+                    }
+                }
+            },
+            None,
+        ));
+    }
+
+    /// Adds lazily generated items from an iterator with a key provider.
+    pub fn items_from_iter_with_key<I, T, K, KF, F>(
+        &mut self,
+        iter: I,
+        key_provider: KF,
+        builder: F,
+    ) where
+        I: IntoIterator<Item = T>,
+        T: Send + Sync + 'static,
+        K: Hash,
+        KF: Fn(usize, &T) -> K + Send + Sync + 'static,
+        F: Fn(usize, &T) + Send + Sync + 'static,
+    {
+        let items: Arc<Vec<T>> = Arc::new(iter.into_iter().collect());
+        if items.is_empty() {
+            return;
+        }
+        let builder = Arc::new(builder);
+        let key_provider = Arc::new(key_provider);
+        let count = items.len();
+
+        let slot_builder = {
             let items = items.clone();
             let builder = builder.clone();
-            move |idx| {
+            move |idx: usize| {
                 if let Some(item) = items.get(idx) {
                     builder(idx, item);
                 }
             }
-        }));
+        };
+
+        let slot_key_provider = {
+            let items = items.clone();
+            let key_provider = key_provider.clone();
+            move |idx: usize| -> u64 {
+                if let Some(item) = items.get(idx) {
+                    let key = key_provider(idx, item);
+                    let mut hasher = DefaultHasher::new();
+                    key.hash(&mut hasher);
+                    hasher.finish()
+                } else {
+                    0
+                }
+            }
+        };
+
+        self.slots.push(LazySlot::items(
+            count,
+            slot_builder,
+            Some(Arc::new(slot_key_provider)),
+        ));
     }
 
     /// Convenience helper for iterators when only the element is needed.
@@ -192,20 +276,23 @@ pub type LazyRowScope<'a> = LazyListScope<'a>;
 ///
 /// ## Usage
 ///
-/// Display a long, vertical list of items without incurring the performance cost of rendering every item at once.
+/// Display a long, vertical list of items without incurring the performance
+/// cost of rendering every item at once.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the list's layout and scrolling behavior; see [`LazyColumnArgs`].
-/// - `configure` — a closure that receives a [`LazyColumnScope`] for adding items to the list.
+/// - `args` — configures the list's layout and scrolling behavior; see
+///   [`LazyColumnArgs`].
+/// - `configure` — a closure that receives a [`LazyColumnScope`] for adding
+///   items to the list.
 ///
 /// ## Examples
 ///
 /// ```
 /// use tessera_ui::tessera;
 /// use tessera_ui_basic_components::{
-///     lazy_list::{lazy_column, LazyColumnArgs},
-///     text::{text, TextArgsBuilder},
+///     lazy_list::{LazyColumnArgs, lazy_column},
+///     text::{TextArgsBuilder, text},
 /// };
 ///
 /// #[tessera]
@@ -238,21 +325,25 @@ where
 ///
 /// ## Usage
 ///
-/// Use when you need to share scroll/cache state across component boundaries (e.g., restoring position when remounting).
+/// Use when you need to share scroll/cache state across component boundaries
+/// (e.g., restoring position when remounting).
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the list's layout and scrolling behavior; see [`LazyColumnArgs`].
-/// - `controller` — a [`LazyListController`] that holds scroll offsets and item measurement cache.
-/// - `configure` — a closure that receives a [`LazyColumnScope`] for adding items to the list.
+/// - `args` — configures the list's layout and scrolling behavior; see
+///   [`LazyColumnArgs`].
+/// - `controller` — a [`LazyListController`] that holds scroll offsets and item
+///   measurement cache.
+/// - `configure` — a closure that receives a [`LazyColumnScope`] for adding
+///   items to the list.
 ///
 /// ## Examples
 ///
 /// ```
 /// use tessera_ui::{remember, tessera};
 /// use tessera_ui_basic_components::{
-///     lazy_list::{lazy_column_with_controller, LazyColumnArgs, LazyListController},
-///     text::{text, TextArgsBuilder},
+///     lazy_list::{LazyColumnArgs, LazyListController, lazy_column_with_controller},
+///     text::{TextArgsBuilder, text},
 /// };
 ///
 /// #[tessera]
@@ -312,24 +403,28 @@ pub fn lazy_column_with_controller<F>(
 
 /// # lazy_row
 ///
-/// A horizontally scrolling list that only renders items visible in the viewport.
+/// A horizontally scrolling list that only renders items visible in the
+/// viewport.
 ///
 /// ## Usage
 ///
-/// Display a long, horizontal list of items, such as a gallery or a set of chips.
+/// Display a long, horizontal list of items, such as a gallery or a set of
+/// chips.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the list's layout and scrolling behavior; see [`LazyRowArgs`].
-/// - `configure` — a closure that receives a [`LazyRowScope`] for adding items to the list.
+/// - `args` — configures the list's layout and scrolling behavior; see
+///   [`LazyRowArgs`].
+/// - `configure` — a closure that receives a [`LazyRowScope`] for adding items
+///   to the list.
 ///
 /// ## Examples
 ///
 /// ```
 /// use tessera_ui::tessera;
 /// use tessera_ui_basic_components::{
-///     lazy_list::{lazy_row, LazyRowArgs},
-///     text::{text, TextArgsBuilder},
+///     lazy_list::{LazyRowArgs, lazy_row},
+///     text::{TextArgsBuilder, text},
 /// };
 ///
 /// #[tessera]
@@ -362,21 +457,25 @@ where
 ///
 /// ## Usage
 ///
-/// Use when you need to synchronize scroll state with other components or restore position after remounts.
+/// Use when you need to synchronize scroll state with other components or
+/// restore position after remounts.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the list's layout and scrolling behavior; see [`LazyRowArgs`].
-/// - `controller` — a [`LazyListController`] that holds scroll offsets and item measurement cache.
-/// - `configure` — a closure that receives a [`LazyRowScope`] for adding items to the list.
+/// - `args` — configures the list's layout and scrolling behavior; see
+///   [`LazyRowArgs`].
+/// - `controller` — a [`LazyListController`] that holds scroll offsets and item
+///   measurement cache.
+/// - `configure` — a closure that receives a [`LazyRowScope`] for adding items
+///   to the list.
 ///
 /// ## Examples
 ///
 /// ```
 /// use tessera_ui::{remember, tessera};
 /// use tessera_ui_basic_components::{
-///     lazy_list::{lazy_row_with_controller, LazyListController, LazyRowArgs},
-///     text::{text, TextArgsBuilder},
+///     lazy_list::{LazyListController, LazyRowArgs, lazy_row_with_controller},
+///     text::{TextArgsBuilder, text},
 /// };
 ///
 /// #[tessera]
@@ -577,8 +676,10 @@ fn lazy_list_view(
         },
     ));
 
-    for child in build_child_closures(&visible_children) {
-        child();
+    for child in visible_children {
+        key(child.key_hash, || {
+            (child.builder)(child.local_index);
+        });
     }
 }
 
@@ -738,13 +839,18 @@ enum LazySlot {
 }
 
 impl LazySlot {
-    fn items<F>(count: usize, builder: F) -> Self
+    fn items<F>(
+        count: usize,
+        builder: F,
+        key_provider: Option<Arc<dyn Fn(usize) -> u64 + Send + Sync>>,
+    ) -> Self
     where
         F: Fn(usize) + Send + Sync + 'static,
     {
         Self::Items(LazyItemsSlot {
             count,
             builder: Arc::new(builder),
+            key_provider,
         })
     }
 
@@ -759,6 +865,7 @@ impl LazySlot {
 struct LazyItemsSlot {
     count: usize,
     builder: Arc<dyn Fn(usize) + Send + Sync>,
+    key_provider: Option<Arc<dyn Fn(usize) -> u64 + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -794,10 +901,19 @@ impl LazySlotPlan {
         let mut result = Vec::new();
         for index in range {
             if let Some((slot, local_index)) = self.resolve(index) {
+                let key_hash = if let Some(provider) = &slot.key_provider {
+                    provider(local_index)
+                } else {
+                    let mut hasher = DefaultHasher::new();
+                    index.hash(&mut hasher);
+                    hasher.finish()
+                };
+
                 result.push(VisibleChild {
                     item_index: index,
                     local_index,
                     builder: slot.builder.clone(),
+                    key_hash,
                 });
             }
         }
@@ -830,17 +946,7 @@ struct VisibleChild {
     item_index: usize,
     local_index: usize,
     builder: Arc<dyn Fn(usize) + Send + Sync>,
-}
-
-fn build_child_closures(children: &[VisibleChild]) -> Vec<Box<dyn FnOnce()>> {
-    children
-        .iter()
-        .map(|child| {
-            let builder = child.builder.clone();
-            let local_index = child.local_index;
-            Box::new(move || (builder)(local_index)) as Box<dyn FnOnce()>
-        })
-        .collect()
+    key_hash: u64,
 }
 
 #[derive(Default)]

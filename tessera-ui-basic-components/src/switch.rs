@@ -14,7 +14,7 @@ use tessera_ui::{
     Color, ComputedData, Constraint, CursorEventContent, DimensionValue, Dp, PressKeyEventType,
     PxPosition,
     accesskit::{Action, Role, Toggled},
-    remember, tessera,
+    remember, tessera, use_context,
     winit::window::CursorIcon,
 };
 
@@ -22,16 +22,17 @@ use crate::{
     alignment::Alignment,
     animation,
     boxed::{BoxedArgsBuilder, boxed},
-    material_color,
     pipelines::shape::command::ShapeCommand,
     shape_def::Shape,
     surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
+    theme::MaterialColorScheme,
 };
 
 const ANIMATION_DURATION: Duration = Duration::from_millis(150);
 const THUMB_OFF_SCALE: f32 = 0.72;
 
-/// Represents the state for the `switch` component, including checked status and animation progress.
+/// Represents the state for the `switch` component, including checked status
+/// and animation progress.
 ///
 /// This struct is used internally by [`SwitchController`].
 pub(crate) struct SwitchStateInner {
@@ -152,25 +153,26 @@ pub struct SwitchArgs {
     #[builder(default = "Dp(32.0)")]
     pub height: Dp,
     /// Track color when the switch is off.
-    #[builder(default = "crate::material_color::global_material_scheme().surface_variant")]
+    #[builder(default = "use_context::<MaterialColorScheme>().surface_variant")]
     pub track_color: Color,
     /// Track color when the switch is on.
-    #[builder(default = "crate::material_color::global_material_scheme().primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary")]
     pub track_checked_color: Color,
-    /// Outline color for the track when the switch is off; fades out as the switch turns on.
-    #[builder(default = "crate::material_color::global_material_scheme().outline")]
+    /// Outline color for the track when the switch is off; fades out as the
+    /// switch turns on.
+    #[builder(default = "use_context::<MaterialColorScheme>().outline")]
     pub track_outline_color: Color,
     /// Border width for the track outline.
     #[builder(default = "Dp(1.5)")]
     pub track_outline_width: Dp,
     /// Thumb color when the switch is off.
-    #[builder(default = "crate::material_color::global_material_scheme().on_surface_variant")]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_surface_variant")]
     pub thumb_color: Color,
     /// Thumb color when the switch is on.
-    #[builder(default = "crate::material_color::global_material_scheme().on_primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_primary")]
     pub thumb_checked_color: Color,
     /// Thumb outline color to mirror Material Design's stroked thumb when off.
-    #[builder(default = "crate::material_color::global_material_scheme().outline")]
+    #[builder(default = "use_context::<MaterialColorScheme>().outline")]
     pub thumb_border_color: Color,
     /// Width of the thumb outline stroke.
     #[builder(default = "Dp(1.5)")]
@@ -304,7 +306,7 @@ fn switch_inner(
     let progress = controller.animation_progress();
     let eased_progress = animation::easing(progress);
     let thumb_scale = THUMB_OFF_SCALE + (1.0 - THUMB_OFF_SCALE) * eased_progress;
-    let scheme = material_color::global_material_scheme();
+    let scheme = use_context::<MaterialColorScheme>();
     let interactive = args.on_toggle.is_some();
 
     let mut track_color = interpolate_color(args.track_color, args.track_checked_color, progress);
@@ -315,12 +317,10 @@ fn switch_inner(
         interpolate_color(args.thumb_border_color, args.thumb_checked_color, progress);
 
     if !interactive {
-        track_color = material_color::blend_over(track_color, scheme.on_surface, 0.12);
-        track_outline_color =
-            material_color::blend_over(track_outline_color, scheme.on_surface, 0.12);
-        thumb_color = material_color::blend_over(thumb_color, scheme.on_surface, 0.38);
-        thumb_border_color =
-            material_color::blend_over(thumb_border_color, scheme.on_surface, 0.12);
+        track_color = track_color.blend_over(scheme.on_surface, 0.12);
+        track_outline_color = track_outline_color.blend_over(scheme.on_surface, 0.12);
+        thumb_color = thumb_color.blend_over(scheme.on_surface, 0.38);
+        thumb_border_color = thumb_border_color.blend_over(scheme.on_surface, 0.12);
     }
 
     let thumb_style = SurfaceStyle::FilledOutlined {
@@ -451,8 +451,11 @@ fn switch_inner(
 /// ## Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
-/// use tessera_ui_basic_components::switch::{switch, SwitchArgsBuilder};
+/// use tessera_ui_basic_components::switch::{SwitchArgsBuilder, switch};
 ///
 /// switch(
 ///     SwitchArgsBuilder::default()
@@ -462,6 +465,8 @@ fn switch_inner(
 ///         .build()
 ///         .unwrap(),
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn switch(args: impl Into<SwitchArgs>) {
@@ -472,11 +477,13 @@ pub fn switch(args: impl Into<SwitchArgs>) {
 
 /// # switch_with_child
 ///
-/// Animated Material 3 switch with required custom thumb content; ideal for boolean toggles that show an icon or label.
+/// Animated Material 3 switch with required custom thumb content; ideal for
+/// boolean toggles that show an icon or label.
 ///
 /// ## Usage
 ///
-/// Use for settings or binary preferences; provide a `child` to draw custom content (e.g., an icon) inside the thumb.
+/// Use for settings or binary preferences; provide a `child` to draw custom
+/// content (e.g., an icon) inside the thumb.
 ///
 /// ## Parameters
 ///
@@ -487,9 +494,12 @@ pub fn switch(args: impl Into<SwitchArgs>) {
 /// ## Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
-/// use tessera_ui_basic_components::switch::{switch_with_child, SwitchArgsBuilder};
-/// use tessera_ui_basic_components::text::{text, TextArgsBuilder};
+/// use tessera_ui_basic_components::switch::{SwitchArgsBuilder, switch_with_child};
+/// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
 ///
 /// switch_with_child(
 ///     SwitchArgsBuilder::default()
@@ -507,6 +517,8 @@ pub fn switch(args: impl Into<SwitchArgs>) {
 ///         );
 ///     },
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn switch_with_child(
@@ -524,7 +536,8 @@ pub fn switch_with_child(
 ///
 /// # Usage
 ///
-/// Use when you need to sync the switch state with external application state and want custom thumb content.
+/// Use when you need to sync the switch state with external application state
+/// and want custom thumb content.
 ///
 /// # Parameters
 ///
@@ -535,10 +548,15 @@ pub fn switch_with_child(
 /// # Examples
 ///
 /// ```
-/// use tessera_ui::{remember, tessera};
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
-/// use tessera_ui_basic_components::switch::{switch_with_child_and_controller, SwitchArgsBuilder, SwitchController};
-/// use tessera_ui_basic_components::text::{text, TextArgsBuilder};
+/// use tessera_ui::{remember, tessera};
+/// use tessera_ui_basic_components::switch::{
+///     SwitchArgsBuilder, SwitchController, switch_with_child_and_controller,
+/// };
+/// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
 ///
 /// #[tessera]
 /// fn controlled_switch_example() {
@@ -548,19 +566,21 @@ pub fn switch_with_child(
 ///             .on_toggle(Arc::new(|checked| {
 ///                 println!("Switch is now: {}", checked);
 ///             }))
-///            .build()
-///            .unwrap(),
-///        controller,
-///        || {
-///            text(
+///             .build()
+///             .unwrap(),
+///         controller,
+///         || {
+///             text(
 ///                 TextArgsBuilder::default()
 ///                     .text("✓".to_string())
 ///                     .build()
 ///                     .unwrap(),
-///           );
-///        }
+///             );
+///         },
 ///     );
 /// }
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn switch_with_child_and_controller(

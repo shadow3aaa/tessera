@@ -14,6 +14,7 @@ use super::command::{ImageCommand, ImageData};
 struct ImageUniforms {
     rect: Vec4,
     is_bgra: u32,
+    opacity: f32,
 }
 
 struct ImageResources {
@@ -134,8 +135,10 @@ impl ImagePipeline {
         start_pos: PxPosition,
         size: PxSize,
         config: &wgpu::SurfaceConfiguration,
+        opacity: f32,
     ) -> ImageUniforms {
-        // Convert pixel positions/sizes into normalized device coordinates and size ratios.
+        // Convert pixel positions/sizes into normalized device coordinates and size
+        // ratios.
         let rect = [
             (start_pos.x.0 as f32 / config.width as f32) * 2.0 - 1.0
                 + (size.width.0 as f32 / config.width as f32),
@@ -154,11 +157,12 @@ impl ImagePipeline {
         ImageUniforms {
             rect,
             is_bgra: if is_bgra { 1 } else { 0 },
+            opacity,
         }
     }
 
-    // Create GPU resources for an image. Kept as a single helper to avoid duplicating
-    // GPU setup logic while keeping `draw` concise.
+    // Create GPU resources for an image. Kept as a single helper to avoid
+    // duplicating GPU setup logic while keeping `draw` concise.
     fn create_image_resources(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -256,8 +260,10 @@ impl DrawablePipeline<ImageCommand> for ImagePipeline {
                 &command.data,
             );
 
-            // Use the extracted uniforms computation helper (dereference borrowed tuple elements).
-            let uniforms = Self::compute_uniforms(*start_pos, *size, context.config);
+            // Use the extracted uniforms computation helper (dereference borrowed tuple
+            // elements).
+            let uniforms =
+                Self::compute_uniforms(*start_pos, *size, context.config, command.opacity);
 
             let mut buffer = UniformBuffer::new(Vec::new());
             buffer.write(&uniforms).expect("buffer write failed");

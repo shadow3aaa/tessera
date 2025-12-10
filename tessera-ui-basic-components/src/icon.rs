@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
-use tessera_ui::{Color, ComputedData, Constraint, DimensionValue, Dp, Px, tessera};
+use tessera_ui::{Color, ComputedData, Constraint, DimensionValue, Dp, Px, tessera, use_context};
 
 use crate::{
     image_vector::TintMode,
@@ -14,6 +14,7 @@ use crate::{
         image::command::{ImageCommand, ImageData},
         image_vector::command::{ImageVectorCommand, ImageVectorData},
     },
+    theme::ContentColor,
 };
 
 /// Icon content can be provided either as vector geometry or raster pixels.
@@ -56,21 +57,23 @@ pub struct IconArgs {
     /// Icon content, provided as either raster pixels or vector geometry.
     #[builder(setter(into))]
     pub content: IconContent,
-    /// Logical size of the icon. Applied to both width and height unless explicit overrides
-    /// are provided through [`width`](IconArgs::width) / [`height`](IconArgs::height).
+    /// Logical size of the icon. Applied to both width and height unless
+    /// explicit overrides are provided through [`width`](IconArgs::width) /
+    /// [`height`](IconArgs::height).
     #[builder(default = "Dp(24.0)")]
     pub size: Dp,
-    /// Optional width override. Handy when the icon should `Fill` or `Wrap` differently from
-    /// the default square sizing.
+    /// Optional width override. Handy when the icon should `Fill` or `Wrap`
+    /// differently from the default square sizing.
     #[builder(default, setter(strip_option))]
     pub width: Option<DimensionValue>,
-    /// Optional height override. Handy when the icon should `Fill` or `Wrap` differently from
-    /// the default square sizing.
+    /// Optional height override. Handy when the icon should `Fill` or `Wrap`
+    /// differently from the default square sizing.
     #[builder(default, setter(strip_option))]
     pub height: Option<DimensionValue>,
-    /// Tint color applied to vector icons. Defaults to white so it preserves the original
-    /// colors (multiplying by white is a no-op). Raster icons ignore this field.
-    #[builder(default = "Color::WHITE")]
+    /// Tint color applied to vector icons. Defaults to white so it preserves
+    /// the original colors (multiplying by white is a no-op). Raster icons
+    /// ignore this field.
+    #[builder(default = "use_context::<ContentColor>().current")]
     pub tint: Color,
     /// How the tint is applied to vector icons.
     #[builder(default)]
@@ -119,7 +122,8 @@ impl From<Arc<ImageData>> for IconArgs {
 ///
 /// ## Usage
 ///
-/// Display a vector or raster image with a uniform size, often inside a button or as a status indicator.
+/// Display a vector or raster image with a uniform size, often inside a button
+/// or as a status indicator.
 ///
 /// ## Parameters
 ///
@@ -131,16 +135,15 @@ impl From<Arc<ImageData>> for IconArgs {
 /// use std::sync::Arc;
 /// use tessera_ui::Color;
 /// use tessera_ui_basic_components::{
-///     icon::{icon, IconArgsBuilder},
+///     icon::{IconArgsBuilder, icon},
 ///     image_vector::{ImageVectorSource, load_image_vector_from_source},
 /// };
 ///
 /// // Load vector data from an SVG file.
 /// // In a real app, this should be done once and the data cached.
 /// let svg_path = "../assets/emoji_u1f416.svg";
-/// let vector_data = load_image_vector_from_source(
-///     &ImageVectorSource::Path(svg_path.to_string())
-/// ).unwrap();
+/// let vector_data =
+///     load_image_vector_from_source(&ImageVectorSource::Path(svg_path.to_string())).unwrap();
 ///
 /// icon(
 ///     IconArgsBuilder::default()
@@ -207,7 +210,10 @@ pub fn icon(args: impl Into<IconArgs>) {
                     .push_draw_command(command);
             }
             IconContent::Raster(data) => {
-                let command = ImageCommand { data: data.clone() };
+                let command = ImageCommand {
+                    data: data.clone(),
+                    opacity: 1.0,
+                };
                 input
                     .metadatas
                     .entry(input.current_node_id)

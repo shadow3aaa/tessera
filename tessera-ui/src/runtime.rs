@@ -204,8 +204,9 @@ impl TesseraRuntime {
         }
     }
 
-    /// Triggers all registered callbacks (global and per-frame) for window close event.
-    /// Called by the event loop when a close event is detected.
+    /// Triggers all registered callbacks (global and per-frame) for window
+    /// close event. Called by the event loop when a close event is
+    /// detected.
     pub fn trigger_close_callbacks(&self) {
         for callback in &self.on_close_callbacks {
             callback();
@@ -336,7 +337,7 @@ fn pop_phase() {
     });
 }
 
-fn current_phase() -> Option<RuntimePhase> {
+pub(crate) fn current_phase() -> Option<RuntimePhase> {
     PHASE_STACK.with(|stack| stack.borrow().last().copied())
 }
 
@@ -368,8 +369,8 @@ fn current_group_path() -> Vec<u64> {
 
 /// RAII guard that tracks control-flow grouping for the current component node.
 ///
-/// A guard pushes the provided group id when constructed and pops it when dropped,
-/// ensuring grouping stays balanced even with early returns or panics.
+/// A guard pushes the provided group id when constructed and pops it when
+/// dropped, ensuring grouping stays balanced even with early returns or panics.
 pub struct GroupGuard {
     group_id: u64,
 }
@@ -404,7 +405,7 @@ fn compute_slot_key<K: Hash>(key: &K) -> (u64, u64) {
     (logic_id, group_path_hash ^ key_hash)
 }
 
-fn ensure_build_phase() {
+pub(crate) fn ensure_build_phase() {
     match current_phase() {
         Some(RuntimePhase::Build) => {}
         Some(RuntimePhase::Measure) => {
@@ -438,15 +439,15 @@ pub fn reset_slots() {
 /// state generated inside loops or dynamic collections where the execution
 /// order might change.
 ///
-/// The `init` closure is executed only once — when the key is first encountered.
-/// On subsequent updates with the same key, the stored value is returned and
-/// `init` is not called.
+/// The `init` closure is executed only once — when the key is first
+/// encountered. On subsequent updates with the same key, the stored value is
+/// returned and `init` is not called.
 ///
 /// # Interior mutability
 ///
 /// This function returns an `Arc<T>`, which is shared and immutable by default.
-/// This design supports multi-threaded measurement. If you need a value that can
-/// be modified across frames (for example a counter or input buffer), use a
+/// This design supports multi-threaded measurement. If you need a value that
+/// can be modified across frames (for example a counter or input buffer), use a
 /// type that provides interior mutability (e.g., `Mutex`, `RwLock`, or atomic
 /// types). If you need to mutate the value during measurement or input
 /// handling, it must also be `Send + Sync`.
@@ -492,13 +493,14 @@ where
 ///
 /// This function allows a component to "remember" state between frames.
 /// The `init` closure is executed only once — when the component first runs.
-/// On subsequent updates, the stored value is returned and `init` is not called.
+/// On subsequent updates, the stored value is returned and `init` is not
+/// called.
 ///
 /// # Interior mutability
 ///
 /// This function returns an `Arc<T>`, which is shared and immutable by default.
-/// This design supports multi-threaded measurement. If you need a value that can
-/// be modified across frames (for example a counter or input buffer), use a
+/// This design supports multi-threaded measurement. If you need a value that
+/// can be modified across frames (for example a counter or input buffer), use a
 /// type that provides interior mutability (e.g., `Mutex`, `RwLock`, or atomic
 /// types). If you need to mutate the value during measurement or input
 /// handling, it must also be `Send + Sync`.
@@ -521,4 +523,34 @@ where
     T: Send + Sync + 'static,
 {
     remember_with_key((), init)
+}
+
+/// Groups the execution of a block of code with a stable key.
+///
+/// This is useful for maintaining state identity in dynamic lists or loops
+/// where the order of items might change.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::atomic::AtomicUsize;
+/// use tessera_ui::{key, remember, tessera};
+///
+/// #[tessera]
+/// fn my_list(items: Vec<String>) {
+///     for item in items {
+///         key(item.clone(), || {
+///             let state = remember(|| AtomicUsize::new(0));
+///         });
+///     }
+/// }
+/// ```
+pub fn key<K, F, R>(key: K, block: F) -> R
+where
+    K: Hash,
+    F: FnOnce() -> R,
+{
+    let key_hash = hash_components(&[&key]);
+    let _guard = GroupGuard::new(key_hash);
+    block()
 }

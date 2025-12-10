@@ -9,10 +9,10 @@ use derive_builder::Builder;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tessera_ui::{
     Color, ComputedData, Constraint, DimensionValue, Dp, MeasureInput, MeasurementError, Px,
-    PxPosition, focus_state::Focus, remember, tessera,
+    PxPosition, focus_state::Focus, remember, tessera, use_context,
 };
 
-use crate::{material_color, pipelines::image_vector::command::VectorTintMode};
+use crate::{pipelines::image_vector::command::VectorTintMode, theme::MaterialColorScheme};
 
 use interaction::{
     apply_range_slider_accessibility, apply_slider_accessibility, handle_range_slider_state,
@@ -39,7 +39,8 @@ const MIN_TOUCH_TARGET: Dp = Dp(40.0);
 const HANDLE_GAP: Dp = Dp(6.0);
 const STOP_INDICATOR_DIAMETER: Dp = Dp(4.0);
 
-/// Stores the interactive state for the [`slider`] component, such as whether the slider is currently being dragged by the user.
+/// Stores the interactive state for the [`slider`] component, such as whether
+/// the slider is currently being dragged by the user.
 pub(crate) struct SliderStateInner {
     /// True if the user is currently dragging the slider.
     pub is_dragging: bool,
@@ -156,24 +157,23 @@ pub struct SliderArgs {
     #[builder(default = "DimensionValue::Fixed(Dp(260.0).to_px())")]
     pub width: DimensionValue,
     /// The color of the active part of the track (progress fill).
-    #[builder(default = "crate::material_color::global_material_scheme().primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary")]
     pub active_track_color: Color,
     /// The color of the inactive part of the track (background).
-    #[builder(default = "crate::material_color::global_material_scheme().secondary_container")]
+    #[builder(default = "use_context::<MaterialColorScheme>().secondary_container")]
     pub inactive_track_color: Color,
     /// The thickness of the handle indicator.
     #[builder(default = "Dp(4.0)")]
     pub thumb_diameter: Dp,
     /// Color of the handle indicator.
-    #[builder(default = "crate::material_color::global_material_scheme().primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary")]
     pub thumb_color: Color,
     /// Height of the handle focus layer (hover/drag halo).
     #[builder(default = "Dp(18.0)")]
     pub state_layer_diameter: Dp,
-    /// Base color for the state layer; alpha will be adjusted per interaction state.
-    #[builder(
-        default = "crate::material_color::global_material_scheme().primary.with_alpha(0.18)"
-    )]
+    /// Base color for the state layer; alpha will be adjusted per interaction
+    /// state.
+    #[builder(default = "use_context::<MaterialColorScheme>().primary.with_alpha(0.18)")]
     pub state_layer_color: Color,
     /// Disable interaction.
     #[builder(default = "false")]
@@ -187,7 +187,8 @@ pub struct SliderArgs {
     /// Whether to show the stop indicators at the ends of the track.
     #[builder(default = "true")]
     pub show_stop_indicator: bool,
-    /// Optional icon content to display at the start of the slider (only for Medium sizes and above).
+    /// Optional icon content to display at the start of the slider (only for
+    /// Medium sizes and above).
     #[builder(default, setter(strip_option, into))]
     pub inset_icon: Option<crate::icon::IconContent>,
 }
@@ -213,11 +214,11 @@ pub struct RangeSliderArgs {
     pub width: DimensionValue,
 
     /// The color of the active part of the track (range fill).
-    #[builder(default = "crate::material_color::global_material_scheme().primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary")]
     pub active_track_color: Color,
 
     /// The color of the inactive part of the track (background).
-    #[builder(default = "crate::material_color::global_material_scheme().secondary_container")]
+    #[builder(default = "use_context::<MaterialColorScheme>().secondary_container")]
     pub inactive_track_color: Color,
 
     /// The thickness of the handle indicators.
@@ -225,7 +226,7 @@ pub struct RangeSliderArgs {
     pub thumb_diameter: Dp,
 
     /// Color of the handle indicators.
-    #[builder(default = "crate::material_color::global_material_scheme().primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary")]
     pub thumb_color: Color,
 
     /// Height of the handle focus layer.
@@ -233,9 +234,7 @@ pub struct RangeSliderArgs {
     pub state_layer_diameter: Dp,
 
     /// Base color for the state layer.
-    #[builder(
-        default = "crate::material_color::global_material_scheme().primary.with_alpha(0.18)"
-    )]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary.with_alpha(0.18)")]
     pub state_layer_color: Color,
 
     /// Disable interaction.
@@ -367,7 +366,8 @@ fn measure_slider(
         );
         let icon_measured = input.measure_child(icon_id, &icon_constraint)?;
 
-        // Icon placement: 8dp padding from left edge, vertically centered within the track
+        // Icon placement: 8dp padding from left edge, vertically centered within the
+        // track
         let icon_padding = Dp(8.0).to_px();
         let icon_y = layout.track_y + Px((layout.track_height.0 - icon_measured.height.0) / 2);
         input.place_child(icon_id, PxPosition::new(icon_padding, icon_y));
@@ -389,7 +389,7 @@ struct SliderColors {
 
 fn slider_colors(args: &SliderArgs, is_hovered: bool, is_dragging: bool) -> SliderColors {
     if args.disabled {
-        let scheme = material_color::global_material_scheme();
+        let scheme = use_context::<MaterialColorScheme>();
         return SliderColors {
             active_track: scheme.on_surface.with_alpha(0.38),
             inactive_track: scheme.on_surface.with_alpha(0.12),
@@ -418,23 +418,30 @@ fn slider_colors(args: &SliderArgs, is_hovered: bool, is_dragging: bool) -> Slid
 
 /// # slider
 ///
-/// Renders an interactive slider with a bar-style handle for selecting a value between 0.0 and 1.0.
+/// Renders an interactive slider with a bar-style handle for selecting a value
+/// between 0.0 and 1.0.
 ///
 /// ## Usage
 ///
-/// Use for settings like volume or brightness, or for any user-adjustable value.
+/// Use for settings like volume or brightness, or for any user-adjustable
+/// value.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the slider's value, appearance, and callbacks; see [`SliderArgs`].
-/// - `controller` — optional; use [`slider_with_controller`] to provide your own controller.
+/// - `args` — configures the slider's value, appearance, and callbacks; see
+///   [`SliderArgs`].
+/// - `controller` — optional; use [`slider_with_controller`] to provide your
+///   own controller.
 ///
 /// ## Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
 /// use tessera_ui::{DimensionValue, Dp};
-/// use tessera_ui_basic_components::slider::{slider, SliderArgsBuilder};
+/// use tessera_ui_basic_components::slider::{SliderArgsBuilder, slider};
 ///
 /// slider(
 ///     SliderArgsBuilder::default()
@@ -447,6 +454,8 @@ fn slider_colors(args: &SliderArgs, is_hovered: bool, is_dragging: bool) -> Slid
 ///         .build()
 ///         .unwrap(),
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn slider(args: impl Into<SliderArgs>) {
@@ -465,31 +474,37 @@ pub fn slider(args: impl Into<SliderArgs>) {
 ///
 /// # Parameters
 ///
-/// - `args` — configures the slider's value, appearance, and callbacks; see [`SliderArgs`].
+/// - `args` — configures the slider's value, appearance, and callbacks; see
+///   [`SliderArgs`].
 /// - `controller` — the slider controller to manage interactive state.
 ///
 /// # Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
-/// use tessera_ui::{DimensionValue, Dp, remember, tessera};
-/// use tessera_ui_basic_components::slider::{slider_with_controller, SliderArgsBuilder, SliderController};
+/// use tessera_ui::{DimensionValue, Dp, remember};
+/// use tessera_ui_basic_components::slider::{
+///     SliderArgsBuilder, SliderController, slider_with_controller,
+/// };
 ///
-/// #[tessera]
-/// fn foo() {
-///     let controller = remember(|| SliderController::new());
-///     slider_with_controller(
-///        SliderArgsBuilder::default()
-///            .width(DimensionValue::Fixed(Dp(200.0).to_px()))
-///            .value(0.5)
-///            .on_change(Arc::new(|new_value| {
-///                println!("Slider value changed to: {}", new_value);
-///            }))
-///           .build()
-///           .unwrap(),
-///        controller.clone(),
-///    );
-/// }
+/// let controller = remember(|| SliderController::new());
+/// slider_with_controller(
+///     SliderArgsBuilder::default()
+///         .width(DimensionValue::Fixed(Dp(200.0).to_px()))
+///         .value(0.5)
+///         .on_change(Arc::new(|new_value| {
+///             println!("Slider value changed to: {}", new_value);
+///         }))
+///         .build()
+///         .unwrap(),
+///     controller.clone(),
+/// );
+/// # }
+/// # component();
+/// ```
 #[tessera]
 pub fn slider_with_controller(args: impl Into<SliderArgs>, controller: Arc<SliderController>) {
     let args: SliderArgs = args.into();
@@ -506,7 +521,7 @@ pub fn slider_with_controller(args: impl Into<SliderArgs>, controller: Arc<Slide
     if let Some(icon_size) = layout.icon_size
         && let Some(inset_icon) = args.inset_icon.as_ref()
     {
-        let scheme = material_color::global_material_scheme();
+        let scheme = use_context::<MaterialColorScheme>();
         let tint = if args.disabled {
             scheme.on_surface.with_alpha(0.38)
         } else {
@@ -689,25 +704,32 @@ fn measure_centered_slider(
 
 /// # centered_slider
 ///
-/// Renders an interactive slider that originates from the center (0.5), allowing selection of a value
-/// between 0.0 and 1.0. The active track extends from the center to the handle, while inactive
-/// tracks fill the remaining space.
+/// Renders an interactive slider that originates from the center (0.5),
+/// allowing selection of a value between 0.0 and 1.0. The active track extends
+/// from the center to the handle, while inactive tracks fill the remaining
+/// space.
 ///
 /// ## Usage
 ///
-/// Use for adjustments that have a neutral midpoint, such as balance controls or deviation settings.
+/// Use for adjustments that have a neutral midpoint, such as balance controls
+/// or deviation settings.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the slider's value, appearance, and callbacks; see [`SliderArgs`].
-/// - `controller` — optional controller; use [`centered_slider_with_controller`] to supply one.
+/// - `args` — configures the slider's value, appearance, and callbacks; see
+///   [`SliderArgs`].
+/// - `controller` — optional controller; use
+///   [`centered_slider_with_controller`] to supply one.
 ///
 /// ## Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::{Arc, Mutex};
 /// use tessera_ui::{DimensionValue, Dp};
-/// use tessera_ui_basic_components::slider::{centered_slider, SliderArgsBuilder};
+/// use tessera_ui_basic_components::slider::{SliderArgsBuilder, centered_slider};
 /// let current_value = Arc::new(Mutex::new(0.5));
 ///
 /// // Simulate a value change
@@ -736,6 +758,8 @@ fn measure_centered_slider(
 ///     *value_guard = 0.25;
 ///     assert_eq!(*value_guard, 0.25);
 /// }
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn centered_slider(args: impl Into<SliderArgs>) {
@@ -754,11 +778,14 @@ pub fn centered_slider(args: impl Into<SliderArgs>) {
 ///
 /// # Parameters
 ///
-/// - `args` — configures the slider's value, appearance, and callbacks; see [`SliderArgs`].
+/// - `args` — configures the slider's value, appearance, and callbacks; see
+///   [`SliderArgs`].
 /// - `controller` — the slider controller to manage interactive state.
 ///
 /// # Examples
 ///
+/// # }
+/// # component();
 /// ```
 /// use std::sync::Arc;
 /// use tessera_ui::{DimensionValue, Dp, remember, tessera};
@@ -970,24 +997,30 @@ fn measure_range_slider(
 
 /// # range_slider
 ///
-/// Renders an interactive slider with two handles, allowing selection of a range (start, end)
-/// between 0.0 and 1.0.
+/// Renders an interactive slider with two handles, allowing selection of a
+/// range (start, end) between 0.0 and 1.0.
 ///
 /// ## Usage
 ///
-/// Use for filtering by range, setting minimum and maximum values, or defining an interval.
+/// Use for filtering by range, setting minimum and maximum values, or defining
+/// an interval.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the slider's range, appearance, and callbacks; see [`RangeSliderArgs`].
-/// - `controller` — optional controller; use [`range_slider_with_controller`] to supply one.
+/// - `args` — configures the slider's range, appearance, and callbacks; see
+///   [`RangeSliderArgs`].
+/// - `controller` — optional controller; use [`range_slider_with_controller`]
+///   to supply one.
 ///
 /// ## Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::{Arc, Mutex};
 /// use tessera_ui::{DimensionValue, Dp};
-/// use tessera_ui_basic_components::slider::{range_slider, RangeSliderArgsBuilder};
+/// use tessera_ui_basic_components::slider::{RangeSliderArgsBuilder, range_slider};
 /// let range_value = Arc::new(Mutex::new((0.2, 0.8)));
 ///
 /// range_slider(
@@ -1000,6 +1033,8 @@ fn measure_range_slider(
 ///         .build()
 ///         .unwrap(),
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn range_slider(args: impl Into<RangeSliderArgs>) {
@@ -1023,6 +1058,7 @@ pub fn range_slider_with_controller(
         .build()
         .expect("Failed to build dummy args");
     let initial_width = fallback_component_width(&dummy_slider_args);
+    let dummy_for_measure = dummy_slider_args.clone();
     let layout = range_slider_layout(&args, initial_width);
 
     let start = args.value.0.clamp(0.0, 1.0);
@@ -1030,16 +1066,17 @@ pub fn range_slider_with_controller(
 
     let state_snapshot = state.read();
     // Determine colors based on interaction.
-    // We check if *either* handle is interacted with to highlight the active tracks/handles?
-    // Or ideally, we highlight specific handles.
-    // For simplicity, let's use a unified color struct but apply focus colors selectively.
+    // We check if *either* handle is interacted with to highlight the active
+    // tracks/handles? Or ideally, we highlight specific handles.
+    // For simplicity, let's use a unified color struct but apply focus colors
+    // selectively.
 
     let is_dragging_any = state_snapshot.is_dragging_start || state_snapshot.is_dragging_end;
 
     // Override colors from specific RangeSliderArgs
-    // We need a helper to convert RangeSliderArgs colors to SliderColors if they differ
-    // But for now we just reused the dummy args construction above which didn't copy colors.
-    // Let's reconstruct colors properly.
+    // We need a helper to convert RangeSliderArgs colors to SliderColors if they
+    // differ But for now we just reused the dummy args construction above which
+    // didn't copy colors. Let's reconstruct colors properly.
     let mut state_layer_alpha_scale = 0.0;
     if is_dragging_any {
         state_layer_alpha_scale = 1.0;
@@ -1053,7 +1090,7 @@ pub fn range_slider_with_controller(
         Color::new(base_state.r, base_state.g, base_state.b, state_layer_alpha);
 
     let colors = if args.disabled {
-        let scheme = material_color::global_material_scheme();
+        let scheme = use_context::<MaterialColorScheme>();
         SliderColors {
             active_track: scheme.on_surface.with_alpha(0.38),
             inactive_track: scheme.on_surface.with_alpha(0.12),
@@ -1075,8 +1112,8 @@ pub fn range_slider_with_controller(
 
     // Render Start Focus & Handle
     render_focus(layout.base, &colors);
-    // Note: render_focus uses layout.focus_width/height. Position is handled by measure/place.
-    // But we need two focus indicators.
+    // Note: render_focus uses layout.focus_width/height. Position is handled by
+    // measure/place. But we need two focus indicators.
 
     // Render End Focus
     render_focus(layout.base, &colors);
@@ -1114,13 +1151,7 @@ pub fn range_slider_with_controller(
     }));
 
     measure(Box::new(move |input| {
-        let dummy_args_for_resolve = SliderArgsBuilder::default()
-            .width(args.width)
-            .size(args.size)
-            .build()
-            .expect("Failed to build dummy args");
-        let component_width =
-            resolve_component_width(&dummy_args_for_resolve, input.parent_constraint);
+        let component_width = resolve_component_width(&dummy_for_measure, input.parent_constraint);
         let resolved_layout = range_slider_layout(&args, component_width);
         measure_range_slider(input, resolved_layout, start, end)
     }));

@@ -4,11 +4,16 @@
 //!
 //! Use to display labels, headings, or other static or dynamic text content.
 use derive_builder::Builder;
-use tessera_ui::{Color, ComputedData, DimensionValue, Dp, Px, accesskit::Role, tessera};
+use tessera_ui::{
+    Color, ComputedData, DimensionValue, Dp, Px, accesskit::Role, tessera, use_context,
+};
 
-use crate::pipelines::text::{
-    command::{TextCommand, TextConstraint},
-    pipeline::TextData,
+use crate::{
+    pipelines::text::{
+        command::{TextCommand, TextConstraint},
+        pipeline::TextData,
+    },
+    theme::ContentColor,
 };
 
 pub use crate::pipelines::text::pipeline::{read_font_system, write_font_system};
@@ -22,7 +27,7 @@ pub struct TextArgs {
     pub text: String,
 
     /// The color of the text.
-    #[builder(default = "crate::material_color::global_material_scheme().on_surface")]
+    #[builder(default = "use_context::<ContentColor>().current")]
     pub color: Color,
 
     /// The font size in density-independent pixels (dp).
@@ -33,7 +38,8 @@ pub struct TextArgs {
     #[builder(default, setter(strip_option))]
     pub line_height: Option<Dp>,
 
-    /// Optional label announced by assistive technologies. Defaults to the text content.
+    /// Optional label announced by assistive technologies. Defaults to the text
+    /// content.
     #[builder(default, setter(strip_option, into))]
     pub accessibility_label: Option<String>,
 
@@ -75,17 +81,19 @@ impl From<&str> for TextArgs {
 ///
 /// ## Usage
 ///
-/// Display simple text content. For more complex styling or editing, see other components.
+/// Display simple text content. For more complex styling or editing, see other
+/// components.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the text content and styling; see [`TextArgs`]. Can be converted from a `String` or `&str`.
+/// - `args` — configures the text content and styling; see [`TextArgs`]. Can be
+///   converted from a `String` or `&str`.
 ///
 /// ## Examples
 ///
 /// ```
-/// use tessera_ui_basic_components::text::{text, TextArgsBuilder};
 /// use tessera_ui::{Color, Dp};
+/// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
 ///
 /// // Simple text from a string literal
 /// text("Hello, world!");

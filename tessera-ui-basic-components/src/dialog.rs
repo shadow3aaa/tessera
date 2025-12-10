@@ -2,7 +2,8 @@
 //!
 //! ## Usage
 //!
-//! Used to show modal dialogs such as alerts, confirmations, wizards and forms; dialogs block interaction with underlying content while active.
+//! Used to show modal dialogs such as alerts, confirmations, wizards and forms;
+//! dialogs block interaction with underlying content while active.
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -10,7 +11,10 @@ use std::{
 
 use derive_builder::Builder;
 use parking_lot::RwLock;
-use tessera_ui::{Color, DimensionValue, Dp, remember, tessera, winit};
+use tessera_ui::{
+    Color, ComputedData, DimensionValue, Dp, Px, PxPosition, provide_context, remember, tessera,
+    use_context, winit,
+};
 
 use crate::{
     ShadowProps,
@@ -19,12 +23,12 @@ use crate::{
     boxed::{BoxedArgsBuilder, boxed},
     column::{ColumnArgsBuilder, column},
     fluid_glass::{FluidGlassArgsBuilder, fluid_glass},
-    material_color::global_material_scheme,
     row::{RowArgsBuilder, row},
     shape_def::{RoundedCorner, Shape},
     spacer::{SpacerArgsBuilder, spacer},
     surface::{SurfaceArgsBuilder, surface},
     text::{TextArgsBuilder, text},
+    theme::{ContentColor, MaterialColorScheme},
 };
 
 /// The duration of the full dialog animation.
@@ -195,9 +199,10 @@ fn render_scrim(args: &DialogProviderArgs, is_open: bool, progress: f32) {
         }
         DialogStyle::Material => {
             let alpha = scrim_alpha_for(progress, is_open);
+            let scrim_color = use_context::<MaterialColorScheme>().scrim;
             surface(
                 SurfaceArgsBuilder::default()
-                    .style(Color::BLACK.with_alpha(alpha).into())
+                    .style(scrim_color.with_alpha(alpha).into())
                     .on_click(args.on_close_request.clone())
                     .width(DimensionValue::Fill {
                         min: None,
@@ -238,6 +243,19 @@ fn dialog_content_wrapper(
     padding: Dp,
     content: impl FnOnce() + Send + Sync + 'static,
 ) {
+    measure(Box::new(move |input| {
+        input.set_opacity(alpha);
+        let Some(child_id) = input.children_ids.first().copied() else {
+            return Ok(ComputedData {
+                width: Px(0),
+                height: Px(0),
+            });
+        };
+        let computed = input.measure_child(child_id, input.parent_constraint)?;
+        input.place_child(child_id, PxPosition::ZERO);
+        Ok(computed)
+    }));
+
     boxed(
         BoxedArgsBuilder::default()
             .width(DimensionValue::FILLED)
@@ -278,7 +296,11 @@ fn dialog_content_wrapper(
                         DialogStyle::Material => {
                             surface(
                                 SurfaceArgsBuilder::default()
-                                    .style(Color::WHITE.with_alpha(alpha).into())
+                                    .style(
+                                        use_context::<MaterialColorScheme>()
+                                            .surface_container_high
+                                            .into(),
+                                    )
                                     .shadow(ShadowProps {
                                         color: Color::BLACK.with_alpha(alpha / 4.0),
                                         ..Default::default()
@@ -309,18 +331,23 @@ fn dialog_content_wrapper(
 ///
 /// # Usage
 ///
-/// Show modal content for alerts, confirmation dialogs, multi-step forms, or onboarding steps that require blocking user interaction with the main UI.
+/// Show modal content for alerts, confirmation dialogs, multi-step forms, or
+/// onboarding steps that require blocking user interaction with the main UI.
 ///
 /// # Parameters
 ///
-/// - `args` — configuration for dialog appearance and the `on_close_request` callback; see [`DialogProviderArgs`].
+/// - `args` — configuration for dialog appearance and the `on_close_request`
+///   callback; see [`DialogProviderArgs`].
 /// - `main_content` — closure that renders the always-visible base UI.
-/// - `dialog_content` — closure that renders dialog content; receives a `f32` alpha for animation.
+/// - `dialog_content` — closure that renders dialog content; receives a `f32`
+///   alpha for animation.
 ///
 /// # Examples
 ///
 /// ```
-/// use tessera_ui_basic_components::dialog::{dialog_provider, DialogProviderArgsBuilder, basic_dialog, BasicDialogArgsBuilder};
+/// use tessera_ui_basic_components::dialog::{
+///     BasicDialogArgsBuilder, DialogProviderArgsBuilder, basic_dialog, dialog_provider,
+/// };
 ///
 /// dialog_provider(
 ///     DialogProviderArgsBuilder::default()
@@ -335,7 +362,7 @@ fn dialog_content_wrapper(
 ///                 .headline("Dialog Title")
 ///                 .supporting_text("This is the dialog body text.")
 ///                 .build()
-///                 .unwrap()
+///                 .unwrap(),
 ///         );
 ///     },
 /// );
@@ -362,12 +389,13 @@ pub fn dialog_provider(
 
 /// # dialog_provider_with_controller
 ///
-/// Controlled version of [`dialog_provider`] that accepts an external controller.
+/// Controlled version of [`dialog_provider`] that accepts an external
+/// controller.
 ///
 /// # Usage
 ///
-/// Use when you need to manage dialog state externally, for example from a global app state or view model.
-/// And also need to toggle dialog explicitly.
+/// Use when you need to manage dialog state externally, for example from a
+/// global app state or view model. And also need to toggle dialog explicitly.
 ///
 /// # Parameters
 ///
@@ -380,8 +408,11 @@ pub fn dialog_provider(
 ///
 /// ```
 /// use std::sync::Arc;
-/// use tessera_ui::{tessera, remember};
-/// use tessera_ui_basic_components::dialog::{dialog_provider_with_controller, DialogProviderArgsBuilder, DialogController, basic_dialog, BasicDialogArgsBuilder};
+/// use tessera_ui::{remember, tessera};
+/// use tessera_ui_basic_components::dialog::{
+///     BasicDialogArgsBuilder, DialogController, DialogProviderArgsBuilder, basic_dialog,
+///     dialog_provider_with_controller,
+/// };
 ///
 /// #[tessera]
 /// fn foo() {
@@ -395,16 +426,14 @@ pub fn dialog_provider(
 ///             .build()
 ///             .unwrap(),
 ///         dialog_controller.clone(),
-///         || {
-///             /* main content */
-///         },
+///         || { /* main content */ },
 ///         |alpha| {
 ///             basic_dialog(
 ///                 BasicDialogArgsBuilder::default()
 ///                     .headline("Dialog Title")
 ///                     .supporting_text("This is the dialog body text.")
 ///                     .build()
-///                     .unwrap()
+///                     .unwrap(),
 ///             );
 ///         },
 ///     );
@@ -460,10 +489,12 @@ pub struct BasicDialogArgs {
     /// The supporting text of the dialog.
     #[builder(setter(into))]
     pub supporting_text: String,
-    /// The button used to confirm a proposed action, thus resolving what triggered the dialog.
+    /// The button used to confirm a proposed action, thus resolving what
+    /// triggered the dialog.
     #[builder(default, setter(custom))]
     pub confirm_button: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// The button used to dismiss a proposed action, thus resolving what triggered the dialog.
+    /// The button used to dismiss a proposed action, thus resolving what
+    /// triggered the dialog.
     #[builder(default, setter(custom))]
     pub dismiss_button: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -503,26 +534,28 @@ impl BasicDialogArgsBuilder {
 /// # Examples
 ///
 /// ```
-/// use tessera_ui_basic_components::dialog::{basic_dialog, BasicDialogArgsBuilder};
-/// use tessera_ui_basic_components::text::{text, TextArgsBuilder};
-/// use tessera_ui_basic_components::button::{button, ButtonArgsBuilder};
 /// use std::sync::Arc;
+/// use tessera_ui_basic_components::button::{ButtonArgsBuilder, button};
+/// use tessera_ui_basic_components::dialog::{BasicDialogArgsBuilder, basic_dialog};
+/// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
 ///
 /// basic_dialog(
 ///     BasicDialogArgsBuilder::default()
 ///         .headline("Dialog Title")
 ///         .supporting_text("This is the dialog body text.")
 ///         .confirm_button(|| {
-///             button(ButtonArgsBuilder::default().build().unwrap(), || text("Confirm"));
+///             button(ButtonArgsBuilder::default().build().unwrap(), || {
+///                 text("Confirm")
+///             });
 ///         })
 ///         .build()
-///         .unwrap()
+///         .unwrap(),
 /// );
 /// ```
 #[tessera]
 pub fn basic_dialog(args: impl Into<BasicDialogArgs>) {
     let args = args.into();
-    let scheme = global_material_scheme();
+    let scheme = (*use_context::<MaterialColorScheme>()).clone();
     let alignment = if args.icon.is_some() {
         CrossAxisAlignment::Center
     } else {
@@ -542,15 +575,23 @@ pub fn basic_dialog(args: impl Into<BasicDialogArgs>) {
         move |scope| {
             // Icon
             if let Some(icon) = args.icon {
+                let icon_color = scheme.secondary;
                 scope.child(move || {
-                    icon();
+                    provide_context(
+                        ContentColor {
+                            current: icon_color,
+                        },
+                        || {
+                            icon();
+                        },
+                    );
                 });
                 scope.child(|| {
                     spacer(
                         SpacerArgsBuilder::default()
                             .height(Dp(16.0))
                             .build()
-                            .unwrap(),
+                            .expect("failed to build spacer args for icon"),
                     );
                 });
             }
@@ -564,7 +605,7 @@ pub fn basic_dialog(args: impl Into<BasicDialogArgs>) {
                             .size(Dp(24.0))
                             .color(scheme.on_surface)
                             .build()
-                            .unwrap(),
+                            .expect("failed to build headline text args"),
                     );
                 });
                 scope.child(|| {
@@ -572,7 +613,7 @@ pub fn basic_dialog(args: impl Into<BasicDialogArgs>) {
                         SpacerArgsBuilder::default()
                             .height(Dp(16.0))
                             .build()
-                            .unwrap(),
+                            .expect("failed to build headline spacer args"),
                     );
                 });
             }
@@ -585,7 +626,7 @@ pub fn basic_dialog(args: impl Into<BasicDialogArgs>) {
                         .size(Dp(14.0))
                         .color(scheme.on_surface_variant)
                         .build()
-                        .unwrap(),
+                        .expect("failed to build supporting text args"),
                 );
             });
 
@@ -599,38 +640,48 @@ pub fn basic_dialog(args: impl Into<BasicDialogArgs>) {
                         SpacerArgsBuilder::default()
                             .height(Dp(24.0))
                             .build()
-                            .unwrap(),
+                            .expect("failed to build actions spacer args"),
                     );
                 });
+                let action_color = scheme.primary;
                 scope.child(move || {
-                    row(
-                        RowArgsBuilder::default()
-                            .width(DimensionValue::FILLED)
-                            .main_axis_alignment(MainAxisAlignment::End)
-                            .build()
-                            .unwrap(),
-                        |s| {
-                            let has_dismiss = dismiss_button.is_some();
-                            let has_confirm = confirm_button.is_some();
+                    provide_context(
+                        ContentColor {
+                            current: action_color,
+                        },
+                        || {
+                            row(
+                                RowArgsBuilder::default()
+                                    .width(DimensionValue::FILLED)
+                                    .main_axis_alignment(MainAxisAlignment::End)
+                                    .build()
+                                    .expect("failed to build actions row args"),
+                                |s| {
+                                    let has_dismiss = dismiss_button.is_some();
+                                    let has_confirm = confirm_button.is_some();
 
-                            if let Some(dismiss) = dismiss_button {
-                                s.child(move || dismiss());
-                            }
+                                    if let Some(dismiss) = dismiss_button {
+                                        s.child(move || dismiss());
+                                    }
 
-                            if has_dismiss && has_confirm {
-                                s.child(|| {
-                                    spacer(
-                                        SpacerArgsBuilder::default()
-                                            .width(Dp(8.0))
-                                            .build()
-                                            .unwrap(),
-                                    );
-                                });
-                            }
+                                    if has_dismiss && has_confirm {
+                                        s.child(|| {
+                                            spacer(
+                                                SpacerArgsBuilder::default()
+                                                    .width(Dp(8.0))
+                                                    .build()
+                                                    .expect(
+                                                        "failed to build action gap spacer args",
+                                                    ),
+                                            );
+                                        });
+                                    }
 
-                            if let Some(confirm) = confirm_button {
-                                s.child(move || confirm());
-                            }
+                                    if let Some(confirm) = confirm_button {
+                                        s.child(move || confirm());
+                                    }
+                                },
+                            );
                         },
                     );
                 });

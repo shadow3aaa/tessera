@@ -1,14 +1,14 @@
 //! Color utilities for the Tessera UI framework.
 //!
-//! This module provides the [`Color`] struct and related utilities for working with colors
-//! in the linear sRGB color space. The color representation is optimized for GPU rendering
-//! and shader compatibility.
+//! This module provides the [`Color`] struct and related utilities for working
+//! with colors in the linear sRGB color space. The color representation is
+//! optimized for GPU rendering and shader compatibility.
 //!
 //! # Color Space
 //!
-//! All colors are represented in the linear sRGB color space, which is the standard for
-//! modern graphics rendering. This ensures consistent color reproduction across different
-//! devices and platforms.
+//! All colors are represented in the linear sRGB color space, which is the
+//! standard for modern graphics rendering. This ensures consistent color
+//! reproduction across different devices and platforms.
 //!
 //! # Usage
 //!
@@ -36,18 +36,20 @@ use bytemuck::{Pod, Zeroable};
 
 /// A color in the linear sRGB color space with an alpha component.
 ///
-/// This struct represents a color using four floating-point components: red, green, blue,
-/// and alpha (transparency). Values are typically in the range `[0.0, 1.0]`, where:
+/// This struct represents a color using four floating-point components: red,
+/// green, blue, and alpha (transparency). Values are typically in the range
+/// `[0.0, 1.0]`, where:
 /// - `0.0` represents no intensity (black for RGB, fully transparent for alpha)
-/// - `1.0` represents full intensity (full color for RGB, fully opaque for alpha)
+/// - `1.0` represents full intensity (full color for RGB, fully opaque for
+///   alpha)
 ///
 /// The struct is designed to be GPU-friendly with a C-compatible memory layout,
 /// making it suitable for direct use in shaders and graphics pipelines.
 ///
 /// # Memory Layout
 ///
-/// The struct uses `#[repr(C)]` to ensure a predictable memory layout that matches
-/// the expected format for GPU buffers and shader uniforms.
+/// The struct uses `#[repr(C)]` to ensure a predictable memory layout that
+/// matches the expected format for GPU buffers and shader uniforms.
 ///
 /// # Examples
 ///
@@ -72,7 +74,8 @@ pub struct Color {
     pub g: f32,
     /// Blue component (0.0 to 1.0)
     pub b: f32,
-    /// Alpha (transparency) component (0.0 = fully transparent, 1.0 = fully opaque)
+    /// Alpha (transparency) component (0.0 = fully transparent, 1.0 = fully
+    /// opaque)
     pub a: f32,
 }
 
@@ -180,7 +183,8 @@ impl Color {
     /// * `r` - Red component in range [0, 255]
     /// * `g` - Green component in range [0, 255]
     /// * `b` - Blue component in range [0, 255]
-    /// * `a` - Alpha component in range [0, 255] (0 = transparent, 255 = opaque)
+    /// * `a` - Alpha component in range [0, 255] (0 = transparent, 255 =
+    ///   opaque)
     ///
     /// # Examples
     ///
@@ -277,6 +281,28 @@ impl Color {
             b: self.b,
             a: alpha,
         }
+    }
+
+    /// Blends `overlay` over this base color with the given alpha for the
+    /// overlay.
+    ///
+    /// # Parameters
+    ///
+    /// * `overlay` - The color to be composited on top of `self`.
+    /// * `overlay_alpha` - Opacity of the overlay in range `[0.0, 1.0]`.
+    ///
+    /// # Returns
+    ///
+    /// A new `Color` representing the blended result.
+    #[inline]
+    #[must_use]
+    pub fn blend_over(self, overlay: Color, overlay_alpha: f32) -> Self {
+        let alpha = overlay_alpha.clamp(0.0, 1.0);
+        let r = overlay.r.mul_add(alpha, self.r * (1.0 - alpha));
+        let g = overlay.g.mul_add(alpha, self.g * (1.0 - alpha));
+        let b = overlay.b.mul_add(alpha, self.b * (1.0 - alpha));
+        let a = overlay.a.mul_add(alpha, self.a * (1.0 - alpha));
+        Self::new(r, g, b, a)
     }
     /// Linearly interpolates between two colors.
     ///

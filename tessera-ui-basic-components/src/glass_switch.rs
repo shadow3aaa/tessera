@@ -293,14 +293,15 @@ fn apply_glass_switch_accessibility(
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the switch's appearance and `on_toggle` callback; see [`GlassSwitchArgs`].
+/// - `args` — configures the switch's appearance and `on_toggle` callback; see
+///   [`GlassSwitchArgs`].
 ///
 /// ## Examples
 ///
 /// ```
 /// use std::sync::Arc;
 /// use tessera_ui_basic_components::glass_switch::{
-///     glass_switch_with_controller, GlassSwitchArgsBuilder, GlassSwitchController,
+///     GlassSwitchArgsBuilder, GlassSwitchController, glass_switch_with_controller,
 /// };
 ///
 /// let controller = Arc::new(GlassSwitchController::new(false));
@@ -327,21 +328,24 @@ pub fn glass_switch(args: impl Into<GlassSwitchArgs>) {
 ///
 /// # Usage
 ///
-/// Use when you need a toggle switch with a glassmorphic style and explicit state control.
+/// Use when you need a toggle switch with a glassmorphic style and explicit
+/// state control.
 ///
 /// # Parameters
 ///
-/// - `args` — configures the switch's appearance and `on_toggle` callback; see [`GlassSwitchArgs`].
-/// - `controller` manage the component's checked and animation state; see [`GlassSwitchController`].
+/// - `args` — configures the switch's appearance and `on_toggle` callback; see
+///   [`GlassSwitchArgs`].
+/// - `controller` manage the component's checked and animation state; see
+///   [`GlassSwitchController`].
 ///
 /// # Examples
 ///
 /// ```
 /// use std::sync::Arc;
-/// use tessera_ui_basic_components::glass_switch::{
-///    glass_switch_with_controller, GlassSwitchArgsBuilder, GlassSwitchController,
-/// };
 /// use tessera_ui::{remember, tessera};
+/// use tessera_ui_basic_components::glass_switch::{
+///     GlassSwitchArgsBuilder, GlassSwitchController, glass_switch_with_controller,
+/// };
 ///
 /// #[tessera]
 /// fn foo() {

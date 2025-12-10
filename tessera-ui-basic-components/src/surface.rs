@@ -10,18 +10,18 @@ use tessera_ui::{
     Color, ComputedData, Constraint, CursorEventContent, DimensionValue, Dp, GestureState,
     InputHandlerInput, PressKeyEventType, Px, PxPosition, PxSize,
     accesskit::{Action, Role},
-    remember, tessera,
+    provide_context, remember, tessera, use_context,
     winit::window::CursorIcon,
 };
 
 use crate::{
     RippleProps, ShadowProps,
-    material_color::global_material_scheme,
     padding_utils::remove_padding_from_dimension,
     pipelines::{shape::command::ShapeCommand, simple_rect::command::SimpleRectCommand},
     pos_misc::is_position_in_component,
     ripple_state::RippleState,
     shape_def::{ResolvedShape, RoundedCorner, Shape},
+    theme::{ContentColor, MaterialColorScheme, content_color_for},
 };
 
 /// Defines the visual style of the surface (fill, outline, or both).
@@ -52,7 +52,7 @@ pub enum SurfaceStyle {
 
 impl Default for SurfaceStyle {
     fn default() -> Self {
-        let scheme = global_material_scheme();
+        let scheme = use_context::<MaterialColorScheme>();
         SurfaceStyle::Filled {
             color: scheme.surface,
         }
@@ -76,14 +76,17 @@ pub struct SurfaceArgs {
     /// This is only active when `on_click` is also provided.
     #[builder(default)]
     pub hover_style: Option<SurfaceStyle>,
-    /// Geometric outline of the surface (rounded rectangle / ellipse / capsule variants).
+    /// Geometric outline of the surface (rounded rectangle / ellipse / capsule
+    /// variants).
     #[builder(default)]
     pub shape: Shape,
-    /// Optional shadow/elevation style. When present it is passed through to the shape pipeline.
+    /// Optional shadow/elevation style. When present it is passed through to
+    /// the shape pipeline.
     #[builder(default, setter(strip_option))]
     pub shadow: Option<ShadowProps>,
-    /// Internal padding applied symmetrically (left/right & top/bottom). Child content is
-    /// positioned at (padding, padding). Also influences measured minimum size.
+    /// Internal padding applied symmetrically (left/right & top/bottom). Child
+    /// content is positioned at (padding, padding). Also influences
+    /// measured minimum size.
     #[builder(default = "Dp(0.0)")]
     pub padding: Dp,
     /// Explicit width constraint (Fixed / Wrap / Fill). Defaults to `Wrap`.
@@ -92,7 +95,8 @@ pub struct SurfaceArgs {
     /// Explicit height constraint (Fixed / Wrap / Fill). Defaults to `Wrap`.
     #[builder(default = "DimensionValue::WRAP", setter(into))]
     pub height: DimensionValue,
-    /// Optional click handler. Presence of this value makes the surface interactive:
+    /// Optional click handler. Presence of this value makes the surface
+    /// interactive:
     ///
     /// * Cursor changes to pointer when hovered
     /// * Press / release events are captured
@@ -100,15 +104,14 @@ pub struct SurfaceArgs {
     #[builder(default, setter(strip_option))]
     pub on_click: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Color of the ripple effect (used when interactive).
-    #[builder(
-        default = "crate::material_color::global_material_scheme().on_surface.with_alpha(0.12)"
-    )]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_surface.with_alpha(0.12)")]
     pub ripple_color: Color,
-    /// If true, all input events inside the surface bounds are blocked (stop propagation),
-    /// after (optionally) handling its own click logic.
+    /// If true, all input events inside the surface bounds are blocked (stop
+    /// propagation), after (optionally) handling its own click logic.
     #[builder(default = "false")]
     pub block_input: bool,
-    /// Optional explicit accessibility role. Defaults to `Role::Button` when interactive.
+    /// Optional explicit accessibility role. Defaults to `Role::Button` when
+    /// interactive.
     #[builder(default, setter(strip_option))]
     pub accessibility_role: Option<Role>,
     /// Optional label read by assistive technologies.
@@ -410,21 +413,26 @@ fn compute_surface_size(
 ///
 /// ## Usage
 ///
-/// Wrap content to provide a visual background, shape, and optional click handling with a ripple effect.
+/// Wrap content to provide a visual background, shape, and optional click
+/// handling with a ripple effect.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the surface's appearance, layout, and interaction; see [`SurfaceArgs`].
+/// - `args` — configures the surface's appearance, layout, and interaction; see
+///   [`SurfaceArgs`].
 /// - `child` — a closure that renders the content inside the surface.
 ///
 /// ## Examples
 ///
 /// ```
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// use std::sync::Arc;
 /// use tessera_ui::Dp;
 /// use tessera_ui_basic_components::{
-///     surface::{surface, SurfaceArgsBuilder},
-///     text::{text, TextArgsBuilder},
+///     surface::{SurfaceArgsBuilder, surface},
+///     text::{TextArgsBuilder, text},
 /// };
 ///
 /// surface(
@@ -434,13 +442,37 @@ fn compute_surface_size(
 ///         .build()
 ///         .unwrap(),
 ///     || {
-///         text(TextArgsBuilder::default().text("Click me".to_string()).build().expect("builder construction failed"));
+///         text(
+///             TextArgsBuilder::default()
+///                 .text("Click me".to_string())
+///                 .build()
+///                 .expect("builder construction failed"),
+///         );
 ///     },
 /// );
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn surface(args: SurfaceArgs, child: impl FnOnce()) {
-    (child)();
+    let scheme = use_context::<MaterialColorScheme>();
+    let inherited_content_color = use_context::<ContentColor>().current;
+    let content_color = match &args.style {
+        SurfaceStyle::Filled { color } => content_color_for(*color, scheme.as_ref()),
+        SurfaceStyle::FilledOutlined { fill_color, .. } => {
+            content_color_for(*fill_color, scheme.as_ref())
+        }
+        SurfaceStyle::Outlined { .. } => inherited_content_color,
+    };
+
+    provide_context(
+        ContentColor {
+            current: content_color,
+        },
+        || {
+            (child)();
+        },
+    );
     let ripple_state = args.on_click.as_ref().map(|_| remember(RippleState::new));
     let ripple_state_for_measure = ripple_state.clone();
     let args_measure_clone = args.clone();

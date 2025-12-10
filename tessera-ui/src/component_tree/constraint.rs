@@ -8,8 +8,10 @@
 //!
 //! The constraint system is built around two main concepts:
 //!
-//! - **[`DimensionValue`]**: Specifies how a single dimension (width or height) should be calculated
-//! - **[`Constraint`]**: Combines width and height dimension values for complete layout specification
+//! - **[`DimensionValue`]**: Specifies how a single dimension (width or height)
+//!   should be calculated
+//! - **[`Constraint`]**: Combines width and height dimension values for
+//!   complete layout specification
 //!
 //! ## Dimension Types
 //!
@@ -33,18 +35,27 @@
 //! # use tessera_ui::Px;
 //! # use tessera_ui::DimensionValue;
 //! // Wrap content with no limits
-//! let wrap_content = DimensionValue::Wrap { min: None, max: None };
+//! let wrap_content = DimensionValue::Wrap {
+//!     min: None,
+//!     max: None,
+//! };
 //!
 //! // Wrap content but ensure at least 50px wide
-//! let wrap_with_min = DimensionValue::Wrap { min: Some(Px(50)), max: None };
+//! let wrap_with_min = DimensionValue::Wrap {
+//!     min: Some(Px(50)),
+//!     max: None,
+//! };
 //!
 //! // Wrap content but never exceed 200px
-//! let wrap_with_max = DimensionValue::Wrap { min: None, max: Some(Px(200)) };
+//! let wrap_with_max = DimensionValue::Wrap {
+//!     min: None,
+//!     max: Some(Px(200)),
+//! };
 //!
 //! // Wrap content within bounds
 //! let wrap_bounded = DimensionValue::Wrap {
 //!     min: Some(Px(50)),
-//!     max: Some(Px(200))
+//!     max: Some(Px(200)),
 //! };
 //! ```
 //!
@@ -55,24 +66,36 @@
 //! # use tessera_ui::Px;
 //! # use tessera_ui::DimensionValue;
 //! // Fill all available space
-//! let fill_all = DimensionValue::Fill { min: None, max: None };
+//! let fill_all = DimensionValue::Fill {
+//!     min: None,
+//!     max: None,
+//! };
 //!
 //! // Fill space but ensure at least 100px
-//! let fill_with_min = DimensionValue::Fill { min: Some(Px(100)), max: None };
+//! let fill_with_min = DimensionValue::Fill {
+//!     min: Some(Px(100)),
+//!     max: None,
+//! };
 //!
 //! // Fill space but never exceed 300px
-//! let fill_with_max = DimensionValue::Fill { min: None, max: Some(Px(300)) };
+//! let fill_with_max = DimensionValue::Fill {
+//!     min: None,
+//!     max: Some(Px(300)),
+//! };
 //! ```
 //!
 //! ## Constraint Merging
 //!
-//! When components are nested, their constraints must be merged to resolve conflicts
-//! and ensure consistent layout. The [`Constraint::merge`] method implements this
-//! logic with the following rules:
+//! When components are nested, their constraints must be merged to resolve
+//! conflicts and ensure consistent layout. The [`Constraint::merge`] method
+//! implements this logic with the following rules:
 //!
-//! - **Fixed always wins**: A fixed constraint cannot be overridden by its parent
-//! - **Wrap preserves content sizing**: Wrap constraints maintain their intrinsic sizing behavior
-//! - **Fill adapts to available space**: Fill constraints expand within parent bounds
+//! - **Fixed always wins**: A fixed constraint cannot be overridden by its
+//!   parent
+//! - **Wrap preserves content sizing**: Wrap constraints maintain their
+//!   intrinsic sizing behavior
+//! - **Fill adapts to available space**: Fill constraints expand within parent
+//!   bounds
 //!
 //! ### Merge Examples
 //!
@@ -82,21 +105,30 @@
 //! // Parent provides 200px of space
 //! let parent = Constraint::new(
 //!     DimensionValue::Fixed(Px(200)),
-//!     DimensionValue::Fixed(Px(200))
+//!     DimensionValue::Fixed(Px(200)),
 //! );
 //!
 //! // Child wants to fill with minimum 50px
 //! let child = Constraint::new(
-//!     DimensionValue::Fill { min: Some(Px(50)), max: None },
-//!     DimensionValue::Fill { min: Some(Px(50)), max: None }
+//!     DimensionValue::Fill {
+//!         min: Some(Px(50)),
+//!         max: None,
+//!     },
+//!     DimensionValue::Fill {
+//!         min: Some(Px(50)),
+//!         max: None,
+//!     },
 //! );
 //!
 //! // Result: Child fills parent's 200px space, respecting its 50px minimum
 //! let merged = child.merge(&parent);
-//! assert_eq!(merged.width, DimensionValue::Fill {
-//!     min: Some(Px(50)),
-//!     max: Some(Px(200))
-//! });
+//! assert_eq!(
+//!     merged.width,
+//!     DimensionValue::Fill {
+//!         min: Some(Px(50)),
+//!         max: Some(Px(200))
+//!     }
+//! );
 //! ```
 
 use std::ops::Sub;
@@ -112,9 +144,10 @@ use crate::{Dp, Px};
 pub enum DimensionValue {
     /// The dimension is a fixed value in logical pixels.
     ///
-    /// This variant represents a component that has a specific, unchanging size.
-    /// Fixed dimensions cannot be overridden by parent constraints and will
-    /// always maintain their specified size regardless of available space.
+    /// This variant represents a component that has a specific, unchanging
+    /// size. Fixed dimensions cannot be overridden by parent constraints
+    /// and will always maintain their specified size regardless of
+    /// available space.
     ///
     /// # Example
     ///
@@ -125,15 +158,19 @@ pub enum DimensionValue {
     /// ```
     Fixed(Px),
 
-    /// The dimension should wrap its content, optionally bounded by min and/or max logical pixels.
+    /// The dimension should wrap its content, optionally bounded by min and/or
+    /// max logical pixels.
     ///
-    /// This variant represents a component that sizes itself based on its content.
-    /// The component will be as small as possible while still containing all its content,
-    /// but can be constrained by optional minimum and maximum bounds.
+    /// This variant represents a component that sizes itself based on its
+    /// content. The component will be as small as possible while still
+    /// containing all its content, but can be constrained by optional
+    /// minimum and maximum bounds.
     ///
     /// # Parameters
-    /// - `min`: Optional minimum size - the component will never be smaller than this
-    /// - `max`: Optional maximum size - the component will never be larger than this
+    /// - `min`: Optional minimum size - the component will never be smaller
+    ///   than this
+    /// - `max`: Optional maximum size - the component will never be larger than
+    ///   this
     ///
     /// # Examples
     ///
@@ -141,31 +178,45 @@ pub enum DimensionValue {
     /// # use tessera_ui::Px;
     /// # use tessera_ui::DimensionValue;
     /// // Text that wraps to its content size
-    /// let text_width = DimensionValue::Wrap { min: None, max: None };
+    /// let text_width = DimensionValue::Wrap {
+    ///     min: None,
+    ///     max: None,
+    /// };
     ///
     /// // Text with minimum width to prevent being too narrow
-    /// let min_text_width = DimensionValue::Wrap { min: Some(Px(100)), max: None };
+    /// let min_text_width = DimensionValue::Wrap {
+    ///     min: Some(Px(100)),
+    ///     max: None,
+    /// };
     ///
     /// // Text that wraps but never exceeds container width
-    /// let bounded_text = DimensionValue::Wrap { min: Some(Px(50)), max: Some(Px(300)) };
+    /// let bounded_text = DimensionValue::Wrap {
+    ///     min: Some(Px(50)),
+    ///     max: Some(Px(300)),
+    /// };
     /// ```
     Wrap {
-        /// Optional minimum size, the component should never be smaller than this
+        /// Optional minimum size, the component should never be smaller than
+        /// this
         min: Option<Px>,
-        /// Optional maximum size, the component should never be larger than this
+        /// Optional maximum size, the component should never be larger than
+        /// this
         max: Option<Px>,
     },
 
-    /// The dimension should fill the available space, optionally bounded by min and/or max logical pixels.
+    /// The dimension should fill the available space, optionally bounded by min
+    /// and/or max logical pixels.
     ///
-    /// This variant represents a component that expands to use all available space
-    /// provided by its parent. The expansion can be constrained by optional minimum
-    /// and maximum bounds.
+    /// This variant represents a component that expands to use all available
+    /// space provided by its parent. The expansion can be constrained by
+    /// optional minimum and maximum bounds.
     ///
     /// # Parameters
     ///
-    /// - `min`: Optional minimum size - the component will never be smaller than this
-    /// - `max`: Optional maximum size - the component will never be larger than this
+    /// - `min`: Optional minimum size - the component will never be smaller
+    ///   than this
+    /// - `max`: Optional maximum size - the component will never be larger than
+    ///   this
     ///
     /// # Examples
     ///
@@ -173,18 +224,29 @@ pub enum DimensionValue {
     /// # use tessera_ui::Px;
     /// # use tessera_ui::DimensionValue;
     /// // Fill all available space
-    /// let flexible_width = DimensionValue::Fill { min: None, max: None };
+    /// let flexible_width = DimensionValue::Fill {
+    ///     min: None,
+    ///     max: None,
+    /// };
     ///
     /// // Fill space but ensure minimum usability
-    /// let min_fill_width = DimensionValue::Fill { min: Some(Px(200)), max: None };
+    /// let min_fill_width = DimensionValue::Fill {
+    ///     min: Some(Px(200)),
+    ///     max: None,
+    /// };
     ///
     /// // Fill space but cap maximum size for readability
-    /// let capped_fill = DimensionValue::Fill { min: Some(Px(100)), max: Some(Px(800)) };
+    /// let capped_fill = DimensionValue::Fill {
+    ///     min: Some(Px(100)),
+    ///     max: Some(Px(800)),
+    /// };
     /// ```
     Fill {
-        /// Optional minimum size, the component should never be smaller than this
+        /// Optional minimum size, the component should never be smaller than
+        /// this
         min: Option<Px>,
-        /// Optional maximum size, the component should never be larger than this
+        /// Optional maximum size, the component should never be larger than
+        /// this
         max: Option<Px>,
     },
 }
@@ -226,8 +288,10 @@ impl DimensionValue {
     ///
     /// # Returns
     ///
-    /// - For `Fixed`: Returns `Some(fixed_value)` since fixed dimensions have an implicit maximum
-    /// - For `Wrap` and `Fill`: Returns the `max` value if specified, otherwise `None`
+    /// - For `Fixed`: Returns `Some(fixed_value)` since fixed dimensions have
+    ///   an implicit maximum
+    /// - For `Wrap` and `Fill`: Returns the `max` value if specified, otherwise
+    ///   `None`
     ///
     /// # Example
     ///
@@ -237,10 +301,16 @@ impl DimensionValue {
     /// let fixed = DimensionValue::Fixed(Px(100));
     /// assert_eq!(fixed.get_max(), Some(Px(100)));
     ///
-    /// let wrap_bounded = DimensionValue::Wrap { min: Some(Px(50)), max: Some(Px(200)) };
+    /// let wrap_bounded = DimensionValue::Wrap {
+    ///     min: Some(Px(50)),
+    ///     max: Some(Px(200)),
+    /// };
     /// assert_eq!(wrap_bounded.get_max(), Some(Px(200)));
     ///
-    /// let wrap_unbounded = DimensionValue::Wrap { min: None, max: None };
+    /// let wrap_unbounded = DimensionValue::Wrap {
+    ///     min: None,
+    ///     max: None,
+    /// };
     /// assert_eq!(wrap_unbounded.get_max(), None);
     /// ```
     pub const fn get_max(&self) -> Option<Px> {
@@ -259,8 +329,10 @@ impl DimensionValue {
     ///
     /// # Returns
     ///
-    /// - For `Fixed`: Returns `Some(fixed_value)` since fixed dimensions have an implicit minimum
-    /// - For `Wrap` and `Fill`: Returns the `min` value if specified, otherwise `None`
+    /// - For `Fixed`: Returns `Some(fixed_value)` since fixed dimensions have
+    ///   an implicit minimum
+    /// - For `Wrap` and `Fill`: Returns the `min` value if specified, otherwise
+    ///   `None`
     ///
     /// # Example
     ///
@@ -270,10 +342,16 @@ impl DimensionValue {
     /// let fixed = DimensionValue::Fixed(Px(100));
     /// assert_eq!(fixed.get_min(), Some(Px(100)));
     ///
-    /// let fill_bounded = DimensionValue::Fill { min: Some(Px(50)), max: Some(Px(200)) };
+    /// let fill_bounded = DimensionValue::Fill {
+    ///     min: Some(Px(50)),
+    ///     max: Some(Px(200)),
+    /// };
     /// assert_eq!(fill_bounded.get_min(), Some(Px(50)));
     ///
-    /// let fill_unbounded = DimensionValue::Fill { min: None, max: None };
+    /// let fill_unbounded = DimensionValue::Fill {
+    ///     min: None,
+    ///     max: None,
+    /// };
     /// assert_eq!(fill_unbounded.get_min(), None);
     /// ```
     pub fn get_min(&self) -> Option<Px> {
@@ -386,19 +464,31 @@ impl std::ops::SubAssign<Px> for DimensionValue {
 /// // A button with fixed size
 /// let button_constraint = Constraint::new(
 ///     DimensionValue::Fixed(Px(120)),
-///     DimensionValue::Fixed(Px(40))
+///     DimensionValue::Fixed(Px(40)),
 /// );
 ///
 /// // A flexible container that fills width but wraps height
 /// let container_constraint = Constraint::new(
-///     DimensionValue::Fill { min: Some(Px(200)), max: None },
-///     DimensionValue::Wrap { min: None, max: None }
+///     DimensionValue::Fill {
+///         min: Some(Px(200)),
+///         max: None,
+///     },
+///     DimensionValue::Wrap {
+///         min: None,
+///         max: None,
+///     },
 /// );
 ///
 /// // A text component with bounded wrapping
 /// let text_constraint = Constraint::new(
-///     DimensionValue::Wrap { min: Some(Px(100)), max: Some(Px(400)) },
-///     DimensionValue::Wrap { min: None, max: None }
+///     DimensionValue::Wrap {
+///         min: Some(Px(100)),
+///         max: Some(Px(400)),
+///     },
+///     DimensionValue::Wrap {
+///         min: None,
+///         max: None,
+///     },
 /// );
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -410,19 +500,33 @@ pub struct Constraint {
 }
 
 impl Constraint {
-    /// A constraint that specifies no preference (Wrap { None, None } for both width and height).
+    /// A constraint that specifies no preference (Wrap { None, None } for both
+    /// width and height).
     ///
-    /// This constant represents the most flexible constraint possible, where a component
-    /// will size itself to its content without any bounds. It's equivalent to the default
-    /// constraint and is useful as a starting point for constraint calculations.
+    /// This constant represents the most flexible constraint possible, where a
+    /// component will size itself to its content without any bounds. It's
+    /// equivalent to the default constraint and is useful as a starting
+    /// point for constraint calculations.
     ///
     /// # Example
     ///
     /// ```
     /// # use tessera_ui::{Constraint, DimensionValue};
     /// let flexible = Constraint::NONE;
-    /// assert_eq!(flexible.width, DimensionValue::Wrap { min: None, max: None });
-    /// assert_eq!(flexible.height, DimensionValue::Wrap { min: None, max: None });
+    /// assert_eq!(
+    ///     flexible.width,
+    ///     DimensionValue::Wrap {
+    ///         min: None,
+    ///         max: None
+    ///     }
+    /// );
+    /// assert_eq!(
+    ///     flexible.height,
+    ///     DimensionValue::Wrap {
+    ///         min: None,
+    ///         max: None
+    ///     }
+    /// );
     /// ```
     pub const NONE: Self = Self {
         width: DimensionValue::Wrap {
@@ -449,41 +553,52 @@ impl Constraint {
     /// # use tessera_ui::{Constraint, DimensionValue};
     /// let constraint = Constraint::new(
     ///     DimensionValue::Fixed(Px(100)),
-    ///     DimensionValue::Fill { min: Some(Px(50)), max: None }
+    ///     DimensionValue::Fill {
+    ///         min: Some(Px(50)),
+    ///         max: None,
+    ///     },
     /// );
     /// ```
     pub fn new(width: DimensionValue, height: DimensionValue) -> Self {
         Self { width, height }
     }
 
-    /// Merges this constraint with a parent constraint to resolve layout conflicts.
+    /// Merges this constraint with a parent constraint to resolve layout
+    /// conflicts.
     ///
-    /// This method implements the core constraint resolution algorithm used throughout
-    /// Tessera's layout system. When components are nested, their constraints must be
-    /// merged to ensure consistent and predictable layout behavior.
+    /// This method implements the core constraint resolution algorithm used
+    /// throughout Tessera's layout system. When components are nested,
+    /// their constraints must be merged to ensure consistent and
+    /// predictable layout behavior.
     ///
     /// # Merge Rules
     ///
-    /// The merging follows a priority system designed to respect component intentions
-    /// while ensuring layout consistency:
+    /// The merging follows a priority system designed to respect component
+    /// intentions while ensuring layout consistency:
     ///
     /// ## Fixed Constraints (Highest Priority)
     ///
-    /// - **Fixed always wins**: A fixed constraint cannot be overridden by its parent
-    /// - Fixed dimensions maintain their exact size regardless of available space
+    /// - **Fixed always wins**: A fixed constraint cannot be overridden by its
+    ///   parent
+    /// - Fixed dimensions maintain their exact size regardless of available
+    ///   space
     ///
     /// ## Wrap Constraints (Content-Based)
     ///
-    /// - **Preserves content sizing**: Wrap constraints maintain their intrinsic sizing behavior
+    /// - **Preserves content sizing**: Wrap constraints maintain their
+    ///   intrinsic sizing behavior
     /// - When parent is Fixed: Child wraps within parent's fixed bounds
     /// - When parent is Wrap: Child combines min/max constraints with parent
     /// - When parent is Fill: Child wraps within parent's fill bounds
     ///
     /// ## Fill Constraints (Space-Filling)
     ///
-    /// - **Adapts to available space**: Fill constraints expand within parent bounds
-    /// - When parent is Fixed: Child fills parent's fixed space (respecting own min/max)
-    /// - When parent is Wrap: Child fills available space within parent's wrap bounds
+    /// - **Adapts to available space**: Fill constraints expand within parent
+    ///   bounds
+    /// - When parent is Fixed: Child fills parent's fixed space (respecting own
+    ///   min/max)
+    /// - When parent is Wrap: Child fills available space within parent's wrap
+    ///   bounds
     /// - When parent is Fill: Child combines fill constraints with parent
     ///
     /// # Parameters
@@ -502,25 +617,34 @@ impl Constraint {
     /// // Fixed child in fixed parent - child wins
     /// let parent = Constraint::new(
     ///     DimensionValue::Fixed(Px(200)),
-    ///     DimensionValue::Fixed(Px(200))
+    ///     DimensionValue::Fixed(Px(200)),
     /// );
     /// let child = Constraint::new(
     ///     DimensionValue::Fixed(Px(100)),
-    ///     DimensionValue::Fixed(Px(100))
+    ///     DimensionValue::Fixed(Px(100)),
     /// );
     /// let merged = child.merge(&parent);
     /// assert_eq!(merged.width, DimensionValue::Fixed(Px(100)));
     ///
     /// // Fill child in fixed parent - child fills parent's space
     /// let child_fill = Constraint::new(
-    ///     DimensionValue::Fill { min: Some(Px(50)), max: None },
-    ///     DimensionValue::Fill { min: Some(Px(50)), max: None }
+    ///     DimensionValue::Fill {
+    ///         min: Some(Px(50)),
+    ///         max: None,
+    ///     },
+    ///     DimensionValue::Fill {
+    ///         min: Some(Px(50)),
+    ///         max: None,
+    ///     },
     /// );
     /// let merged_fill = child_fill.merge(&parent);
-    /// assert_eq!(merged_fill.width, DimensionValue::Fill {
-    ///     min: Some(Px(50)),
-    ///     max: Some(Px(200))
-    /// });
+    /// assert_eq!(
+    ///     merged_fill.width,
+    ///     DimensionValue::Fill {
+    ///         min: Some(Px(50)),
+    ///         max: Some(Px(200))
+    ///     }
+    /// );
     /// ```
     pub fn merge(&self, parent_constraint: &Constraint) -> Self {
         let new_width = Self::merge_dimension(self.width, parent_constraint.width);
@@ -528,10 +652,12 @@ impl Constraint {
         Constraint::new(new_width, new_height)
     }
 
-    /// Internal helper method that merges two dimension values according to the constraint rules.
+    /// Internal helper method that merges two dimension values according to the
+    /// constraint rules.
     ///
-    /// This method implements the detailed logic for merging individual dimension constraints.
-    /// It's called by the public `merge` method to handle width and height dimensions separately.
+    /// This method implements the detailed logic for merging individual
+    /// dimension constraints. It's called by the public `merge` method to
+    /// handle width and height dimensions separately.
     ///
     /// # Parameters
     ///
@@ -576,7 +702,8 @@ impl Constraint {
                     // Child wants to wrap, so it stays as Wrap
                     min: c_min, // Keep child's own min, don't inherit from parent's Fill
                     max: match (c_max, p_fill_max) {
-                        (Some(c), Some(p)) => Some(c.min(p)), // Child's max should cap parent's fill max
+                        (Some(c), Some(p)) => Some(c.min(p)), /* Child's max should cap parent's */
+                        // fill max
                         (Some(c), None) => Some(c),
                         (None, Some(p)) => Some(p),
                         (None, None) => None,
@@ -588,12 +715,14 @@ impl Constraint {
                 max: c_fill_max,
             } => match parent_dim {
                 DimensionValue::Fixed(pv) => {
-                    // Child wants to fill, parent is fixed. Result is Fill with parent's fixed size as max.
+                    // Child wants to fill, parent is fixed. Result is Fill with parent's fixed size
+                    // as max.
                     DimensionValue::Fill {
                         min: c_fill_min, // Keep child's own min
                         max: match c_fill_max {
-                            Some(c) => Some(c.min(pv)), // Child's max capped by parent's fixed size
-                            None => Some(pv),           // Parent's fixed size becomes the max
+                            Some(c) => Some(c.min(pv)), /* Child's max capped by parent's fixed */
+                            // size
+                            None => Some(pv), // Parent's fixed size becomes the max
                         },
                     }
                 }
@@ -632,7 +761,7 @@ impl Constraint {
                     };
                     // Ensure min <= max if both are Some
                     let (final_min, final_max) = match (new_min, new_max) {
-                        (Some(n_min), Some(n_max)) if n_min > n_max => (Some(n_max), Some(n_max)), // Or handle error/warning
+                        (Some(n_min), Some(n_max)) if n_min > n_max => (Some(n_max), Some(n_max)), /* Or handle error/warning */
                         _ => (new_min, new_max),
                     };
                     DimensionValue::Fill {
@@ -687,8 +816,9 @@ mod tests {
         // First level merge: child merges with fixed parent
         let merged_child = child.merge(&parent);
 
-        // Child is Wrap, parent is Fixed - result should be Wrap with child's constraints
-        // Since child's max (80) is less than parent's fixed size (100), child keeps its bounds
+        // Child is Wrap, parent is Fixed - result should be Wrap with child's
+        // constraints Since child's max (80) is less than parent's fixed size
+        // (100), child keeps its bounds
         assert_eq!(
             merged_child.width,
             DimensionValue::Wrap {
@@ -708,7 +838,8 @@ mod tests {
         let final_result = grandchild.merge(&merged_child);
 
         // Both are Wrap - result should be Wrap with the more restrictive constraints
-        // Grandchild's max (50) is smaller than merged child's max (80), so grandchild wins
+        // Grandchild's max (50) is smaller than merged child's max (80), so grandchild
+        // wins
         assert_eq!(
             final_result.width,
             DimensionValue::Wrap {
@@ -755,7 +886,8 @@ mod tests {
         let result = child.merge(&parent);
 
         // Child is Wrap, parent is Fill - result should be Wrap
-        // Child keeps its own min (30px) and max (150px) since both are within parent's bounds
+        // Child keeps its own min (30px) and max (150px) since both are within parent's
+        // bounds
         assert_eq!(
             result.width,
             DimensionValue::Wrap {
@@ -774,8 +906,9 @@ mod tests {
 
     #[test]
     fn test_fill_parent_wrap_child_no_child_min() {
-        // Test Fill parent with Wrap child that has no minimum: Fill{50-200} -> Wrap{None-150}
-        // Child should keep its own constraints and not inherit parent's minimum
+        // Test Fill parent with Wrap child that has no minimum: Fill{50-200} ->
+        // Wrap{None-150} Child should keep its own constraints and not inherit
+        // parent's minimum
 
         let parent = Constraint::new(
             DimensionValue::Fill {
@@ -801,8 +934,9 @@ mod tests {
 
         let result = child.merge(&parent);
 
-        // Child is Wrap and should keep its own min (None), not inherit from parent's Fill min
-        // This preserves the wrap behavior of sizing to content without artificial minimums
+        // Child is Wrap and should keep its own min (None), not inherit from parent's
+        // Fill min This preserves the wrap behavior of sizing to content
+        // without artificial minimums
         assert_eq!(
             result.width,
             DimensionValue::Wrap {
@@ -821,8 +955,9 @@ mod tests {
 
     #[test]
     fn test_fill_parent_wrap_child_no_parent_max() {
-        // Test Fill parent with no maximum and Wrap child: Fill{50-None} -> Wrap{30-150}
-        // Child should keep its own constraints since parent has no upper bound
+        // Test Fill parent with no maximum and Wrap child: Fill{50-None} ->
+        // Wrap{30-150} Child should keep its own constraints since parent has
+        // no upper bound
 
         let parent = Constraint::new(
             DimensionValue::Fill {
@@ -848,7 +983,8 @@ mod tests {
 
         let result = child.merge(&parent);
 
-        // Child should keep its own constraints since parent Fill has no max to constrain it
+        // Child should keep its own constraints since parent Fill has no max to
+        // constrain it
         assert_eq!(
             result.width,
             DimensionValue::Wrap {
@@ -890,7 +1026,8 @@ mod tests {
 
         // Child remains Wrap but max is limited by parent's fixed size
         // min keeps child's own value (30px)
-        // max becomes the smaller of child's max (120px) and parent's fixed size (100px)
+        // max becomes the smaller of child's max (120px) and parent's fixed size
+        // (100px)
         assert_eq!(
             result.width,
             DimensionValue::Wrap {
@@ -909,8 +1046,8 @@ mod tests {
 
     #[test]
     fn test_fixed_parent_wrap_child_no_child_max() {
-        // Test Fixed parent with Wrap child that has no maximum: Fixed(100) -> Wrap{30-None}
-        // Parent's fixed size should become the child's maximum
+        // Test Fixed parent with Wrap child that has no maximum: Fixed(100) ->
+        // Wrap{30-None} Parent's fixed size should become the child's maximum
 
         let parent = Constraint::new(
             DimensionValue::Fixed(Px(100)),
@@ -973,7 +1110,8 @@ mod tests {
 
         // Child remains Fill but max is limited by parent's fixed size
         // min keeps child's own value (30px)
-        // max becomes the smaller of child's max (120px) and parent's fixed size (100px)
+        // max becomes the smaller of child's max (120px) and parent's fixed size
+        // (100px)
         assert_eq!(
             result.width,
             DimensionValue::Fill {
@@ -992,8 +1130,8 @@ mod tests {
 
     #[test]
     fn test_fixed_parent_fill_child_no_child_max() {
-        // Test Fixed parent with Fill child that has no maximum: Fixed(100) -> Fill{30-None}
-        // Parent's fixed size should become the child's maximum
+        // Test Fixed parent with Fill child that has no maximum: Fixed(100) ->
+        // Fill{30-None} Parent's fixed size should become the child's maximum
 
         let parent = Constraint::new(
             DimensionValue::Fixed(Px(100)),
@@ -1033,8 +1171,9 @@ mod tests {
 
     #[test]
     fn test_fixed_parent_fill_child_no_child_min() {
-        // Test Fixed parent with Fill child that has no minimum: Fixed(100) -> Fill{None-120}
-        // Child should fill parent's space with no minimum constraint
+        // Test Fixed parent with Fill child that has no minimum: Fixed(100) ->
+        // Fill{None-120} Child should fill parent's space with no minimum
+        // constraint
 
         let parent = Constraint::new(
             DimensionValue::Fixed(Px(100)),
@@ -1054,8 +1193,9 @@ mod tests {
 
         let result = child.merge(&parent);
 
-        // Child remains Fill, keeps its own min (None), max is limited by parent's fixed size
-        // This allows the child to fill the parent's space without any minimum size requirement
+        // Child remains Fill, keeps its own min (None), max is limited by parent's
+        // fixed size This allows the child to fill the parent's space without
+        // any minimum size requirement
         assert_eq!(
             result.width,
             DimensionValue::Fill {

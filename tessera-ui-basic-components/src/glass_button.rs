@@ -79,7 +79,8 @@ pub struct GlassButtonArgs {
     /// Optional longer description for assistive technologies.
     #[builder(default, setter(strip_option, into))]
     pub accessibility_description: Option<String>,
-    /// Whether the button should remain focusable even when no click handler is provided.
+    /// Whether the button should remain focusable even when no click handler is
+    /// provided.
     #[builder(default)]
     pub accessibility_focusable: bool,
 }
@@ -129,7 +130,8 @@ impl GlassButtonArgs {
 
 /// # glass_button
 ///
-/// Renders an interactive button with a customizable glass effect and ripple animation.
+/// Renders an interactive button with a customizable glass effect and ripple
+/// animation.
 ///
 /// ## Usage
 ///
@@ -137,8 +139,10 @@ impl GlassButtonArgs {
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the button's glass appearance and `on_click` handler; see [`GlassButtonArgs`].
-/// - `child` — a closure that renders the button's content (e.g., text or an icon).
+/// - `args` — configures the button's glass appearance and `on_click` handler;
+///   see [`GlassButtonArgs`].
+/// - `child` — a closure that renders the button's content (e.g., text or an
+///   icon).
 ///
 /// ## Examples
 ///
@@ -146,8 +150,8 @@ impl GlassButtonArgs {
 /// use std::sync::Arc;
 /// use tessera_ui::Color;
 /// use tessera_ui_basic_components::{
-///     glass_button::{glass_button, GlassButtonArgs},
-///     text::{text, TextArgsBuilder},
+///     glass_button::{GlassButtonArgs, glass_button},
+///     text::{TextArgsBuilder, text},
 /// };
 ///
 /// glass_button(
@@ -156,7 +160,14 @@ impl GlassButtonArgs {
 ///         tint_color: Color::new(0.2, 0.3, 0.8, 0.3),
 ///         ..Default::default()
 ///     },
-///     || text(TextArgsBuilder::default().text("Click Me".to_string()).build().expect("builder construction failed")),
+///     || {
+///         text(
+///             TextArgsBuilder::default()
+///                 .text("Click Me".to_string())
+///                 .build()
+///                 .expect("builder construction failed"),
+///         )
+///     },
 /// );
 /// ```
 #[tessera]

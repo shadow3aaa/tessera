@@ -14,7 +14,7 @@ use parking_lot::RwLock;
 use tessera_ui::{
     Color, DimensionValue, Dp,
     accesskit::{Action, Role, Toggled},
-    remember, tessera,
+    remember, tessera, use_context,
 };
 
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
     checkmark::{CheckmarkArgsBuilder, checkmark},
     shape_def::{RoundedCorner, Shape},
     surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
+    theme::MaterialColorScheme,
 };
 
 /// Controller for [`checkbox`] state.
@@ -94,20 +95,20 @@ pub struct CheckboxArgs {
     #[builder(default = "Dp(18.0)")]
     pub size: Dp,
 
-    #[builder(default = "crate::material_color::global_material_scheme().on_surface_variant")]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_surface_variant")]
     /// Outline color when the checkbox is not checked.
     ///
     /// This sets the border color shown for the unchecked state.
     pub color: Color,
 
-    #[builder(default = "crate::material_color::global_material_scheme().primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().primary")]
     /// Background color used when the checkbox is checked.
     ///
     /// This color is shown behind the checkmark to indicate an active/selected
     /// state. Choose a higher-contrast color relative to `color`.
     pub checked_color: Color,
 
-    #[builder(default = "crate::material_color::global_material_scheme().on_primary")]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_primary")]
     /// Color used to draw the checkmark icon inside the checkbox.
     ///
     /// This is applied on top of the `checked_color` surface.
@@ -116,8 +117,8 @@ pub struct CheckboxArgs {
     #[builder(default = "2.5")]
     /// Stroke width in physical pixels used to render the checkmark path.
     ///
-    /// Higher values produce a thicker checkmark. The default value is tuned for
-    /// the default `size`.
+    /// Higher values produce a thicker checkmark. The default value is tuned
+    /// for the default `size`.
     pub checkmark_stroke_width: f32,
 
     #[builder(
@@ -128,7 +129,8 @@ pub struct CheckboxArgs {
     /// Use this to customize the corner radii or switch to alternate shapes.
     pub shape: Shape,
 
-    /// Optional surface color to apply when the pointer hovers over the control.
+    /// Optional surface color to apply when the pointer hovers over the
+    /// control.
     ///
     /// If `None`, the control uses the default Material 3 state layer behavior.
     #[builder(default)]
@@ -138,13 +140,11 @@ pub struct CheckboxArgs {
     #[builder(default = "false")]
     pub disabled: bool,
 
-    #[builder(
-        default = "crate::material_color::global_material_scheme().on_surface.with_alpha(0.38)"
-    )]
+    #[builder(default = "use_context::<MaterialColorScheme>().on_surface.with_alpha(0.38)")]
     /// Color used for the checkbox border/background when disabled.
     pub disabled_color: Color,
 
-    #[builder(default = "crate::material_color::global_material_scheme().surface")]
+    #[builder(default = "use_context::<MaterialColorScheme>().surface")]
     /// Color used for the checkmark icon when disabled.
     pub disabled_checkmark_color: Color,
 
@@ -233,17 +233,20 @@ impl CheckmarkState {
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the checkbox's appearance, initial state, and `on_toggle` callback; see [`CheckboxArgs`].
-/// - `controller` — optional external controller; use [`checkbox_with_controller`] for a controlled checkbox.
+/// - `args` — configures the checkbox's appearance, initial state, and
+///   `on_toggle` callback; see [`CheckboxArgs`].
+/// - `controller` — optional external controller; use
+///   [`checkbox_with_controller`] for a controlled checkbox.
 ///
 /// ## Examples
 ///
 /// ```
-/// use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-/// use tessera_ui::{tessera, Color, Dp};
-/// use tessera_ui_basic_components::checkbox::{
-///     checkbox, CheckboxArgsBuilder,
+/// use std::sync::{
+///     Arc,
+///     atomic::{AtomicBool, Ordering},
 /// };
+/// use tessera_ui::{Color, Dp, tessera};
+/// use tessera_ui_basic_components::checkbox::{CheckboxArgsBuilder, checkbox};
 ///
 /// // A tiny UI demo that shows a checkbox and a text label that reflects its state.
 /// #[derive(Clone, Default)]
@@ -283,17 +286,20 @@ pub fn checkbox(args: impl Into<CheckboxArgs>) {
 ///
 /// ## Usage
 ///
-/// Use when you need to drive or observe the checked state from outside the component.
+/// Use when you need to drive or observe the checked state from outside the
+/// component.
 ///
 /// ## Parameters
 ///
-/// - `args` — configures the checkbox appearance and callbacks; see [`CheckboxArgs`].
-/// - `controller` — a [`CheckboxController`] that owns the checked state and animation timeline.
+/// - `args` — configures the checkbox appearance and callbacks; see
+///   [`CheckboxArgs`].
+/// - `controller` — a [`CheckboxController`] that owns the checked state and
+///   animation timeline.
 ///
 /// ## Examples
 ///
 /// ```
-/// use tessera_ui::{tessera, Dp, remember};
+/// use tessera_ui::{Dp, remember, tessera};
 /// use tessera_ui_basic_components::checkbox::{
 ///     CheckboxArgsBuilder, CheckboxController, checkbox_with_controller,
 /// };
@@ -331,7 +337,7 @@ pub fn checkbox_with_controller(
     let on_click_for_surface = on_click.clone();
 
     // Determine colors based on state
-    let scheme = crate::material_color::global_material_scheme();
+    let scheme = use_context::<MaterialColorScheme>();
     let (checkbox_style, icon_color) = if args.disabled {
         if controller.is_checked() {
             (

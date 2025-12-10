@@ -130,6 +130,90 @@ impl DrawCommand for ShapeCommand {
         // No specific barrier requirements for shape commands
         None
     }
+
+    fn apply_opacity(&mut self, opacity: f32) {
+        fn scale_color(color: &mut Color, factor: f32) {
+            *color = color.with_alpha(color.a * factor);
+        }
+
+        fn scale_shadow(shadow: &mut Option<ShadowProps>, factor: f32) {
+            if let Some(shadow) = shadow {
+                scale_color(&mut shadow.color, factor);
+            }
+        }
+
+        let factor = opacity.clamp(0.0, 1.0);
+        match self {
+            ShapeCommand::Rect { color, shadow, .. } => {
+                scale_color(color, factor);
+                scale_shadow(shadow, factor);
+            }
+            ShapeCommand::OutlinedRect { color, shadow, .. } => {
+                scale_color(color, factor);
+                scale_shadow(shadow, factor);
+            }
+            ShapeCommand::RippleRect {
+                color,
+                shadow,
+                ripple,
+                ..
+            } => {
+                scale_color(color, factor);
+                scale_shadow(shadow, factor);
+                ripple.alpha *= factor;
+            }
+            ShapeCommand::RippleOutlinedRect {
+                color,
+                shadow,
+                ripple,
+                ..
+            } => {
+                scale_color(color, factor);
+                scale_shadow(shadow, factor);
+                ripple.alpha *= factor;
+            }
+            ShapeCommand::Ellipse { color, shadow } => {
+                scale_color(color, factor);
+                scale_shadow(shadow, factor);
+            }
+            ShapeCommand::OutlinedEllipse { color, shadow, .. } => {
+                scale_color(color, factor);
+                scale_shadow(shadow, factor);
+            }
+            ShapeCommand::FilledOutlinedRect {
+                color,
+                border_color,
+                shadow,
+                ..
+            } => {
+                scale_color(color, factor);
+                scale_color(border_color, factor);
+                scale_shadow(shadow, factor);
+            }
+            ShapeCommand::RippleFilledOutlinedRect {
+                color,
+                border_color,
+                shadow,
+                ripple,
+                ..
+            } => {
+                scale_color(color, factor);
+                scale_color(border_color, factor);
+                scale_shadow(shadow, factor);
+                ripple.alpha *= factor;
+            }
+            ShapeCommand::FilledOutlinedEllipse {
+                color,
+                border_color,
+                shadow,
+                ..
+            } => {
+                scale_color(color, factor);
+                scale_color(border_color, factor);
+                scale_shadow(shadow, factor);
+            }
+        }
+    }
 }
 
 /// Properties for shadow, used in BasicDrawable variants
@@ -158,7 +242,8 @@ impl Default for ShadowProps {
 pub struct RippleProps {
     /// Center position of the ripple in normalized coordinates [-0.5, 0.5]
     pub center: [f32; 2],
-    /// Current radius of the ripple (0.0 to 1.0, where 1.0 covers the entire shape)
+    /// Current radius of the ripple (0.0 to 1.0, where 1.0 covers the entire
+    /// shape)
     pub radius: f32,
     /// Alpha value for the ripple effect (0.0 to 1.0)
     pub alpha: f32,
