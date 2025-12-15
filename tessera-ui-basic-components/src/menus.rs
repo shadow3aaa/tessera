@@ -1,8 +1,10 @@
 //! Material Design 3 menus for contextual action lists.
-//! ## Usage Present anchored overflow or context actions as surfaced menus.
+//!
+//! ## Usage
+//!
+//! Present anchored overflow or context actions as surfaced menus.
 use std::sync::Arc;
 
-use closure::closure;
 use derive_builder::Builder;
 use parking_lot::RwLock;
 use tessera_ui::{
@@ -21,7 +23,7 @@ use crate::{
     spacer::{SpacerArgsBuilder, spacer},
     surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
     text::{TextArgsBuilder, text},
-    theme::MaterialColorScheme,
+    theme::{MaterialAlpha, MaterialTheme},
 };
 
 const MENU_MIN_WIDTH: Dp = Dp(112.0);
@@ -49,7 +51,7 @@ fn default_menu_shape() -> Shape {
 }
 
 fn default_menu_shadow() -> Option<ShadowProps> {
-    let scheme = use_context::<MaterialColorScheme>().get();
+    let scheme = use_context::<MaterialTheme>().get().color_scheme;
     Some(ShadowProps {
         color: scheme.shadow.with_alpha(0.12),
         offset: [0.0, 3.0],
@@ -58,12 +60,7 @@ fn default_menu_shadow() -> Option<ShadowProps> {
 }
 
 fn default_menu_color() -> Color {
-    use_context::<MaterialColorScheme>().get().surface
-}
-
-fn default_hover_color() -> Color {
-    let scheme = use_context::<MaterialColorScheme>().get();
-    scheme.surface.blend_over(scheme.on_surface, 0.08)
+    use_context::<MaterialTheme>().get().color_scheme.surface
 }
 
 fn default_scrim_color() -> Color {
@@ -239,11 +236,28 @@ pub struct MenuProviderArgs {
     #[builder(default = "true")]
     pub close_on_escape: bool,
     /// Optional callback invoked before the menu closes (background or Escape).
-    #[builder(default, setter(strip_option))]
+    #[builder(default, setter(custom, strip_option))]
     pub on_dismiss: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Whether the menu is currently open.
     #[builder(default = "false")]
     pub is_open: bool,
+}
+
+impl MenuProviderArgsBuilder {
+    /// Set the dismiss callback.
+    pub fn on_dismiss<F>(mut self, on_dismiss: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_dismiss = Some(Some(Arc::new(on_dismiss)));
+        self
+    }
+
+    /// Set the dismiss callback using a shared callback.
+    pub fn on_dismiss_shared(mut self, on_dismiss: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.on_dismiss = Some(Some(on_dismiss));
+        self
+    }
 }
 
 impl Default for MenuProviderArgs {
@@ -384,7 +398,6 @@ fn apply_close_action(
 /// # use tessera_ui::tessera;
 /// # #[tessera]
 /// # fn component() {
-/// use std::sync::Arc;
 /// use tessera_ui::Dp;
 /// use tessera_ui_basic_components::{
 ///     menus::{
@@ -409,7 +422,7 @@ fn apply_close_action(
 ///         menu_scope.menu_item(
 ///             MenuItemArgsBuilder::default()
 ///                 .label("Edit")
-///                 .on_click(Arc::new(|| {}))
+///                 .on_click(|| {})
 ///                 .build()
 ///                 .unwrap(),
 ///         );
@@ -464,7 +477,6 @@ pub fn menu_provider(
 /// # use tessera_ui::tessera;
 /// # #[tessera]
 /// # fn component() {
-/// use std::sync::Arc;
 /// use tessera_ui::{Dp, remember, tessera};
 /// use tessera_ui_basic_components::{
 ///     menus::{
@@ -489,9 +501,9 @@ pub fn menu_provider(
 ///             menu_scope.menu_item(
 ///                 MenuItemArgsBuilder::default()
 ///                     .label("Edit")
-///                     .on_click(Arc::new(|| {
+///                     .on_click(|| {
 ///                         // Handle edit action
-///                     }))
+///                     })
 ///                     .build()
 ///                     .unwrap(),
 ///             );
@@ -722,17 +734,36 @@ pub struct MenuItemArgs {
     #[builder(default = "MENU_ITEM_HEIGHT")]
     pub height: Dp,
     /// Tint applied to the label text.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_surface")]
     pub label_color: Color,
     /// Tint applied to supporting or trailing text.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface_variant")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_surface_variant")]
     pub supporting_color: Color,
     /// Tint applied when the item is disabled.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface.with_alpha(0.38)")]
+    #[builder(
+        default = "use_context::<MaterialTheme>().get().color_scheme.on_surface.with_alpha(MaterialAlpha::DISABLED_CONTENT)"
+    )]
     pub disabled_color: Color,
     /// Callback invoked when the item is activated.
-    #[builder(default, setter(strip_option))]
+    #[builder(default, setter(custom, strip_option))]
     pub on_click: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl MenuItemArgsBuilder {
+    /// Set the click handler.
+    pub fn on_click<F>(mut self, on_click: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_click = Some(Some(Arc::new(on_click)));
+        self
+    }
+
+    /// Set the click handler using a shared callback.
+    pub fn on_click_shared(mut self, on_click: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.on_click = Some(Some(on_click));
+        self
+    }
 }
 
 impl Default for MenuItemArgs {
@@ -876,26 +907,13 @@ fn render_trailing(args: &MenuItemArgs, enabled: bool) {
 #[tessera]
 fn menu_item(args: impl Into<MenuItemArgs>) {
     let args: MenuItemArgs = args.into();
-    let is_enabled = args.enabled && args.on_click.is_some();
-    let on_click = args.on_click.clone();
-
-    let interactive_click = if is_enabled {
-        Some(Arc::new(closure!(clone on_click, || {
-            if let Some(handler) = &on_click {
-                handler();
-            }
-        })) as Arc<dyn Fn() + Send + Sync>)
-    } else {
-        None
-    };
+    let enabled = args.enabled && args.on_click.is_some();
 
     let mut surface_builder = SurfaceArgsBuilder::default()
         .style(SurfaceStyle::Filled {
             color: Color::TRANSPARENT,
         })
-        .hover_style(is_enabled.then(|| SurfaceStyle::Filled {
-            color: default_hover_color(),
-        }))
+        .enabled(enabled)
         .padding(Dp(0.0))
         .width(DimensionValue::FILLED)
         .height(DimensionValue::Wrap {
@@ -906,14 +924,15 @@ fn menu_item(args: impl Into<MenuItemArgs>) {
         .accessibility_label(args.label.clone())
         .block_input(true)
         .ripple_color(
-            use_context::<MaterialColorScheme>()
+            use_context::<MaterialTheme>()
                 .get()
+                .color_scheme
                 .on_surface
-                .with_alpha(0.12),
+                .with_alpha(1.0),
         );
 
-    if let Some(click) = interactive_click {
-        surface_builder = surface_builder.on_click(click);
+    if let Some(on_click) = args.on_click.clone() {
+        surface_builder = surface_builder.on_click_shared(on_click);
     }
 
     if let Some(description) = args.supporting_text.clone() {
@@ -949,7 +968,7 @@ fn menu_item(args: impl Into<MenuItemArgs>) {
                     // Leading indicator / icon.
                     let leading_args = args.clone();
                     row_scope.child(move || {
-                        render_leading(&leading_args, is_enabled);
+                        render_leading(&leading_args, enabled);
                     });
 
                     // Gap after leading.
@@ -965,7 +984,7 @@ fn menu_item(args: impl Into<MenuItemArgs>) {
                     // Labels column.
                     let label_args = args.clone();
                     row_scope.child(move || {
-                        render_labels(&label_args, is_enabled);
+                        render_labels(&label_args, enabled);
                     });
 
                     // Flexible spacer.
@@ -985,7 +1004,7 @@ fn menu_item(args: impl Into<MenuItemArgs>) {
                     if args.trailing_icon.is_some() || args.trailing_text.is_some() {
                         let trailing_args = args.clone();
                         row_scope.child(move || {
-                            render_trailing(&trailing_args, is_enabled);
+                            render_trailing(&trailing_args, enabled);
                         });
 
                         row_scope.child(|| {

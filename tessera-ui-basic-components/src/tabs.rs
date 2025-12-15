@@ -3,10 +3,7 @@
 //! ## Usage
 //!
 //! Use to organize content into separate pages that can be switched between.
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use derive_builder::Builder;
 use tessera_ui::{
@@ -21,10 +18,40 @@ use crate::{
     button::{ButtonArgsBuilder, button},
     shape_def::{RoundedCorner, Shape},
     surface::{SurfaceArgs, surface},
-    theme::MaterialColorScheme,
+    theme::{MaterialAlpha, MaterialColorScheme, MaterialTheme},
 };
 
 const ANIMATION_DURATION: Duration = Duration::from_millis(300);
+
+/// Material Design 3 defaults for [`tabs`].
+pub struct TabsDefaults;
+
+impl TabsDefaults {
+    /// Default indicator height.
+    pub const INDICATOR_HEIGHT: Dp = Dp(3.0);
+    /// Default minimum indicator width.
+    pub const INDICATOR_MIN_WIDTH: Dp = Dp(24.0);
+    /// Default maximum indicator width.
+    pub const INDICATOR_MAX_WIDTH: Option<Dp> = Some(Dp(64.0));
+    /// Minimum height for a tab (Material spec uses 48dp).
+    pub const MIN_TAB_HEIGHT: Dp = Dp(48.0);
+    /// Default internal padding for each tab.
+    pub const TAB_PADDING: Dp = Dp(12.0);
+    /// Default hover alpha for state layers.
+    pub const HOVER_STATE_LAYER_OPACITY: f32 = MaterialAlpha::HOVER;
+
+    /// Default disabled content color.
+    pub fn disabled_content_color(scheme: &MaterialColorScheme) -> Color {
+        scheme
+            .on_surface
+            .with_alpha(MaterialAlpha::DISABLED_CONTENT)
+    }
+
+    /// Default ripple color derived from the selected content color.
+    pub fn ripple_color(selected_content_color: Color) -> Color {
+        selected_content_color
+    }
+}
 
 fn clamp_wrap(min: Option<Px>, max: Option<Px>, measure: Px) -> Px {
     min.unwrap_or(Px(0))
@@ -48,16 +75,6 @@ fn resolve_dimension(dim: DimensionValue, measure: Px) -> Px {
         DimensionValue::Fixed(v) => v,
         DimensionValue::Wrap { min, max } => clamp_wrap(min, max, measure),
         DimensionValue::Fill { min, max } => fill_value(min, max, measure),
-    }
-}
-
-fn blend_state_layer(base: Color, layer: Color, opacity: f32) -> Color {
-    let opacity = opacity.clamp(0.0, 1.0);
-    Color {
-        r: base.r * (1.0 - opacity) + layer.r * opacity,
-        g: base.g * (1.0 - opacity) + layer.g * opacity,
-        b: base.b * (1.0 - opacity) + layer.b * opacity,
-        a: base.a,
     }
 }
 
@@ -180,39 +197,50 @@ pub struct TabsArgs {
     #[builder(default = "0")]
     pub initial_active_tab: usize,
     /// Color of the active tab indicator.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().primary")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.primary")]
     // Material primary tone
     pub indicator_color: Color,
     /// Background color for the tab row container.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().surface")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.surface")]
     pub container_color: Color,
     /// Color applied to active tab titles (Material on-surface).
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_surface")]
     pub active_content_color: Color,
     /// Color applied to inactive tab titles (Material on-surface-variant).
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface_variant")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_surface_variant")]
     pub inactive_content_color: Color,
     /// Height of the indicator bar in density-independent pixels.
-    #[builder(default = "Dp(3.0)")]
+    #[builder(default = "TabsDefaults::INDICATOR_HEIGHT")]
     pub indicator_height: Dp,
     /// Minimum width for the indicator bar.
-    #[builder(default = "Dp(24.0)")]
+    #[builder(default = "TabsDefaults::INDICATOR_MIN_WIDTH")]
     pub indicator_min_width: Dp,
     /// Optional maximum width for the indicator bar.
-    #[builder(default = "Some(Dp(64.0))")]
+    #[builder(default = "TabsDefaults::INDICATOR_MAX_WIDTH")]
     pub indicator_max_width: Option<Dp>,
     /// Minimum height for a tab (Material spec uses 48dp).
-    #[builder(default = "Dp(48.0)")]
+    #[builder(default = "TabsDefaults::MIN_TAB_HEIGHT")]
     pub min_tab_height: Dp,
     /// Internal padding for each tab, applied symmetrically.
-    #[builder(default = "Dp(12.0)")]
+    #[builder(default = "TabsDefaults::TAB_PADDING")]
     pub tab_padding: Dp,
+    /// Whether the tab row is enabled for user interaction.
+    ///
+    /// When `false`, tabs will not react to input and will use disabled
+    /// content colors.
+    #[builder(default = "true")]
+    pub enabled: bool,
     /// Color used for hover/pressed state layers.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_surface")]
     pub state_layer_color: Color,
     /// Opacity applied to the state layer on hover.
-    #[builder(default = "0.08")]
+    #[builder(default = "TabsDefaults::HOVER_STATE_LAYER_OPACITY")]
     pub hover_state_layer_opacity: f32,
+    /// Content color used when `enabled=false`.
+    #[builder(
+        default = "TabsDefaults::disabled_content_color(&use_context::<MaterialTheme>().get().color_scheme)"
+    )]
+    pub disabled_content_color: Color,
     /// Width behavior for the entire tabs container.
     #[builder(default = "DimensionValue::FILLED")]
     pub width: DimensionValue,
@@ -511,32 +539,34 @@ where
         || {},
     );
 
-    let hover_color = blend_state_layer(
-        args.container_color,
-        args.state_layer_color,
-        args.hover_state_layer_opacity,
-    );
+    let ripple_color = TabsDefaults::ripple_color(args.active_content_color);
 
     for (index, child) in title_closures.into_iter().enumerate() {
-        let label_color = if index == active_tab {
+        let label_color = if !args.enabled {
+            args.disabled_content_color
+        } else if index == active_tab {
             args.active_content_color
         } else {
             args.inactive_content_color
         };
 
+        let mut builder = ButtonArgsBuilder::default()
+            .color(args.container_color)
+            .content_color(label_color)
+            .enabled(args.enabled)
+            .padding(args.tab_padding)
+            .ripple_color(ripple_color)
+            .width(DimensionValue::FILLED)
+            .shape(Shape::RECTANGLE);
+
+        if args.enabled {
+            builder = builder.on_click(move || {
+                controller.with_mut(|c| c.set_active_tab(index));
+            });
+        }
+
         button(
-            ButtonArgsBuilder::default()
-                .color(args.container_color)
-                .hover_color(Some(hover_color))
-                .padding(args.tab_padding)
-                .ripple_color(args.state_layer_color)
-                .on_click(Arc::new(move || {
-                    controller.with_mut(|c| c.set_active_tab(index));
-                }))
-                .width(DimensionValue::FILLED)
-                .shape(Shape::RECTANGLE)
-                .build()
-                .expect("builder construction failed"),
+            builder.build().expect("builder construction failed"),
             move || {
                 boxed(
                     BoxedArgs {

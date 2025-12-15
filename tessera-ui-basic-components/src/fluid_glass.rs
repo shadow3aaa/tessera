@@ -128,7 +128,7 @@ pub struct FluidGlassArgs {
     pub ripple_strength: Option<f32>,
 
     /// Optional click callback for interactive glass surfaces.
-    #[builder(default, setter(strip_option, into = false))]
+    #[builder(default, setter(custom, strip_option))]
     pub on_click: Option<Arc<dyn Fn() + Send + Sync>>,
 
     /// Optional border defining the outline thickness for the glass.
@@ -187,6 +187,23 @@ impl FluidGlassArgsBuilder {
     }
 }
 
+impl FluidGlassArgsBuilder {
+    /// Set the click handler.
+    pub fn on_click<F>(mut self, on_click: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_click = Some(Some(Arc::new(on_click)));
+        self
+    }
+
+    /// Set the click handler using a shared callback.
+    pub fn on_click_shared(mut self, on_click: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.on_click = Some(Some(on_click));
+        self
+    }
+}
+
 // Manual implementation of Default because derive_builder's default conflicts
 // with our specific defaults
 impl Default for FluidGlassArgs {
@@ -239,22 +256,48 @@ fn handle_click_state(
     if is_cursor_in {
         input.requests.cursor_icon = CursorIcon::Pointer;
 
-        if let Some(_event) = input.cursor_events.iter().find(|e| {
-            e.gesture_state == GestureState::TapCandidate
-                && matches!(
-                    e.content,
+        let press_events: Vec<_> = input
+            .cursor_events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.content,
+                    CursorEventContent::Pressed(PressKeyEventType::Left)
+                )
+            })
+            .collect();
+
+        let release_events: Vec<_> = input
+            .cursor_events
+            .iter()
+            .filter(|event| event.gesture_state == GestureState::TapCandidate)
+            .filter(|event| {
+                matches!(
+                    event.content,
                     CursorEventContent::Released(PressKeyEventType::Left)
                 )
-        }) {
-            if let (Some(ripple_state), Some(pos)) =
+            })
+            .collect();
+
+        if !press_events.is_empty()
+            && let (Some(ripple_state), Some(pos)) =
                 (ripple_state.as_ref(), input.cursor_position_rel)
-            {
-                let size = input.computed_data;
-                let normalized_pos = [
-                    pos.x.to_f32() / size.width.to_f32(),
-                    pos.y.to_f32() / size.height.to_f32(),
-                ];
-                ripple_state.with_mut(|s| s.start_animation(normalized_pos));
+        {
+            let denom_w = size.width.to_f32().max(1.0);
+            let denom_h = size.height.to_f32().max(1.0);
+            let normalized_pos = [
+                (pos.x.to_f32() / denom_w).clamp(0.0, 1.0),
+                (pos.y.to_f32() / denom_h).clamp(0.0, 1.0),
+            ];
+            ripple_state.with_mut(|s| {
+                s.start_animation(normalized_pos);
+                s.set_pressed(true);
+            });
+        }
+
+        if !release_events.is_empty() {
+            if let Some(ripple_state) = ripple_state.as_ref() {
+                ripple_state.with_mut(|s| s.release());
             }
             on_click();
         }

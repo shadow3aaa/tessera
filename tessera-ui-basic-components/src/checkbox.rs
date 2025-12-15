@@ -22,8 +22,33 @@ use crate::{
     checkmark::{CheckmarkArgsBuilder, checkmark},
     shape_def::{RoundedCorner, Shape},
     surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
-    theme::MaterialColorScheme,
+    theme::{MaterialAlpha, MaterialColorScheme, MaterialTheme},
 };
+
+/// Material Design 3 defaults for [`checkbox`].
+pub struct CheckboxDefaults;
+
+impl CheckboxDefaults {
+    /// Visual checkbox glyph size (not including touch target).
+    pub const GLYPH_SIZE: Dp = Dp(18.0);
+    /// State-layer size used for hover/press feedback.
+    pub const STATE_LAYER_SIZE: Dp = Dp(40.0);
+    /// Minimum recommended touch target size.
+    pub const TOUCH_TARGET_SIZE: Dp = Dp(48.0);
+    /// Computes the default state-layer base color for the current checked
+    /// state.
+    pub fn state_layer_base_color(
+        is_checked: bool,
+        args: &CheckboxArgs,
+        scheme: &MaterialColorScheme,
+    ) -> Color {
+        if is_checked {
+            args.checked_color
+        } else {
+            scheme.on_surface
+        }
+    }
+}
 
 /// Controller for [`checkbox`] state.
 #[derive(Clone, Default)]
@@ -83,23 +108,23 @@ pub struct CheckboxArgs {
     ///
     /// Expressed in `Dp` (density-independent pixels). The checkbox will use
     /// the same value for width and height; default is `Dp(18.0)`.
-    #[builder(default = "Dp(18.0)")]
+    #[builder(default = "CheckboxDefaults::GLYPH_SIZE")]
     pub size: Dp,
 
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface_variant")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_surface_variant")]
     /// Outline color when the checkbox is not checked.
     ///
     /// This sets the border color shown for the unchecked state.
     pub color: Color,
 
-    #[builder(default = "use_context::<MaterialColorScheme>().get().primary")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.primary")]
     /// Background color used when the checkbox is checked.
     ///
     /// This color is shown behind the checkmark to indicate an active/selected
     /// state. Choose a higher-contrast color relative to `color`.
     pub checked_color: Color,
 
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_primary")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_primary")]
     /// Color used to draw the checkmark icon inside the checkbox.
     ///
     /// This is applied on top of the `checked_color` surface.
@@ -120,22 +145,17 @@ pub struct CheckboxArgs {
     /// Use this to customize the corner radii or switch to alternate shapes.
     pub shape: Shape,
 
-    /// Optional surface color to apply when the pointer hovers over the
-    /// control.
-    ///
-    /// If `None`, the control uses the default Material 3 state layer behavior.
-    #[builder(default)]
-    pub hover_color: Option<Color>,
-
     /// Whether the checkbox is disabled.
     #[builder(default = "false")]
     pub disabled: bool,
 
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface.with_alpha(0.38)")]
+    #[builder(
+        default = "use_context::<MaterialTheme>().get().color_scheme.on_surface.with_alpha(MaterialAlpha::DISABLED_CONTENT)"
+    )]
     /// Color used for the checkbox border/background when disabled.
     pub disabled_color: Color,
 
-    #[builder(default = "use_context::<MaterialColorScheme>().get().surface")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.surface")]
     /// Color used for the checkmark icon when disabled.
     pub disabled_checkmark_color: Color,
 
@@ -301,27 +321,29 @@ pub fn checkbox_with_controller(
     controller: State<CheckboxController>,
 ) {
     let args: CheckboxArgs = args.into();
+    let enabled = !args.disabled;
 
     // Clone fields needed for closures before moving on_toggle
     let size = args.size;
     let shape = args.shape;
 
     // Click handler: toggle animation state and forward toggle callback
-    let on_click = if args.disabled {
-        None
-    } else {
-        let on_toggle = args.on_toggle;
+    let on_click = if enabled {
+        let on_toggle = args.on_toggle.clone();
         Some(Arc::new(move || {
             controller.with_mut(|c| c.toggle());
             on_toggle(controller.with(|c| c.is_checked()));
         }))
+    } else {
+        None
     };
     let on_click_for_surface = on_click.clone();
 
     // Determine colors based on state
-    let scheme = use_context::<MaterialColorScheme>().get();
+    let scheme = use_context::<MaterialTheme>().get().color_scheme;
+    let is_checked = controller.with(|c| c.is_checked());
     let (checkbox_style, icon_color) = if args.disabled {
-        if controller.with(|c| c.is_checked()) {
+        if is_checked {
             (
                 SurfaceStyle::Filled {
                     color: args.disabled_color,
@@ -337,7 +359,7 @@ pub fn checkbox_with_controller(
                 Color::TRANSPARENT,
             )
         }
-    } else if controller.with(|c| c.is_checked()) {
+    } else if is_checked {
         (
             SurfaceStyle::Filled {
                 color: args.checked_color,
@@ -354,19 +376,7 @@ pub fn checkbox_with_controller(
         )
     };
 
-    // State Layer Color
-    let state_layer_color = if args.disabled {
-        Color::TRANSPARENT
-    } else if let Some(c) = args.hover_color {
-        c
-    } else {
-        let base = if controller.with(|c| c.is_checked()) {
-            args.checked_color
-        } else {
-            scheme.on_surface
-        };
-        base.with_alpha(0.08)
-    };
+    let state_layer_base = CheckboxDefaults::state_layer_base_color(is_checked, &args, &scheme);
 
     // Checkmark
     let checkmark_stroke_width = args.checkmark_stroke_width;
@@ -439,23 +449,25 @@ pub fn checkbox_with_controller(
 
     // State Layer Surface (40x40)
     let render_state_layer = closure!(
-        clone state_layer_color,
+        clone enabled,
+        clone state_layer_base,
         clone on_click_for_surface,
         clone render_checkbox_container,
         || {
             let mut builder = SurfaceArgsBuilder::default()
-                .width(DimensionValue::Fixed(Dp(40.0).to_px()))
-                .height(DimensionValue::Fixed(Dp(40.0).to_px()))
+                .width(DimensionValue::Fixed(CheckboxDefaults::STATE_LAYER_SIZE.to_px()))
+                .height(DimensionValue::Fixed(CheckboxDefaults::STATE_LAYER_SIZE.to_px()))
                 .shape(Shape::Ellipse)
+                .enabled(enabled)
                 .style(SurfaceStyle::Filled {
                     color: Color::TRANSPARENT,
                 })
-                .hover_style(Some(SurfaceStyle::Filled {
-                    color: state_layer_color,
-                }));
+                .ripple_bounded(false)
+                .ripple_radius(Dp(CheckboxDefaults::STATE_LAYER_SIZE.0 / 2.0))
+                .ripple_color(state_layer_base);
 
             if let Some(handler) = on_click_for_surface.clone() {
-                builder = builder.on_click(handler);
+                builder = builder.on_click_shared(handler);
             }
 
             surface(
@@ -468,8 +480,12 @@ pub fn checkbox_with_controller(
     // Outer Box (Layout 48x48)
     boxed(
         BoxedArgsBuilder::default()
-            .width(DimensionValue::Fixed(Dp(48.0).to_px()))
-            .height(DimensionValue::Fixed(Dp(48.0).to_px()))
+            .width(DimensionValue::Fixed(
+                CheckboxDefaults::TOUCH_TARGET_SIZE.to_px(),
+            ))
+            .height(DimensionValue::Fixed(
+                CheckboxDefaults::TOUCH_TARGET_SIZE.to_px(),
+            ))
             .alignment(Alignment::Center)
             .build()
             .expect("builder construction failed"),

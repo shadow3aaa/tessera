@@ -1,5 +1,8 @@
 //! Material Design 3 radio button with animated selection feedback.
-//! ## Usage Add single-choice selectors to forms, filters, and settings panes.
+//!
+//! ## Usage
+//!
+//! Add single-choice selectors to forms, filters, and settings panes.
 
 use std::{
     sync::Arc,
@@ -20,12 +23,18 @@ use crate::{
     boxed::{BoxedArgsBuilder, boxed},
     shape_def::Shape,
     surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
-    theme::MaterialColorScheme,
+    theme::{MaterialAlpha, MaterialTheme},
 };
 
 const RADIO_ANIMATION_DURATION: Duration = Duration::from_millis(200);
-const HOVER_STATE_LAYER_OPACITY: f32 = 0.08;
-const RIPPLE_OPACITY: f32 = 0.1;
+
+/// Material Design 3 defaults for [`radio_button`].
+pub struct RadioButtonDefaults;
+
+impl RadioButtonDefaults {
+    /// State-layer size used for hover/press feedback.
+    pub const STATE_LAYER_SIZE: Dp = Dp(40.0);
+}
 
 /// Shared state for the `radio_button` component, including selection
 /// animation.
@@ -125,16 +134,20 @@ pub struct RadioButtonArgs {
     #[builder(default = "Dp(10.0)")]
     pub dot_size: Dp,
     /// Ring and dot color when selected.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().primary")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.primary")]
     pub selected_color: Color,
     /// Ring color when not selected.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface_variant")]
+    #[builder(default = "use_context::<MaterialTheme>().get().color_scheme.on_surface_variant")]
     pub unselected_color: Color,
     /// Ring and dot color when disabled but selected.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface.with_alpha(0.38)")]
+    #[builder(
+        default = "use_context::<MaterialTheme>().get().color_scheme.on_surface.with_alpha(MaterialAlpha::DISABLED_CONTENT)"
+    )]
     pub disabled_selected_color: Color,
     /// Ring color when disabled and not selected.
-    #[builder(default = "use_context::<MaterialColorScheme>().get().on_surface.with_alpha(0.38)")]
+    #[builder(
+        default = "use_context::<MaterialTheme>().get().color_scheme.on_surface.with_alpha(MaterialAlpha::DISABLED_CONTENT)"
+    )]
     pub disabled_unselected_color: Color,
     /// Whether the control is interactive.
     #[builder(default = "true")]
@@ -270,7 +283,6 @@ pub fn radio_button_with_controller(
     let is_selected = controller.with(|c| c.is_selected());
 
     let target_size = Dp(args.touch_target_size.0.max(args.size.0));
-    let padding_dp = Dp(((target_size.0 - args.size.0) / 2.0).max(0.0));
 
     let ring_color = if args.enabled {
         interpolate_color(args.unselected_color, args.selected_color, progress)
@@ -288,15 +300,7 @@ pub fn radio_button_with_controller(
         args.disabled_unselected_color
     };
 
-    let hover_style = args.enabled.then_some(SurfaceStyle::Filled {
-        color: base_state_layer_color.with_alpha(HOVER_STATE_LAYER_OPACITY),
-    });
-
-    let ripple_color = if args.enabled {
-        base_state_layer_color.with_alpha(RIPPLE_OPACITY)
-    } else {
-        Color::TRANSPARENT
-    };
+    let ripple_color = base_state_layer_color;
 
     let target_dot_color = if args.enabled {
         args.selected_color
@@ -322,77 +326,119 @@ pub fn radio_button_with_controller(
         None
     };
 
-    let mut root_builder = SurfaceArgsBuilder::default()
-        .width(DimensionValue::Fixed(target_size.to_px()))
-        .height(DimensionValue::Fixed(target_size.to_px()))
-        .padding(padding_dp)
+    let state_layer_size = RadioButtonDefaults::STATE_LAYER_SIZE;
+    let state_layer_radius = Dp(state_layer_size.0 / 2.0);
+
+    let mut state_layer_builder = SurfaceArgsBuilder::default()
+        .width(DimensionValue::Fixed(state_layer_size.to_px()))
+        .height(DimensionValue::Fixed(state_layer_size.to_px()))
         .shape(Shape::Ellipse)
+        .enabled(args.enabled)
         .style(SurfaceStyle::Filled {
             color: Color::TRANSPARENT,
         })
-        .hover_style(hover_style)
-        .ripple_color(ripple_color)
-        .accessibility_role(Role::RadioButton);
+        .ripple_bounded(false)
+        .ripple_radius(state_layer_radius)
+        .ripple_color(ripple_color);
 
     if let Some(on_click) = on_click.clone() {
-        root_builder = root_builder.on_click(on_click);
+        state_layer_builder = state_layer_builder.on_click_shared(on_click);
     }
 
-    surface(
-        root_builder.build().expect("builder construction failed"),
-        {
+    let state_layer_args = state_layer_builder
+        .build()
+        .expect("builder construction failed");
+
+    boxed(
+        BoxedArgsBuilder::default()
+            .width(DimensionValue::Fixed(target_size.to_px()))
+            .height(DimensionValue::Fixed(target_size.to_px()))
+            .alignment(Alignment::Center)
+            .build()
+            .expect("builder construction failed"),
+        move |scope| {
             let args = args.clone();
-            move || {
-                surface(
-                    SurfaceArgsBuilder::default()
-                        .width(DimensionValue::Fixed(args.size.to_px()))
-                        .height(DimensionValue::Fixed(args.size.to_px()))
-                        .shape(Shape::Ellipse)
-                        .style(ring_style)
-                        .build()
-                        .expect("builder construction failed"),
-                    {
-                        let dot_size_px = args.dot_size.to_px();
-                        move || {
-                            let animated_size =
-                                (dot_size_px.0 as f32 * eased_progress).round() as i32;
-                            if animated_size > 0 {
-                                boxed(
-                                    BoxedArgsBuilder::default()
-                                        .alignment(Alignment::Center)
+            let ring_style = ring_style.clone();
+            scope.child(move || {
+                surface(state_layer_args, move || {
+                    boxed(
+                        BoxedArgsBuilder::default()
+                            .alignment(Alignment::Center)
+                            .width(DimensionValue::FILLED)
+                            .height(DimensionValue::FILLED)
+                            .build()
+                            .expect("builder construction failed"),
+                        move |center| {
+                            let args = args.clone();
+                            let ring_style = ring_style.clone();
+                            center.child(move || {
+                                surface(
+                                    SurfaceArgsBuilder::default()
                                         .width(DimensionValue::Fixed(args.size.to_px()))
                                         .height(DimensionValue::Fixed(args.size.to_px()))
+                                        .shape(Shape::Ellipse)
+                                        .style(ring_style)
                                         .build()
                                         .expect("builder construction failed"),
-                                    |scope| {
-                                        scope.child({
-                                            let dot_color = active_dot_color;
-                                            move || {
-                                                surface(
-                                                    SurfaceArgsBuilder::default()
-                                                        .width(DimensionValue::Fixed(Px(
-                                                            animated_size,
-                                                        )))
-                                                        .height(DimensionValue::Fixed(Px(
-                                                            animated_size,
-                                                        )))
-                                                        .shape(Shape::Ellipse)
-                                                        .style(SurfaceStyle::Filled {
-                                                            color: dot_color,
-                                                        })
+                                    {
+                                        let dot_size_px = args.dot_size.to_px();
+                                        move || {
+                                            let animated_size =
+                                                (dot_size_px.0 as f32 * eased_progress).round()
+                                                    as i32;
+                                            if animated_size > 0 {
+                                                boxed(
+                                                    BoxedArgsBuilder::default()
+                                                        .alignment(Alignment::Center)
+                                                        .width(DimensionValue::Fixed(
+                                                            args.size.to_px(),
+                                                        ))
+                                                        .height(DimensionValue::Fixed(
+                                                            args.size.to_px(),
+                                                        ))
                                                         .build()
                                                         .expect("builder construction failed"),
-                                                    || {},
+                                                    |dot_scope| {
+                                                        dot_scope.child({
+                                                            let dot_color = active_dot_color;
+                                                            move || {
+                                                                surface(
+                                                                    SurfaceArgsBuilder::default()
+                                                                        .width(
+                                                                            DimensionValue::Fixed(
+                                                                                Px(animated_size),
+                                                                            ),
+                                                                        )
+                                                                        .height(
+                                                                            DimensionValue::Fixed(
+                                                                                Px(animated_size),
+                                                                            ),
+                                                                        )
+                                                                        .shape(Shape::Ellipse)
+                                                                        .style(
+                                                                            SurfaceStyle::Filled {
+                                                                                color: dot_color,
+                                                                            },
+                                                                        )
+                                                                        .build()
+                                                                        .expect(
+                                                                            "builder construction failed",
+                                                                        ),
+                                                                    || {},
+                                                                );
+                                                            }
+                                                        });
+                                                    },
                                                 );
                                             }
-                                        });
+                                        }
                                     },
                                 );
-                            }
-                        }
-                    },
-                );
-            }
+                            });
+                        },
+                    );
+                });
+            });
         },
     );
 }

@@ -95,6 +95,8 @@ This document defines how You should assist in the Tessera project to ensure cod
   - Enforce `rustfmt edition 2024` default rules
   - `use` imports must be grouped in four sections (standard library, third-party crates, crate root, submodules), separated by one blank line, sorted alphabetically within each group, and merged by root path
   - All code, comments, and documentation comments must be in English (except for rare functional clarifications)
+  - Treat `State<T>` (returned by `remember`) and values returned from `use_context::<T>().get()` as cheap `Copy` handles: do **not** call `.clone()` just to pass them into closures.
+  - Avoid `*_for_*` “capture helper” variable names (e.g. `state_for_handler`). Prefer capturing the original value directly; if a local alias is needed, keep the same name.
 - **Commit Guidelines**:
   - Follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0) specification
   - **Breaking Changes**: If a commit introduces a breaking change of public api, you MUST include `BREAKING CHANGE:` in the commit body or footer. This is required to trigger a Major version bump.
@@ -102,6 +104,10 @@ This document defines how You should assist in the Tessera project to ensure cod
 - **Documentation**:
   - Main documentation must be in English. Other language versions, if any, should be placed in the docs/ directory and kept in sync with the English version.
   - Documentation format should pass markdown lint if possible
+- **Comment Policy**:
+  - Documentation comments (`//!`, `///`) are written for end users. Describe purpose, behavior, and usage. Do **not** include implementation details, internal architecture notes, or references to upstream/source code (e.g., “ported from Compose”, file paths, commit hashes).
+  - Non-documentation comments (`//`, `/* */`) are allowed only when necessary to explain *why* a piece of code is written a certain way (non-obvious tradeoffs, invariants, safety/performance constraints). Do **not** restate what the code does.
+  - Any other commentary-style comments are not allowed.
 
 ---
 
@@ -127,10 +133,13 @@ so all contributors follow the same conventions.
 
 ### Module docs
 
-- Keep module docs to exactly two lines (short description + usage header).
-- Line 1: A brief description of what the module provides.
-- Line 2: "## Usage" followed by a one-line statement describing app-level usage
-  scenarios (e.g., alerts, confirmations, multi-step forms, or interactive controls).
+- Module docs must follow this exact 5-line template:
+  1. `//! <short description>`
+  2. `//!`
+  3. `//! ## Usage`
+  4. `//!`
+  5. `//! <one-line app-level usage scenario>` (e.g., alerts, confirmations, multi-step forms, or interactive controls).
+- `//! ## Usage` must be on its own line and must be followed by a blank `//!` line (do not inline the usage sentence on the same line).
 
 Example:
 
@@ -138,7 +147,7 @@ Example:
 //! Modal dialog provider — show modal content above the main app UI.
 //!
 //! ## Usage
-//! 
+//!
 //! Show alerts, confirmations and multi-step forms that block the main UI while active.
 ```
 
@@ -154,6 +163,7 @@ Example:
   5. `## Examples` — a runnable rustdoc example (no `no_run`, no `ignore`) that demonstrates
      the key state logic (e.g., open/close a dialog or state toggle) and uses `assert!` to
      verify expected behavior.
+- `/// ## Usage` must be on its own line and must be followed by a blank `///` line.
 
 Example:
 

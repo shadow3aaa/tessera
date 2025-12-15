@@ -22,7 +22,7 @@ use crate::{
     shape_def::{RoundedCorner, Shape},
     spacer::{SpacerArgsBuilder, spacer},
     surface::{SurfaceArgsBuilder, surface},
-    theme::MaterialColorScheme,
+    theme::MaterialTheme,
 };
 
 const ANIM_TIME: Duration = Duration::from_millis(300);
@@ -49,6 +49,7 @@ pub struct BottomSheetProviderArgs {
     ///
     /// This can be triggered by clicking the scrim or pressing the `Escape`
     /// key. The callback is responsible for closing the sheet.
+    #[builder(setter(custom))]
     pub on_close_request: Arc<dyn Fn() + Send + Sync>,
     /// The visual style of the scrim. See [`BottomSheetStyle`].
     #[builder(default)]
@@ -56,6 +57,26 @@ pub struct BottomSheetProviderArgs {
     /// Whether the sheet is initially open (for declarative usage).
     #[builder(default = "false")]
     pub is_open: bool,
+}
+
+impl BottomSheetProviderArgsBuilder {
+    /// Set the close-request callback.
+    pub fn on_close_request<F>(&mut self, on_close_request: F) -> &mut Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_close_request = Some(Arc::new(on_close_request));
+        self
+    }
+
+    /// Set the close-request callback using a shared callback.
+    pub fn on_close_request_shared(
+        &mut self,
+        on_close_request: Arc<dyn Fn() + Send + Sync>,
+    ) -> &mut Self {
+        self.on_close_request = Some(on_close_request);
+        self
+    }
 }
 
 /// Controller for [`bottom_sheet_provider`], managing open/closed state.
@@ -226,7 +247,7 @@ fn render_glass_scrim(args: &BottomSheetProviderArgs, progress: f32, is_open: bo
     let blur_radius = blur_radius_for(progress, is_open, max_blur_radius);
     fluid_glass(
         FluidGlassArgsBuilder::default()
-            .on_click(args.on_close_request.clone())
+            .on_click_shared(args.on_close_request.clone())
             .tint_color(Color::TRANSPARENT)
             .width(DimensionValue::Fill {
                 min: None,
@@ -257,11 +278,11 @@ fn render_glass_scrim(args: &BottomSheetProviderArgs, progress: f32, is_open: bo
 fn render_material_scrim(args: &BottomSheetProviderArgs, progress: f32, is_open: bool) {
     // Material scrim: compute alpha and render a simple dark surface.
     let scrim_alpha = scrim_alpha_for(progress, is_open);
-    let scrim_color = use_context::<MaterialColorScheme>().get().scrim;
+    let scrim_color = use_context::<MaterialTheme>().get().color_scheme.scrim;
     surface(
         SurfaceArgsBuilder::default()
             .style(scrim_color.with_alpha(scrim_alpha).into())
-            .on_click(args.on_close_request.clone())
+            .on_click_shared(args.on_close_request.clone())
             .width(DimensionValue::Fill {
                 min: None,
                 max: None,
@@ -470,8 +491,9 @@ fn render_content(
                             surface(
                                 SurfaceArgsBuilder::default()
                                     .style(
-                                        use_context::<MaterialColorScheme>()
+                                        use_context::<MaterialTheme>()
                                             .get()
+                                            .color_scheme
                                             .on_surface_variant
                                             .with_alpha(0.4)
                                             .into(),
@@ -526,8 +548,9 @@ fn render_content(
             surface(
                 SurfaceArgsBuilder::default()
                     .style(
-                        use_context::<MaterialColorScheme>()
+                        use_context::<MaterialTheme>()
                             .get()
+                            .color_scheme
                             .surface_container_low
                             .into(),
                     )
@@ -577,7 +600,7 @@ fn render_content(
 /// bottom_sheet_provider(
 ///     BottomSheetProviderArgsBuilder::default()
 ///         .is_open(true)
-///         .on_close_request(std::sync::Arc::new(|| {}))
+///         .on_close_request(|| {})
 ///         .build()
 ///         .unwrap(),
 ///     || { /* main content */ },
