@@ -38,9 +38,12 @@ use tessera_ui_basic_components::{
 };
 
 use crate::example_components::{
+    badge::BadgeShowcaseDestination,
     button::ButtonShowcaseDestination,
     button_group::ButtonGroupShowcaseDestination,
+    card::CardShowcaseDestination,
     checkbox::CheckboxShowcaseDestination,
+    divider::DividerShowcaseDestination,
     fluid_glass::FluidGlassShowcaseDestination,
     glass_button::GlassButtonShowcaseDestination,
     glass_progress::GlassProgressShowcaseDestination,
@@ -51,6 +54,7 @@ use crate::example_components::{
     lazy_lists::LazyListsShowcaseDestination,
     menus::MenusShowcaseDestination,
     progress::ProgressShowcaseDestination,
+    progress_indicator::ProgressIndicatorShowcaseDestination,
     radio_button::RadioButtonShowcaseDestination,
     slider::SliderShowcaseDestination,
     spacer::SpacerShowcaseDestination,
@@ -284,6 +288,29 @@ fn home(
             },
         ),
         ComponentExampleDesc::new(
+            "Divider",
+            "Material 3 horizontal and vertical dividers.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(DividerShowcaseDestination {});
+                });
+            },
+        ),
+        ComponentExampleDesc::new("Card", "Material 3 cards for grouped content.", || {
+            Router::with_mut(|router| {
+                router.push(CardShowcaseDestination {});
+            });
+        }),
+        ComponentExampleDesc::new(
+            "Badge",
+            "Material 3 badges for status indicators and counts.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(BadgeShowcaseDestination {});
+                });
+            },
+        ),
+        ComponentExampleDesc::new(
             "Switch",
             "A control that allows toggling between on and off states.",
             || {
@@ -315,6 +342,15 @@ fn home(
                 router.push(ProgressShowcaseDestination {});
             });
         }),
+        ComponentExampleDesc::new(
+            "Progress Indicators",
+            "Material 3 linear and circular progress indicators.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(ProgressIndicatorShowcaseDestination {});
+                });
+            },
+        ),
         ComponentExampleDesc::new("Image", "A component to display images.", || {
             Router::with_mut(|router| {
                 router.push(ImageShowcaseDestination {});

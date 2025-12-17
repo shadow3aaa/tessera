@@ -215,6 +215,7 @@ pub mod dyn_eq_compute;
 pub mod focus_state;
 mod ime_state;
 mod keyboard_state;
+pub mod modifier;
 pub(crate) mod pipeline_cache;
 pub mod px;
 pub mod renderer;
@@ -238,12 +239,13 @@ pub use crate::{
     component_tree::{
         ComponentNode, ComponentNodeMetaData, ComponentNodeMetaDatas, ComponentNodeTree,
         ComponentTree, ComputedData, Constraint, DimensionValue, ImeRequest, InputHandlerFn,
-        InputHandlerInput, MeasureFn, MeasureInput, MeasurementError,
+        InputHandlerInput, MeasureFn, MeasureInput, MeasurementError, ParentConstraint,
     },
     context::{Context, provide_context, use_context},
     cursor::{CursorEvent, CursorEventContent, GestureState, PressKeyEventType, ScrollEventConent},
     dp::Dp,
     focus_state::Focus,
+    modifier::{Modifier, ModifierChild, ModifierWrapper},
     px::{Px, PxPosition, PxRect, PxSize},
     renderer::{
         BarrierRequirement, Command, Renderer,

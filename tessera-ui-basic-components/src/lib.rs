@@ -54,14 +54,17 @@ mod padding_utils;
 mod selection_highlight_rect;
 
 pub mod alignment;
+pub mod badge;
 pub mod bottom_sheet;
 pub mod boxed;
 pub mod button;
 pub mod button_groups;
+pub mod card;
 pub mod checkbox;
 mod checkmark;
 pub mod column;
 pub mod dialog;
+pub mod divider;
 pub mod fluid_glass;
 pub mod glass_button;
 pub mod glass_progress;
