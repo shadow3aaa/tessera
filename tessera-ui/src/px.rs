@@ -51,9 +51,12 @@
 //! let px_value = Px::from_dp(dp_value);
 //! ```
 
-use std::ops::{AddAssign, Neg};
+use std::ops::{AddAssign, Neg, SubAssign};
 
-use crate::dp::{Dp, SCALE_FACTOR};
+use crate::{
+    ComputedData,
+    dp::{Dp, SCALE_FACTOR},
+};
 
 /// A physical pixel coordinate value.
 ///
@@ -1008,8 +1011,8 @@ impl From<winit::dpi::PhysicalSize<u32>> for PxSize {
     }
 }
 
-impl From<crate::component_tree::ComputedData> for PxSize {
-    fn from(data: crate::component_tree::ComputedData) -> Self {
+impl From<ComputedData> for PxSize {
+    fn from(data: ComputedData) -> Self {
         Self {
             width: data.width,
             height: data.height,
@@ -1115,6 +1118,12 @@ impl From<PxPosition> for winit::dpi::Position {
 impl AddAssign for Px {
     fn add_assign(&mut self, rhs: Self) {
         self.0 += rhs.0;
+    }
+}
+
+impl SubAssign for Px {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
     }
 }
 

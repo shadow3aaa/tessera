@@ -1,7 +1,56 @@
 use glam::{Vec2, Vec4};
-use tessera_ui::{Color, DrawCommand, PxPosition, PxSize};
+use tessera_ui::{Color, DrawCommand, DrawRegion, PaddingRect, Px, PxPosition, PxSize};
 
 use super::pipeline::ShapeUniforms;
+
+const SHADOW_AA_MARGIN_PX: f32 = 1.0;
+
+pub(crate) fn shadow_padding_xy(shadow: &ShadowLayers) -> (Px, Px) {
+    let mut pad_x = 0.0f32;
+    let mut pad_y = 0.0f32;
+
+    let update = |pad_x: &mut f32, pad_y: &mut f32, layer: &ShadowLayer| {
+        if layer.color.a <= 0.0 {
+            return;
+        }
+        let layer_pad_x = (layer.smoothness + layer.offset[0].abs() + SHADOW_AA_MARGIN_PX).max(0.0);
+        let layer_pad_y = (layer.smoothness + layer.offset[1].abs() + SHADOW_AA_MARGIN_PX).max(0.0);
+        *pad_x = (*pad_x).max(layer_pad_x);
+        *pad_y = (*pad_y).max(layer_pad_y);
+    };
+
+    if let Some(layer) = shadow.ambient {
+        update(&mut pad_x, &mut pad_y, &layer);
+    }
+    if let Some(layer) = shadow.spot {
+        update(&mut pad_x, &mut pad_y, &layer);
+    }
+
+    (
+        Px::new(pad_x.ceil() as i32).max(Px::ZERO),
+        Px::new(pad_y.ceil() as i32).max(Px::ZERO),
+    )
+}
+
+/// A single shadow layer (ambient or spot)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowLayer {
+    /// Color of the shadow (RGBA)
+    pub color: Color,
+    /// Offset of the shadow in the format [x, y]
+    pub offset: [f32; 2],
+    /// Smoothness / blur of the shadow
+    pub smoothness: f32,
+}
+
+/// Collection of shadow layers (ambient + spot)
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ShadowLayers {
+    /// Ambient (diffused) shadow layer
+    pub ambient: Option<ShadowLayer>,
+    /// Spot (directional / offset) shadow layer
+    pub spot: Option<ShadowLayer>,
+}
 
 /// Represents a shape drawable
 #[derive(Debug, Clone, PartialEq)]
@@ -15,8 +64,8 @@ pub enum ShapeCommand {
         /// G2 exponent per corner (tl, tr, br, bl).
         /// k=2.0 results in standard G1 circular corners.
         corner_g2: [f32; 4],
-        /// Shadow properties of the rectangle
-        shadow: Option<ShadowProps>,
+        /// Shadow properties of the rectangle (ambient + spot)
+        shadow: Option<ShadowLayers>,
     },
     /// An outlined rectangle
     OutlinedRect {
@@ -28,7 +77,7 @@ pub enum ShapeCommand {
         /// k=2.0 results in standard G1 circular corners.
         corner_g2: [f32; 4],
         /// Shadow properties of the rectangle (applied to the outline shape)
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
         /// Width of the border
         border_width: f32,
     },
@@ -42,7 +91,7 @@ pub enum ShapeCommand {
         /// k=2.0 results in standard G1 circular corners.
         corner_g2: [f32; 4],
         /// Shadow properties of the rectangle
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
         /// Ripple effect properties
         ripple: RippleProps,
     },
@@ -56,7 +105,7 @@ pub enum ShapeCommand {
         /// k=2.0 results in standard G1 circular corners.
         corner_g2: [f32; 4],
         /// Shadow properties of the rectangle (applied to the outline shape)
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
         /// Width of the border
         border_width: f32,
         /// Ripple effect properties
@@ -67,14 +116,14 @@ pub enum ShapeCommand {
         /// Color of the ellipse (RGBA)
         color: Color,
         /// Shadow properties of the ellipse
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
     },
     /// An outlined ellipse
     OutlinedEllipse {
         /// Color of the border (RGBA)
         color: Color,
         /// Shadow properties of the ellipse (applied to the outline shape)
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
         /// Width of the border
         border_width: f32,
     },
@@ -90,7 +139,7 @@ pub enum ShapeCommand {
         /// k=2.0 results in standard G1 circular corners.
         corner_g2: [f32; 4],
         /// Shadow properties of the rectangle (applied to the outline shape)
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
         /// Width of the border
         border_width: f32,
     },
@@ -106,7 +155,7 @@ pub enum ShapeCommand {
         /// k=2.0 results in standard G1 circular corners.
         corner_g2: [f32; 4],
         /// Shadow properties of the rectangle (applied to the outline shape)
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
         /// Width of the border
         border_width: f32,
         /// Ripple effect properties
@@ -119,14 +168,30 @@ pub enum ShapeCommand {
         /// Color of the border (RGBA)
         border_color: Color,
         /// Shadow properties of the ellipse (applied to the outline shape)
-        shadow: Option<ShadowProps>,
+        shadow: Option<ShadowLayers>,
         /// Width of the border
         border_width: f32,
     },
 }
 
+impl ShapeCommand {
+    pub(crate) fn shadow(&self) -> Option<&ShadowLayers> {
+        match self {
+            ShapeCommand::Rect { shadow, .. }
+            | ShapeCommand::OutlinedRect { shadow, .. }
+            | ShapeCommand::RippleRect { shadow, .. }
+            | ShapeCommand::RippleOutlinedRect { shadow, .. }
+            | ShapeCommand::Ellipse { shadow, .. }
+            | ShapeCommand::OutlinedEllipse { shadow, .. }
+            | ShapeCommand::FilledOutlinedRect { shadow, .. }
+            | ShapeCommand::RippleFilledOutlinedRect { shadow, .. }
+            | ShapeCommand::FilledOutlinedEllipse { shadow, .. } => shadow.as_ref(),
+        }
+    }
+}
+
 impl DrawCommand for ShapeCommand {
-    fn barrier(&self) -> Option<tessera_ui::BarrierRequirement> {
+    fn sample_region(&self) -> Option<tessera_ui::SampleRegion> {
         // No specific barrier requirements for shape commands
         None
     }
@@ -136,9 +201,14 @@ impl DrawCommand for ShapeCommand {
             *color = color.with_alpha(color.a * factor);
         }
 
-        fn scale_shadow(shadow: &mut Option<ShadowProps>, factor: f32) {
-            if let Some(shadow) = shadow {
-                scale_color(&mut shadow.color, factor);
+        fn scale_shadow(shadow: &mut Option<ShadowLayers>, factor: f32) {
+            if let Some(layers) = shadow {
+                if let Some(ref mut ambient) = layers.ambient {
+                    scale_color(&mut ambient.color, factor);
+                }
+                if let Some(ref mut spot) = layers.spot {
+                    scale_color(&mut spot.color, factor);
+                }
             }
         }
 
@@ -214,26 +284,19 @@ impl DrawCommand for ShapeCommand {
             }
         }
     }
-}
 
-/// Properties for shadow, used in BasicDrawable variants
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ShadowProps {
-    /// Color of the shadow (RGBA)
-    pub color: Color,
-    /// Offset of the shadow in the format [x, y]
-    pub offset: [f32; 2],
-    /// Smoothness of the shadow, typically a value between 0.0 and 1.0
-    pub smoothness: f32,
-}
+    fn draw_region(&self) -> DrawRegion {
+        let Some(layers) = self.shadow() else {
+            return DrawRegion::PaddedLocal(PaddingRect::ZERO);
+        };
 
-impl Default for ShadowProps {
-    fn default() -> Self {
-        Self {
-            color: Color::BLACK.with_alpha(0.25),
-            offset: [0.0, 2.0],
-            smoothness: 4.0,
-        }
+        let (pad_x, pad_y) = shadow_padding_xy(layers);
+        DrawRegion::PaddedLocal(PaddingRect {
+            top: pad_y,
+            right: pad_x,
+            bottom: pad_y,
+            left: pad_x,
+        })
     }
 }
 
@@ -426,8 +489,22 @@ pub(crate) fn rect_to_uniforms(
     let width = size.width;
     let height = size.height;
 
-    let (shadow_rgba_color, shadow_offset_vec, shadow_smooth_val) = if let Some(s_props) = shadow {
-        (s_props.color, s_props.offset, s_props.smoothness)
+    let (ambient_color, ambient_offset, ambient_smooth) = if let Some(layers) = shadow {
+        if let Some(a) = layers.ambient {
+            (a.color, a.offset, a.smoothness)
+        } else {
+            (Color::TRANSPARENT, [0.0, 0.0], 0.0)
+        }
+    } else {
+        (Color::TRANSPARENT, [0.0, 0.0], 0.0)
+    };
+
+    let (spot_color, spot_offset, spot_smooth) = if let Some(layers) = shadow {
+        if let Some(s) = layers.spot {
+            (s.color, s.offset, s.smoothness)
+        } else {
+            (Color::TRANSPARENT, [0.0, 0.0], 0.0)
+        }
     } else {
         (Color::TRANSPARENT, [0.0, 0.0], 0.0)
     };
@@ -457,14 +534,11 @@ pub(crate) fn rect_to_uniforms(
         corner_g2: corner_g2.into(),
         primary_color: primary_color_rgba.to_array().into(),
         border_color: border_color_rgba.to_array().into(),
-        shadow_color: shadow_rgba_color.to_array().into(),
-        render_params: [
-            shadow_offset_vec[0],
-            shadow_offset_vec[1],
-            shadow_smooth_val,
-            render_mode,
-        ]
-        .into(),
+        shadow_ambient_color: ambient_color.to_array().into(),
+        shadow_ambient_params: [ambient_offset[0], ambient_offset[1], ambient_smooth].into(),
+        shadow_spot_color: spot_color.to_array().into(),
+        shadow_spot_params: [spot_offset[0], spot_offset[1], spot_smooth].into(),
+        render_mode,
         ripple_params,
         ripple_color,
         border_width,

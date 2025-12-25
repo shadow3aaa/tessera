@@ -16,7 +16,6 @@ use tessera_ui::{
 };
 
 use crate::{
-    ShadowProps,
     alignment::{Alignment, CrossAxisAlignment, MainAxisAlignment},
     animation,
     boxed::{BoxedArgsBuilder, boxed},
@@ -183,14 +182,7 @@ fn render_scrim(args: &DialogProviderArgs, is_open: bool, progress: f32) {
                 FluidGlassArgsBuilder::default()
                     .on_click_shared(args.on_close_request.clone())
                     .tint_color(Color::TRANSPARENT)
-                    .width(DimensionValue::Fill {
-                        min: None,
-                        max: None,
-                    })
-                    .height(DimensionValue::Fill {
-                        min: None,
-                        max: None,
-                    })
+                    .modifier(Modifier::new().fill_max_size())
                     .dispersion_height(Dp(0.0))
                     .refraction_height(Dp(0.0))
                     .block_input(true)
@@ -308,10 +300,7 @@ fn dialog_content_wrapper(
                                             .surface_container_high
                                             .into(),
                                     )
-                                    .shadow(ShadowProps {
-                                        color: Color::BLACK.with_alpha(alpha / 4.0),
-                                        ..Default::default()
-                                    })
+                                    .elevation(Dp(6.0))
                                     .shape(Shape::RoundedRectangle {
                                         top_left: RoundedCorner::manual(Dp(28.0), 3.0),
                                         top_right: RoundedCorner::manual(Dp(28.0), 3.0),

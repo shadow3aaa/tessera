@@ -7,7 +7,6 @@ use tessera_ui::{
     shard, tessera, use_context,
 };
 use tessera_ui_basic_components::{
-    ShadowProps,
     alignment::{Alignment, CrossAxisAlignment},
     bottom_sheet::{
         BottomSheetController, BottomSheetProviderArgsBuilder, BottomSheetStyle,
@@ -23,7 +22,7 @@ use tessera_ui_basic_components::{
     icon::{IconArgsBuilder, icon},
     lazy_list::{LazyColumnArgsBuilder, lazy_column},
     material_icons::filled,
-    modifier::ModifierExt as _,
+    modifier::{ModifierExt as _, Padding},
     navigation_bar::{NavigationBarItemBuilder, navigation_bar},
     row::{RowArgsBuilder, row},
     scrollable::ScrollableArgsBuilder,
@@ -33,7 +32,7 @@ use tessera_ui_basic_components::{
         side_bar_provider_with_controller,
     },
     spacer::spacer,
-    surface::{SurfaceArgs, SurfaceArgsBuilder, SurfaceStyle, surface},
+    surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
     text::{TextArgsBuilder, text},
     theme::MaterialTheme,
 };
@@ -84,9 +83,9 @@ pub fn app() {
         move || {
             bottom_sheet_provider_with_controller(
                 BottomSheetProviderArgsBuilder::default()
-                    .on_close_request(closure!(clone bottom_sheet_controller, || {
+                    .on_close_request(move || {
                         bottom_sheet_controller.with_mut(|c| c.close());
-                    }))
+                    })
                     .style(BottomSheetStyle::Material)
                     .build()
                     .unwrap(),
@@ -94,9 +93,9 @@ pub fn app() {
                 move || {
                     dialog_provider_with_controller(
                         DialogProviderArgsBuilder::default()
-                            .on_close_request(closure!(clone dialog_controller, || {
+                            .on_close_request(move || {
                                 dialog_controller.with_mut(|c| c.close());
-                            }))
+                            })
                             .style(DialogStyle::Material)
                             .build()
                             .unwrap(),
@@ -179,53 +178,55 @@ pub fn app() {
                                 });
                             });
                         },
-                        closure!(clone dialog_controller, |_alpha| {
+                        move |_alpha| {
                             basic_dialog(
                                 BasicDialogArgsBuilder::default()
                                     .headline("Basic Dialog")
                                     .supporting_text("This is a basic dialog component.")
                                     .icon(|| {
                                         let icon_content = filled::info_icon();
-                                        icon(IconArgsBuilder::default().content(icon_content).build().unwrap());
+                                        icon(
+                                            IconArgsBuilder::default()
+                                                .content(icon_content)
+                                                .build()
+                                                .unwrap(),
+                                        );
                                     })
-                                    .confirm_button(closure!(clone dialog_controller, || {
+                                    .confirm_button(move || {
                                         button(
-                                            ButtonArgs::text(closure!(clone dialog_controller, || {
+                                            ButtonArgs::text(move || {
                                                 dialog_controller.with_mut(|c| c.close());
-                                            })),
+                                            }),
                                             || text("Confirm"),
                                         );
-                                    }))
-                                    .dismiss_button(closure!(clone dialog_controller, || {
+                                    })
+                                    .dismiss_button(move || {
                                         button(
-                                            ButtonArgs::text(closure!(clone dialog_controller, || {
+                                            ButtonArgs::text(move || {
                                                 dialog_controller.with_mut(|c| c.close());
-                                            })),
+                                            }),
                                             || text("Dismiss"),
                                         );
-                                    }))
+                                    })
                                     .build()
                                     .unwrap(),
                             );
-                        }),
+                        },
                     );
                 },
                 || {
-                    surface(
-                        SurfaceArgs {
-                            style: Color::TRANSPARENT.into(),
+                    column(
+                        ColumnArgs {
                             modifier: Modifier::new().padding_all(Dp(16.0)),
                             ..Default::default()
                         },
-                        || {
-                            column(ColumnArgs::default(), |scope| {
-                                scope.child(|| {
-                                    text("Hello from bottom sheet!");
-                                });
+                        |scope| {
+                            scope.child(|| {
+                                text("Hello from bottom sheet!");
+                            });
 
-                                scope.child(|| {
-                                    spacer(Modifier::new().height(Dp(250.0)));
-                                });
+                            scope.child(|| {
+                                spacer(Modifier::new().height(Dp(250.0)));
                             });
                         },
                     );
@@ -557,7 +558,7 @@ fn component_card(title: &str, description: &str, on_click: Arc<dyn Fn() + Send 
                     .primary_container,
             })
             .shape(Shape::rounded_rectangle(Dp(25.0)))
-            .shadow(ShadowProps::default())
+            .elevation(Dp(6.0))
             .build()
             .unwrap(),
         || {
@@ -601,7 +602,7 @@ fn component_card(title: &str, description: &str, on_click: Arc<dyn Fn() + Send 
 fn top_app_bar() {
     surface(
         SurfaceArgsBuilder::default()
-            .shadow(ShadowProps::default())
+            .elevation(Dp(4.0))
             .modifier(Modifier::new().fill_max_width().height(Dp(55.0)))
             .block_input(true)
             .build()
@@ -667,31 +668,21 @@ fn about() {
             .build()
             .unwrap(),
         || {
-            boxed(
-                BoxedArgsBuilder::default()
-                    .modifier(Modifier::new().fill_max_size().padding_all(Dp(16.0)))
-                    .alignment(Alignment::Center)
-                    .build()
-                    .unwrap(),
-                |scope| {
-                    scope.child(|| {
-                        text(
-                            TextArgsBuilder::default()
-                                .text(
-                                    r#"This is an example app of Tessera UI Framework.
+            text(
+                TextArgsBuilder::default()
+                    .modifier(Modifier::new().padding(Padding::all(Dp(16.0))))
+                    .text(
+                        r#"This is an example app of Tessera UI Framework.
 Made with ❤️ by tessera-ui devs.
 
 Copyright 2025 Tessera UI Framework Developers
 "#
-                                    .to_string(),
-                                )
-                                .size(Dp(20.0))
-                                .color(use_context::<MaterialTheme>().get().color_scheme.on_surface)
-                                .build()
-                                .unwrap(),
-                        );
-                    });
-                },
+                        .to_string(),
+                    )
+                    .size(Dp(20.0))
+                    .color(use_context::<MaterialTheme>().get().color_scheme.on_surface)
+                    .build()
+                    .unwrap(),
             );
         },
     );

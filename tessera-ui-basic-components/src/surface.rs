@@ -7,17 +7,17 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use tessera_ui::{
-    Color, ComputedData, Constraint, CursorEventContent, DimensionValue, Dp, GestureState,
-    InputHandlerInput, Modifier, PressKeyEventType, Px, PxPosition, PxSize, State,
-    accesskit::{Action, Role},
-    provide_context, remember, tessera, use_context,
-    winit::window::CursorIcon,
+    Color, ComputedData, Constraint, DimensionValue, Dp, Modifier, Px, PxPosition, PxSize, State,
+    accesskit::Role, provide_context, remember, tessera, use_context,
 };
 
 use crate::{
-    RippleProps, ShadowProps,
+    RippleProps,
     alignment::Alignment,
-    modifier::ModifierExt,
+    modifier::{
+        ClickableArgs, InteractionState, ModifierExt, PointerEventContext, SemanticsArgs,
+        ShadowArgs,
+    },
     pipelines::{shape::command::ShapeCommand, simple_rect::command::SimpleRectCommand},
     pos_misc::is_position_in_component,
     ripple_state::{RippleSpec, RippleState},
@@ -48,15 +48,32 @@ impl SurfaceDefaults {
         scheme.on_surface
     }
 
-    /// Synthesizes a shadow style for the provided elevation.
-    pub fn synthesize_shadow(elevation: Dp, scheme: &MaterialColorScheme) -> ShadowProps {
+    /// Synthesize ambient and spot shadow layers for the given elevation.
+    pub fn synthesize_shadow_layers(
+        elevation: Dp,
+        scheme: &MaterialColorScheme,
+    ) -> crate::pipelines::shape::command::ShadowLayers {
+        use crate::pipelines::shape::command::{ShadowLayer, ShadowLayers};
         let elevation_px = elevation.to_pixels_f32();
-        let offset_y = (elevation_px * 0.5).clamp(1.0, 12.0);
-        let smoothness = (elevation_px * 0.75).clamp(2.0, 24.0);
-        ShadowProps {
+        let spot_offset_y = (elevation_px * 0.5).clamp(1.0, 12.0);
+        let spot_smoothness = (elevation_px * 0.75).clamp(2.0, 24.0);
+        let ambient_smoothness = (elevation_px * 1.0).clamp(4.0, 36.0);
+
+        let spot = ShadowLayer {
             color: scheme.shadow.with_alpha(0.25),
-            offset: [0.0, offset_y],
-            smoothness,
+            offset: [0.0, spot_offset_y],
+            smoothness: spot_smoothness,
+        };
+
+        let ambient = ShadowLayer {
+            color: scheme.shadow.with_alpha(0.14),
+            offset: [0.0, 0.0],
+            smoothness: ambient_smoothness,
+        };
+
+        ShadowLayers {
+            ambient: Some(ambient),
+            spot: Some(spot),
         }
     }
 }
@@ -116,17 +133,12 @@ pub struct SurfaceArgs {
     /// variants).
     #[builder(default)]
     pub shape: Shape,
-    /// Optional shadow/elevation style. When present it is passed through to
-    /// the shape pipeline.
-    #[builder(default, setter(strip_option))]
-    pub shadow: Option<ShadowProps>,
-    /// Optional elevation hint used to synthesize a shadow when `shadow` is not
-    /// provided.
+    /// Elevation of the surface.
     ///
-    /// This is a lightweight approximation intended to ease gradual migration
-    /// towards Material 3 style APIs.
+    /// This value determines the shadow cast by the surface and its tonal
+    /// elevation (if the color is `surface`).
     #[builder(default, setter(strip_option))]
-    pub shadow_elevation: Option<Dp>,
+    pub elevation: Option<Dp>,
     /// Tonal elevation for surfaces that use the theme `surface` color.
     ///
     /// When the container color equals `MaterialColorScheme.surface`, a tint is
@@ -165,19 +177,21 @@ pub struct SurfaceArgs {
     /// Optional explicit ripple radius for this surface.
     #[builder(default, setter(strip_option))]
     pub ripple_radius: Option<Dp>,
-    /// Optional shared interaction state used to render state layers and
-    /// ripples.
+    /// Optional shared interaction state used to render state layers.
     ///
     /// This can be used to render visual feedback in one place while driving
     /// interactions from another.
     #[builder(default, setter(strip_option))]
-    pub interaction_state: Option<State<RippleState>>,
+    pub interaction_state: Option<State<InteractionState>>,
     /// Whether to render the state-layer overlay for this surface.
     #[builder(default = "true")]
     pub show_state_layer: bool,
     /// Whether to render ripple animations for this surface.
     #[builder(default = "true")]
     pub show_ripple: bool,
+    /// Optional ripple animation state used for rendering ripples.
+    #[builder(default, setter(strip_option))]
+    pub ripple_state: Option<State<RippleState>>,
     /// If true, all input events inside the surface bounds are blocked (stop
     /// propagation), after (optionally) handling its own click logic.
     #[builder(default = "false")]
@@ -211,6 +225,12 @@ impl SurfaceArgsBuilder {
     pub fn on_click_shared(mut self, on_click: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.on_click = Some(Some(on_click));
         self
+    }
+}
+
+impl SurfaceArgs {
+    pub(crate) fn set_ripple_state(&mut self, state: Option<State<RippleState>>) {
+        self.ripple_state = state;
     }
 }
 
@@ -281,10 +301,6 @@ fn apply_tonal_elevation_to_style(
     }
 }
 
-fn synthesize_shadow_for_elevation(elevation: Dp, scheme: &MaterialColorScheme) -> ShadowProps {
-    SurfaceDefaults::synthesize_shadow(elevation, scheme)
-}
-
 fn build_ripple_props(args: &SurfaceArgs, ripple_state: Option<State<RippleState>>) -> RippleProps {
     if !args.show_ripple {
         return RippleProps::default();
@@ -335,7 +351,7 @@ fn apply_state_layer_to_style(style: &SurfaceStyle, color: Color, alpha: f32) ->
 }
 
 fn build_rounded_rectangle_command(
-    args: &SurfaceArgs,
+    _args: &SurfaceArgs,
     style: &SurfaceStyle,
     ripple_props: RippleProps,
     corner_radii: [f32; 4],
@@ -349,7 +365,7 @@ fn build_rounded_rectangle_command(
                     color: *color,
                     corner_radii,
                     corner_g2,
-                    shadow: args.shadow,
+                    shadow: None,
                     ripple: ripple_props,
                 }
             } else {
@@ -357,7 +373,7 @@ fn build_rounded_rectangle_command(
                     color: *color,
                     corner_radii,
                     corner_g2,
-                    shadow: args.shadow,
+                    shadow: None,
                 }
             }
         }
@@ -367,7 +383,7 @@ fn build_rounded_rectangle_command(
                     color: *color,
                     corner_radii,
                     corner_g2,
-                    shadow: args.shadow,
+                    shadow: None,
                     border_width: width.to_pixels_f32(),
                     ripple: ripple_props,
                 }
@@ -376,7 +392,7 @@ fn build_rounded_rectangle_command(
                     color: *color,
                     corner_radii,
                     corner_g2,
-                    shadow: args.shadow,
+                    shadow: None,
                     border_width: width.to_pixels_f32(),
                 }
             }
@@ -392,7 +408,7 @@ fn build_rounded_rectangle_command(
                     border_color: *border_color,
                     corner_radii,
                     corner_g2,
-                    shadow: args.shadow,
+                    shadow: None,
                     border_width: border_width.to_pixels_f32(),
                     ripple: ripple_props,
                 }
@@ -402,7 +418,7 @@ fn build_rounded_rectangle_command(
                     border_color: *border_color,
                     corner_radii,
                     corner_g2,
-                    shadow: args.shadow,
+                    shadow: None,
                     border_width: border_width.to_pixels_f32(),
                 }
             }
@@ -411,7 +427,7 @@ fn build_rounded_rectangle_command(
 }
 
 fn build_ellipse_command(
-    args: &SurfaceArgs,
+    _args: &SurfaceArgs,
     style: &SurfaceStyle,
     ripple_props: RippleProps,
     use_ripple: bool,
@@ -424,13 +440,13 @@ fn build_ellipse_command(
                     color: *color,
                     corner_radii: corner_marker,
                     corner_g2: [0.0; 4],
-                    shadow: args.shadow,
+                    shadow: None,
                     ripple: ripple_props,
                 }
             } else {
                 ShapeCommand::Ellipse {
                     color: *color,
-                    shadow: args.shadow,
+                    shadow: None,
                 }
             }
         }
@@ -440,14 +456,14 @@ fn build_ellipse_command(
                     color: *color,
                     corner_radii: corner_marker,
                     corner_g2: [0.0; 4],
-                    shadow: args.shadow,
+                    shadow: None,
                     border_width: width.to_pixels_f32(),
                     ripple: ripple_props,
                 }
             } else {
                 ShapeCommand::OutlinedEllipse {
                     color: *color,
-                    shadow: args.shadow,
+                    shadow: None,
                     border_width: width.to_pixels_f32(),
                 }
             }
@@ -461,7 +477,7 @@ fn build_ellipse_command(
             ShapeCommand::FilledOutlinedEllipse {
                 color: *fill_color,
                 border_color: *border_color,
-                shadow: args.shadow,
+                shadow: None,
                 border_width: border_width.to_pixels_f32(),
             }
         }
@@ -507,9 +523,6 @@ fn try_build_simple_rect_command(
     style: &SurfaceStyle,
     ripple_state: Option<State<RippleState>>,
 ) -> Option<SimpleRectCommand> {
-    if args.shadow.is_some() {
-        return None;
-    }
     if args.show_ripple && args.on_click.is_some() {
         return None;
     }
@@ -648,18 +661,111 @@ fn compute_surface_size(
 /// # component();
 /// ```
 pub fn surface(args: SurfaceArgs, child: impl FnOnce() + Send + Sync + 'static) {
-    let modifier = if args.on_click.is_some() {
-        args.modifier.minimum_interactive_component_size()
+    let mut modifier = args.modifier;
+    let clickable = args.on_click.is_some();
+    let interactive = args.enabled && clickable;
+    let interaction_state = args
+        .interaction_state
+        .or_else(|| interactive.then(|| remember(InteractionState::new)));
+    let ripple_state = if args.show_ripple {
+        args.ripple_state
+            .or_else(|| interactive.then(|| remember(RippleState::new)))
     } else {
-        args.modifier
+        None
     };
-    let mut args = args;
-    args.modifier = Modifier::new();
-    modifier.run(move || surface_inner(args, child));
+    let has_semantics = args.accessibility_role.is_some()
+        || args.accessibility_label.is_some()
+        || args.accessibility_description.is_some()
+        || args.accessibility_focusable;
+
+    if clickable {
+        modifier = modifier.minimum_interactive_component_size();
+    }
+
+    if interactive {
+        let ripple_spec = RippleSpec {
+            bounded: args.ripple_bounded,
+            radius: args.ripple_radius,
+        };
+        let press_handler = ripple_state.map(|state| {
+            let spec = ripple_spec;
+            Arc::new(move |ctx: PointerEventContext| {
+                state.with_mut(|s| {
+                    s.start_animation_with_spec(ctx.normalized_pos, ctx.size, spec);
+                });
+            })
+        });
+        let release_handler = ripple_state.map(|state| {
+            Arc::new(move |_ctx: PointerEventContext| state.with_mut(|s| s.release()))
+        });
+        let mut clickable_args = ClickableArgs::new(
+            args.on_click
+                .clone()
+                .expect("interactive implies on_click is set"),
+        )
+        .enabled(args.enabled)
+        .block_input(args.block_input);
+
+        if let Some(role) = args.accessibility_role {
+            clickable_args = clickable_args.role(role);
+        }
+        if let Some(label) = args.accessibility_label.clone() {
+            clickable_args = clickable_args.label(label);
+        }
+        if let Some(description) = args.accessibility_description.clone() {
+            clickable_args = clickable_args.description(description);
+        }
+        if let Some(state) = interaction_state {
+            clickable_args = clickable_args.interaction_state(state);
+        }
+        if let Some(handler) = press_handler {
+            clickable_args = clickable_args.on_press(handler);
+        }
+        if let Some(handler) = release_handler {
+            clickable_args = clickable_args.on_release(handler);
+        }
+
+        modifier = modifier.clickable(clickable_args);
+    } else if args.block_input {
+        modifier = modifier.block_touch_propagation();
+    }
+
+    if !interactive && has_semantics {
+        let mut semantics = SemanticsArgs::new();
+        if let Some(role) = args.accessibility_role {
+            semantics = semantics.role(role);
+        }
+        if let Some(label) = args.accessibility_label.clone() {
+            semantics = semantics.label(label);
+        }
+        if let Some(description) = args.accessibility_description.clone() {
+            semantics = semantics.description(description);
+        }
+        if args.accessibility_focusable {
+            semantics = semantics.focusable(true);
+        }
+        if !args.enabled {
+            semantics = semantics.disabled(true);
+        }
+        modifier = modifier.semantics(semantics);
+    }
+
+    if let Some(elevation) = args.elevation
+        && elevation.0 > 0.0
+    {
+        modifier = modifier.shadow(ShadowArgs::new(elevation).shape(args.shape).clip(false));
+    }
+
+    modifier.run(move || surface_inner(args, interaction_state, ripple_state, child));
 }
 
 #[tessera]
-fn surface_inner(args: SurfaceArgs, child: impl FnOnce() + Send + Sync + 'static) {
+fn surface_inner(
+    args: SurfaceArgs,
+    interaction_state: Option<State<InteractionState>>,
+    ripple_state: Option<State<RippleState>>,
+    child: impl FnOnce() + Send + Sync + 'static,
+) {
     let scheme = use_context::<MaterialTheme>().get().color_scheme;
     let parent_absolute_elevation = use_context::<AbsoluteTonalElevation>().get().current;
     let absolute_tonal_elevation = Dp(parent_absolute_elevation.0 + args.tonal_elevation.0);
@@ -675,9 +781,6 @@ fn surface_inner(args: SurfaceArgs, child: impl FnOnce() + Send + Sync + 'static
     });
     let clickable = args.on_click.is_some();
     let interactive = args.enabled && clickable;
-    let interaction_state = args
-        .interaction_state
-        .or_else(|| interactive.then(|| remember(RippleState::new)));
 
     provide_context(
         AbsoluteTonalElevation {
@@ -698,13 +801,7 @@ fn surface_inner(args: SurfaceArgs, child: impl FnOnce() + Send + Sync + 'static
     let absolute_tonal_elevation_for_draw = absolute_tonal_elevation;
 
     measure(Box::new(move |input| {
-        let mut args_for_draw = args_measure.clone();
-        if args_for_draw.shadow.is_none()
-            && let Some(elevation) = args_for_draw.shadow_elevation
-            && elevation.0 > 0.0
-        {
-            args_for_draw.shadow = Some(synthesize_shadow_for_elevation(elevation, &scheme));
-        }
+        let args_for_draw = args_measure.clone();
 
         let effective_surface_constraint = Constraint::new(
             input.parent_constraint.width(),
@@ -782,7 +879,7 @@ fn surface_inner(args: SurfaceArgs, child: impl FnOnce() + Send + Sync + 'static
         }
 
         let ripple_state_for_draw = if args_measure.show_ripple {
-            interaction_state
+            ripple_state
         } else {
             None
         };
@@ -805,175 +902,16 @@ fn surface_inner(args: SurfaceArgs, child: impl FnOnce() + Send + Sync + 'static
         Ok(ComputedData { width, height })
     }));
 
-    if clickable {
-        let args = args;
+    if !interactive && args.block_input {
         input_handler(Box::new(move |mut input| {
-            // Apply accessibility metadata first.
-            apply_surface_accessibility(
-                &mut input,
-                &args,
-                true,
-                args.enabled,
-                args.on_click.clone(),
-            );
-
             let size = input.computed_data;
             let cursor_pos_option = input.cursor_position_rel;
             let is_cursor_in_surface = cursor_pos_option
                 .map(|pos| is_position_in_component(size, pos))
                 .unwrap_or(false);
-
-            if interactive {
-                if let Some(ref state) = interaction_state {
-                    state.with_mut(|s| s.set_hovered(is_cursor_in_surface));
-                }
-
-                if input.cursor_events.iter().any(|event| {
-                    matches!(
-                        event.content,
-                        CursorEventContent::Released(PressKeyEventType::Left)
-                    )
-                }) {
-                    if let Some(ref state) = interaction_state {
-                        state.with_mut(|s| s.release());
-                    }
-                }
-
-                if is_cursor_in_surface {
-                    input.requests.cursor_icon = CursorIcon::Pointer;
-                }
-
-                if is_cursor_in_surface {
-                    let press_events: Vec<_> = input
-                        .cursor_events
-                        .iter()
-                        .filter(|event| {
-                            matches!(
-                                event.content,
-                                CursorEventContent::Pressed(PressKeyEventType::Left)
-                            )
-                        })
-                        .collect();
-
-                    let release_events: Vec<_> = input
-                        .cursor_events
-                        .iter()
-                        .filter(|event| event.gesture_state == GestureState::TapCandidate)
-                        .filter(|event| {
-                            matches!(
-                                event.content,
-                                CursorEventContent::Released(PressKeyEventType::Left)
-                            )
-                        })
-                        .collect();
-
-                    if !press_events.is_empty()
-                        && let Some(cursor_pos) = cursor_pos_option
-                        && let Some(state) = interaction_state.as_ref()
-                    {
-                        let denom_w = size.width.to_f32().max(1.0);
-                        let denom_h = size.height.to_f32().max(1.0);
-                        let normalized_x = (cursor_pos.x.to_f32() / denom_w).clamp(0.0, 1.0);
-                        let normalized_y = (cursor_pos.y.to_f32() / denom_h).clamp(0.0, 1.0);
-                        let spec = RippleSpec {
-                            bounded: args.ripple_bounded,
-                            radius: args.ripple_radius,
-                        };
-
-                        state.with_mut(|s| {
-                            s.start_animation_with_spec(
-                                [normalized_x, normalized_y],
-                                PxSize::new(size.width, size.height),
-                                spec,
-                            );
-                            s.set_pressed(true);
-                        });
-                    }
-
-                    if !release_events.is_empty()
-                        && let Some(ref on_click) = args.on_click
-                    {
-                        on_click();
-                    }
-
-                    if args.block_input {
-                        input.block_all();
-                    }
-                }
-            } else if args.block_input && is_cursor_in_surface {
+            if is_cursor_in_surface {
                 input.block_all();
             }
         }));
-    } else {
-        let args = args;
-        input_handler(Box::new(move |mut input| {
-            // Apply accessibility metadata first
-            apply_surface_accessibility(&mut input, &args, false, args.enabled, None);
-
-            // Then handle input blocking if needed
-            let size = input.computed_data;
-            let cursor_pos_option = input.cursor_position_rel;
-            let is_cursor_in_surface = cursor_pos_option
-                .map(|pos| is_position_in_component(size, pos))
-                .unwrap_or(false);
-            if args.block_input && is_cursor_in_surface {
-                input.block_all();
-            }
-        }));
-    }
-}
-
-fn apply_surface_accessibility(
-    input: &mut InputHandlerInput<'_>,
-    args: &SurfaceArgs,
-    interactive: bool,
-    enabled: bool,
-    on_click: Option<Arc<dyn Fn() + Send + Sync>>,
-) {
-    let has_metadata = args.accessibility_role.is_some()
-        || args.accessibility_label.is_some()
-        || args.accessibility_description.is_some()
-        || args.accessibility_focusable
-        || interactive;
-
-    if !has_metadata {
-        return;
-    }
-
-    let mut builder = input.accessibility();
-
-    let role = args
-        .accessibility_role
-        .or_else(|| interactive.then_some(Role::Button));
-    if let Some(role) = role {
-        builder = builder.role(role);
-    }
-    if let Some(label) = args.accessibility_label.as_ref() {
-        builder = builder.label(label.clone());
-    }
-    if let Some(description) = args.accessibility_description.as_ref() {
-        builder = builder.description(description.clone());
-    }
-    if !enabled {
-        builder = builder.disabled();
-    } else {
-        if args.accessibility_focusable || interactive {
-            builder = builder.focusable();
-        }
-        if interactive {
-            builder = builder.action(Action::Click);
-        }
-    }
-    builder.commit();
-
-    if enabled
-        && interactive
-        && let Some(on_click) = on_click
-    {
-        input.set_accessibility_action_handler(move |action| {
-            if action == Action::Click {
-                on_click();
-            }
-        });
     }
 }

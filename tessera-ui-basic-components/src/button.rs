@@ -9,7 +9,6 @@ use derive_builder::Builder;
 use tessera_ui::{Color, Dp, Modifier, accesskit::Role, tessera, use_context};
 
 use crate::{
-    ShadowProps,
     alignment::Alignment,
     modifier::ModifierExt,
     shape_def::Shape,
@@ -102,12 +101,9 @@ pub struct ButtonArgs {
     /// `color` will be used.
     #[builder(default)]
     pub border_color: Option<Color>,
-    /// Shadow of the button. If None, no shadow is applied.
-    #[builder(default, setter(strip_option))]
-    pub shadow: Option<ShadowProps>,
     /// Optional shadow elevation hint forwarded to the underlying surface.
     #[builder(default, setter(strip_option))]
-    pub shadow_elevation: Option<Dp>,
+    pub elevation: Option<Dp>,
     /// Tonal elevation forwarded to the underlying surface.
     #[builder(default = "Dp(0.0)")]
     pub tonal_elevation: Dp,
@@ -206,12 +202,6 @@ pub fn button(args: impl Into<ButtonArgs>, child: impl FnOnce() + Send + Sync + 
     // Create interactive surface for button
     surface(create_surface_args(&button_args), move || {
         Modifier::new()
-            .size_in(
-                Some(ButtonDefaults::MIN_WIDTH),
-                None,
-                Some(ButtonDefaults::MIN_HEIGHT),
-                None,
-            )
             .padding_all(button_args.padding)
             .run(move || {
                 provide_text_style(typography.label_large, child);
@@ -257,12 +247,8 @@ fn create_surface_args(args: &ButtonArgs) -> crate::surface::SurfaceArgs {
 
     let mut builder = SurfaceArgsBuilder::default();
 
-    // Set shadow if available
-    if let Some(shadow) = args.shadow {
-        builder = builder.shadow(shadow);
-    }
-    if let Some(shadow_elevation) = args.shadow_elevation {
-        builder = builder.shadow_elevation(shadow_elevation);
+    if let Some(elevation) = args.elevation {
+        builder = builder.elevation(elevation);
     }
 
     // Set on_click handler if available
@@ -283,7 +269,12 @@ fn create_surface_args(args: &ButtonArgs) -> crate::surface::SurfaceArgs {
     builder
         .style(style)
         .shape(args.shape)
-        .modifier(args.modifier)
+        .modifier(args.modifier.size_in(
+            Some(ButtonDefaults::MIN_WIDTH),
+            None,
+            Some(ButtonDefaults::MIN_HEIGHT),
+            None,
+        ))
         .ripple_color(args.ripple_color)
         .content_alignment(Alignment::Center)
         .content_color(content_color)
@@ -328,7 +319,7 @@ impl ButtonArgs {
             .color(scheme.surface_container_low)
             .content_color(scheme.primary)
             .ripple_color(scheme.primary)
-            .shadow_elevation(Dp(1.0))
+            .elevation(Dp(1.0))
             .disabled_container_color(
                 scheme
                     .on_surface

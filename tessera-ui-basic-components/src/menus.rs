@@ -14,7 +14,6 @@ use tessera_ui::{
 };
 
 use crate::{
-    ShadowProps,
     alignment::CrossAxisAlignment,
     checkmark::{CheckmarkArgsBuilder, checkmark},
     column::{ColumnArgsBuilder, column},
@@ -44,21 +43,16 @@ fn default_menu_width() -> DimensionValue {
     }
 }
 
+fn default_menu_modifier() -> Modifier {
+    Modifier::new().constrain(Some(default_menu_width()), None)
+}
+
 fn default_max_height() -> Option<Px> {
     Some(Px::from(MENU_MAX_HEIGHT))
 }
 
 fn default_menu_shape() -> Shape {
     Shape::rounded_rectangle(Dp(4.0))
-}
-
-fn default_menu_shadow() -> Option<ShadowProps> {
-    let scheme = use_context::<MaterialTheme>().get().color_scheme;
-    Some(ShadowProps {
-        color: scheme.shadow.with_alpha(0.12),
-        offset: [0.0, 3.0],
-        smoothness: 8.0,
-    })
 }
 
 fn default_menu_color() -> Color {
@@ -210,20 +204,19 @@ pub struct MenuProviderArgs {
     /// Additional x/y offset applied after placement relative to the anchor.
     #[builder(default = "[Dp(0.0), MENU_VERTICAL_GAP]")]
     pub offset: [Dp; 2],
-    /// Width behavior of the menu container. Defaults to the Material 112–280
-    /// dp range.
-    #[builder(default = "default_menu_width()")]
-    pub width: DimensionValue,
+    /// Layout modifiers applied to the menu container. Defaults to the Material
+    /// 112–280 dp width range.
+    #[builder(default = "default_menu_modifier()")]
+    pub modifier: Modifier,
     /// Maximum height of the menu before scrolling is required.
     #[builder(default = "default_max_height()")]
     pub max_height: Option<Px>,
     /// Shape of the menu container.
     #[builder(default = "default_menu_shape()")]
     pub shape: Shape,
-    /// Optional shadow representing elevation. Defaults to a soft Material
-    /// shadow.
-    #[builder(default = "default_menu_shadow()", setter(strip_option))]
-    pub shadow: Option<ShadowProps>,
+    /// Elevation of the menu. Defaults to level 2 (3.0.dp).
+    #[builder(default = "Dp(3.0)")]
+    pub elevation: Dp,
     /// Background color of the menu container.
     #[builder(default = "default_menu_color()")]
     pub container_color: Color,
@@ -381,12 +374,12 @@ fn apply_close_action(
 ///
 /// Provides a Material Design 3 menu overlay anchored to a rectangle.
 ///
-/// # Usage
+/// ## Usage
 ///
 /// Wrap page content and show contextual or overflow actions aligned to a
 /// trigger element.
 ///
-/// # Parameters
+/// ## Parameters
 ///
 /// - `args` — configures placement, styling, and dismissal behavior; see
 ///   [`MenuProviderArgs`].
@@ -394,7 +387,7 @@ fn apply_close_action(
 /// - `menu_content` — closure that receives a [`MenuScope`] to register menu
 ///   items.
 ///
-/// # Examples
+/// ## Examples
 ///
 /// ```
 /// # use tessera_ui::tessera;
@@ -458,12 +451,12 @@ pub fn menu_provider(
 /// Provides a Material Design 3 menu overlay anchored to a rectangle with an
 /// external controller.
 ///
-/// # Usage
+/// ## Usage
 ///
 /// Wrap page content and show contextual or overflow actions aligned to a
 /// trigger element, controlled via a shared [`MenuController`].
 ///
-/// # Parameters
+/// ## Parameters
 ///
 /// - `args` — configures placement, styling, and dismissal behavior; see
 ///   [`MenuProviderArgs`].
@@ -473,7 +466,7 @@ pub fn menu_provider(
 /// - `menu_content` — closure that receives a [`MenuScope`] to register menu
 ///   items.
 ///
-/// # Examples
+/// ## Examples
 ///
 /// ```
 /// # use tessera_ui::tessera;
@@ -551,24 +544,21 @@ pub fn menu_provider_with_controller(
     // Menu panel.
     surface(
         {
-            let mut builder = SurfaceArgsBuilder::default()
+            let builder = SurfaceArgsBuilder::default()
                 .style(SurfaceStyle::Filled {
                     color: args.container_color,
                 })
                 .shape(args.shape)
-                .modifier(Modifier::new().constrain(
-                    Some(args.width),
+                .modifier(args.modifier.constrain(
+                    None,
                     Some(DimensionValue::Wrap {
                         min: None,
                         max: args.max_height,
                     }),
                 ))
                 .accessibility_role(Role::Menu)
-                .block_input(true);
-
-            if let Some(shadow) = args.shadow {
-                builder = builder.shadow(shadow);
-            }
+                .block_input(true)
+                .elevation(args.elevation);
 
             builder.build().expect("builder construction failed")
         },

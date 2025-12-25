@@ -5,10 +5,12 @@
 //! Display labels, headings, and other text content.
 use derive_builder::Builder;
 use tessera_ui::{
-    Color, ComputedData, DimensionValue, Dp, Px, PxPosition, accesskit::Role, tessera, use_context,
+    Color, ComputedData, DimensionValue, Dp, Modifier, Px, PxPosition, accesskit::Role, tessera,
+    use_context,
 };
 
 use crate::{
+    modifier::{ModifierExt as _, SemanticsArgs},
     pipelines::text::{
         command::{TextCommand, TextConstraint},
         pipeline::TextData,
@@ -22,6 +24,10 @@ pub use crate::pipelines::text::pipeline::{read_font_system, write_font_system};
 #[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct TextArgs {
+    /// Optional modifier chain applied to the text.
+    #[builder(default = "Modifier::new()")]
+    pub modifier: Modifier,
+
     /// The text content to be rendered.
     #[builder(setter(into))]
     pub text: String,
@@ -111,26 +117,27 @@ impl From<&str> for TextArgs {
 #[tessera]
 pub fn text(args: impl Into<TextArgs>) {
     let text_args: TextArgs = args.into();
-    let accessibility_label = text_args.accessibility_label.clone();
+    let accessibility_label = text_args
+        .accessibility_label
+        .clone()
+        .or_else(|| (!text_args.text.is_empty()).then(|| text_args.text.clone()));
     let accessibility_description = text_args.accessibility_description.clone();
-    let text_for_accessibility = text_args.text.clone();
+    let mut semantics = SemanticsArgs::new().role(Role::Label);
+    if let Some(label) = accessibility_label {
+        semantics = semantics.label(label);
+    }
+    if let Some(description) = accessibility_description {
+        semantics = semantics.description(description);
+    }
+    text_args.modifier.semantics(semantics).run(move || {
+        text_inner(text_args);
+    });
+}
+
+#[tessera]
+fn text_inner(text_args: TextArgs) {
     let inherited_style = use_context::<TextStyle>().get();
 
-    input_handler(Box::new(move |input| {
-        let mut builder = input.accessibility().role(Role::Label);
-
-        if let Some(label) = accessibility_label.as_ref() {
-            builder = builder.label(label.clone());
-        } else if !text_for_accessibility.is_empty() {
-            builder = builder.label(text_for_accessibility.clone());
-        }
-
-        if let Some(description) = accessibility_description.as_ref() {
-            builder = builder.description(description.clone());
-        }
-
-        builder.commit();
-    }));
     measure(Box::new(move |input| {
         let max_width: Option<Px> = match input.parent_constraint.width() {
             DimensionValue::Fixed(w) => Some(w),
@@ -166,7 +173,6 @@ pub fn text(args: impl Into<TextArgs>) {
             offset: PxPosition::ZERO,
         };
 
-        // Use the new unified command system to add the text rendering command
         input.metadata_mut().push_draw_command(drawable);
 
         Ok(ComputedData {

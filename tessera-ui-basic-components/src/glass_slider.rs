@@ -7,15 +7,14 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use tessera_ui::{
-    Color, ComputedData, Constraint, CursorEventContent, DimensionValue, Dp, Px, PxPosition, State,
-    accesskit::{Action, Role},
-    focus_state::Focus,
-    remember, tessera,
+    Color, ComputedData, Constraint, CursorEventContent, DimensionValue, Dp, Modifier, Px,
+    PxPosition, State, accesskit::Role, focus_state::Focus, remember, tessera,
     winit::window::CursorIcon,
 };
 
 use crate::{
     fluid_glass::{FluidGlassArgsBuilder, GlassBorder, fluid_glass},
+    modifier::{ModifierExt as _, SemanticsArgs},
     shape_def::Shape,
 };
 
@@ -76,13 +75,13 @@ pub struct GlassSliderArgs {
     #[builder(default = "0.0")]
     pub value: f32,
 
+    /// Layout modifiers applied to the slider track.
+    #[builder(default = "default_slider_modifier()")]
+    pub modifier: Modifier,
+
     /// Callback function triggered when the slider's value changes.
     #[builder(default = "Arc::new(|_| {})")]
     pub on_change: Arc<dyn Fn(f32) + Send + Sync>,
-
-    /// The width of the slider track.
-    #[builder(default = "Dp(200.0)")]
-    pub width: Dp,
 
     /// The height of the slider track.
     #[builder(default = "Dp(12.0)")]
@@ -115,6 +114,10 @@ pub struct GlassSliderArgs {
     pub accessibility_description: Option<String>,
 }
 
+fn default_slider_modifier() -> Modifier {
+    Modifier::new().width(Dp(200.0))
+}
+
 /// Helper: check if a cursor position is inside a measured component area.
 /// Extracted to reduce duplication and keep the input handler concise.
 fn cursor_within_component(cursor_pos: Option<PxPosition>, computed: &ComputedData) -> bool {
@@ -131,16 +134,6 @@ fn cursor_within_component(cursor_pos: Option<PxPosition>, computed: &ComputedDa
 /// Returns None when cursor is not available.
 fn cursor_progress(cursor_pos: Option<PxPosition>, width_f: f32) -> Option<f32> {
     cursor_pos.map(|pos| (pos.x.0 as f32 / width_f).clamp(0.0, 1.0))
-}
-
-/// Helper: compute progress fill width in Px, clamped to >= 0.
-fn compute_progress_width(total_width: Px, value: f32, border_padding_px: f32) -> Px {
-    let total_f = total_width.0 as f32;
-    let mut w = total_f * value - border_padding_px;
-    if w < 0.0 {
-        w = 0.0;
-    }
-    Px(w as i32)
 }
 
 /// Process cursor events and update the slider state accordingly.
@@ -199,39 +192,94 @@ fn process_cursor_events(
 ///
 /// ```
 /// use std::sync::{Arc, Mutex};
+/// use tessera_ui::{remember, tessera};
 /// use tessera_ui_basic_components::glass_slider::{
-///     GlassSliderArgsBuilder, GlassSliderController, glass_slider, glass_slider_with_controller,
+///     GlassSliderArgsBuilder, GlassSliderController, glass_slider_with_controller,
 /// };
 ///
-/// // In a real app, this would be part of your application's state.
-/// let slider_value = Arc::new(Mutex::new(0.5));
-/// let slider_controller = Arc::new(GlassSliderController::new());
+/// #[tessera]
+/// fn demo() {
+///     // In a real app, this would be part of your application's state.
+///     let slider_value = Arc::new(Mutex::new(0.5));
+///     let slider_controller = remember(GlassSliderController::new);
 ///
-/// let on_change = {
-///     let slider_value = slider_value.clone();
-///     Arc::new(move |new_value| {
-///         *slider_value.lock().unwrap() = new_value;
-///     })
-/// };
+///     let on_change = {
+///         let slider_value = slider_value.clone();
+///         Arc::new(move |new_value| {
+///             *slider_value.lock().unwrap() = new_value;
+///         })
+///     };
 ///
-/// let args = GlassSliderArgsBuilder::default()
-///     .value(*slider_value.lock().unwrap())
-///     .on_change(on_change)
-///     .build()
-///     .unwrap();
+///     let args = GlassSliderArgsBuilder::default()
+///         .value(*slider_value.lock().unwrap())
+///         .on_change(on_change)
+///         .build()
+///         .unwrap();
 ///
-/// // The component would be called in the UI like this:
-/// // glass_slider_with_controller(args, slider_controller.clone());
+///     glass_slider_with_controller(args, slider_controller);
 ///
-/// // For the doctest, we can simulate the callback.
-/// (args.on_change)(0.75);
-/// assert_eq!(*slider_value.lock().unwrap(), 0.75);
+///     // For the doctest, we can simulate the callback.
+///     assert_eq!(*slider_value.lock().unwrap(), 0.5);
+/// }
+///
+/// demo();
 /// ```
 #[tessera]
 pub fn glass_slider(args: impl Into<GlassSliderArgs>) {
     let args: GlassSliderArgs = args.into();
     let controller = remember(GlassSliderController::new);
     glass_slider_with_controller(args, controller);
+}
+
+#[tessera]
+fn glass_slider_progress_fill(value: f32, tint_color: Color, blur_radius: Dp) {
+    fluid_glass(
+        FluidGlassArgsBuilder::default()
+            .tint_color(tint_color)
+            .blur_radius(blur_radius)
+            .shape(Shape::capsule())
+            .refraction_amount(0.0)
+            .build()
+            .expect("builder construction failed"),
+        || {},
+    );
+
+    let clamped = value.clamp(0.0, 1.0);
+    measure(Box::new(move |input| {
+        let available_width = match input.parent_constraint.width() {
+            DimensionValue::Fixed(px) => px,
+            DimensionValue::Wrap { max, .. } => max.unwrap_or(Px(0)),
+            DimensionValue::Fill { max, .. } => max.expect(
+                "Seems that you are trying to fill an infinite width, which is not allowed",
+            ),
+        };
+        let available_height = match input.parent_constraint.height() {
+            DimensionValue::Fixed(px) => px,
+            DimensionValue::Wrap { max, .. } => max.unwrap_or(Px(0)),
+            DimensionValue::Fill { max, .. } => max.expect(
+                "Seems that you are trying to fill an infinite height, which is not allowed",
+            ),
+        };
+
+        let width_px = Px((available_width.to_f32() * clamped).round() as i32);
+        let child_id = input
+            .children_ids
+            .first()
+            .copied()
+            .expect("progress fill child should exist");
+
+        let child_constraint = Constraint::new(
+            DimensionValue::Fixed(width_px),
+            DimensionValue::Fixed(available_height),
+        );
+        input.measure_child(child_id, &child_constraint)?;
+        input.place_child(child_id, PxPosition::new(Px(0), Px(0)));
+
+        Ok(ComputedData {
+            width: width_px,
+            height: available_height,
+        })
+    }));
 }
 
 /// # glass_slider_with_controller
@@ -280,13 +328,34 @@ pub fn glass_slider_with_controller(
     controller: State<GlassSliderController>,
 ) {
     let args: GlassSliderArgs = args.into();
-    let border_padding_px = args.track_border_width.to_px().to_f32() * 2.0;
+    let mut modifier = args.modifier;
+    let mut semantics = SemanticsArgs::new().role(Role::Slider);
+    if let Some(label) = args.accessibility_label.clone() {
+        semantics = semantics.label(label);
+    }
+    if let Some(description) = args.accessibility_description.clone() {
+        semantics = semantics.description(description);
+    }
+    semantics = semantics
+        .numeric_range(0.0, 1.0)
+        .numeric_value(args.value as f64)
+        .numeric_value_step(ACCESSIBILITY_STEP as f64);
+    semantics = if args.disabled {
+        semantics.disabled(true)
+    } else {
+        semantics.focusable(true)
+    };
+    modifier = modifier.semantics(semantics);
 
+    modifier.run(move || glass_slider_inner(args, controller));
+}
+
+#[tessera]
+fn glass_slider_inner(args: GlassSliderArgs, controller: State<GlassSliderController>) {
     // External track (background) with border - capsule shape
     fluid_glass(
         FluidGlassArgsBuilder::default()
-            .width(DimensionValue::Fixed(args.width.to_px()))
-            .height(DimensionValue::Fixed(args.track_height.to_px()))
+            .modifier(Modifier::new().fill_max_size())
             .tint_color(args.track_tint_color)
             .blur_radius(args.blur_radius)
             .shape(Shape::capsule())
@@ -296,29 +365,15 @@ pub fn glass_slider_with_controller(
             .expect("builder construction failed"),
         move || {
             // Internal progress fill - capsule shape using surface
-            let progress_width_px =
-                compute_progress_width(args.width.to_px(), args.value, border_padding_px);
-            fluid_glass(
-                FluidGlassArgsBuilder::default()
-                    .width(DimensionValue::Fixed(progress_width_px))
-                    .height(DimensionValue::Fill {
-                        min: None,
-                        max: None,
-                    })
-                    .tint_color(args.progress_tint_color)
-                    .shape(Shape::capsule())
-                    .refraction_amount(0.0)
-                    .build()
-                    .expect("builder construction failed"),
-                || {},
-            );
+            // Child constraint already excludes padding from the track.
+            glass_slider_progress_fill(args.value, args.progress_tint_color, args.blur_radius);
         },
     );
 
     let on_change = args.on_change.clone();
     let args_for_handler = args.clone();
 
-    input_handler(Box::new(move |mut input| {
+    input_handler(Box::new(move |input| {
         if !args_for_handler.disabled {
             let is_in_component =
                 cursor_within_component(input.cursor_position_rel, &input.computed_data);
@@ -337,18 +392,38 @@ pub fn glass_slider_with_controller(
                 }
             }
         }
-
-        apply_glass_slider_accessibility(
-            &mut input,
-            &args_for_handler,
-            args_for_handler.value,
-            &args_for_handler.on_change,
-        );
     }));
+    let mut semantics = SemanticsArgs::new().role(Role::Slider);
+    if let Some(label) = args.accessibility_label.clone() {
+        semantics = semantics.label(label);
+    }
+    if let Some(description) = args.accessibility_description.clone() {
+        semantics = semantics.description(description);
+    }
+    semantics = semantics
+        .numeric_range(0.0, 1.0)
+        .numeric_value(args.value as f64)
+        .numeric_value_step(ACCESSIBILITY_STEP as f64);
+    semantics = if args.disabled {
+        semantics.disabled(true)
+    } else {
+        semantics.focusable(true)
+    };
+    let _modifier = Modifier::new().semantics(semantics);
+
+    let track_height = args.track_height.to_px();
+    let fallback_width = Dp(200.0).to_px();
 
     measure(Box::new(move |input| {
-        let self_width = args.width.to_px();
-        let self_height = args.track_height.to_px();
+        let width_dim = input.parent_constraint.width();
+        let self_width = match width_dim {
+            DimensionValue::Fixed(px) => px,
+            DimensionValue::Wrap { max, .. } => max.unwrap_or(fallback_width),
+            DimensionValue::Fill { max, .. } => max.expect(
+                "Seems that you are trying to fill an infinite width, which is not allowed",
+            ),
+        };
+        let self_height = track_height;
 
         let track_id = input.children_ids[0];
 
@@ -365,54 +440,4 @@ pub fn glass_slider_with_controller(
             height: self_height,
         })
     }));
-}
-
-fn apply_glass_slider_accessibility(
-    input: &mut tessera_ui::InputHandlerInput<'_>,
-    args: &GlassSliderArgs,
-    current_value: f32,
-    on_change: &Arc<dyn Fn(f32) + Send + Sync>,
-) {
-    let mut builder = input.accessibility().role(Role::Slider);
-
-    if let Some(label) = args.accessibility_label.as_ref() {
-        builder = builder.label(label.clone());
-    }
-    if let Some(description) = args.accessibility_description.as_ref() {
-        builder = builder.description(description.clone());
-    }
-
-    builder = builder
-        .numeric_value(current_value as f64)
-        .numeric_range(0.0, 1.0);
-
-    if args.disabled {
-        builder = builder.disabled();
-    } else {
-        builder = builder
-            .action(Action::Increment)
-            .action(Action::Decrement)
-            .focusable();
-    }
-
-    builder.commit();
-
-    if args.disabled {
-        return;
-    }
-
-    let on_change = on_change.clone();
-    input.set_accessibility_action_handler(move |action| {
-        let new_value = match action {
-            Action::Increment => Some((current_value + ACCESSIBILITY_STEP).clamp(0.0, 1.0)),
-            Action::Decrement => Some((current_value - ACCESSIBILITY_STEP).clamp(0.0, 1.0)),
-            _ => None,
-        };
-
-        if let Some(new_value) = new_value
-            && (new_value - current_value).abs() > f32::EPSILON
-        {
-            on_change(new_value);
-        }
-    });
 }

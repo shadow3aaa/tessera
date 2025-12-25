@@ -10,18 +10,15 @@ use std::{
 
 use derive_builder::Builder;
 use tessera_ui::{
-    Color, ComputedData, Constraint, CursorEventContent, DimensionValue, Dp, GestureState,
-    Modifier, PressKeyEventType, PxPosition, PxSize, State,
-    accesskit::{Action, Role, Toggled},
-    remember, tessera, use_context,
-    winit::window::CursorIcon,
+    Color, ComputedData, Constraint, DimensionValue, Dp, Modifier, PxPosition, PxSize, State,
+    accesskit::Role, remember, tessera, use_context,
 };
 
 use crate::{
     alignment::Alignment,
     animation,
     boxed::{BoxedArgsBuilder, boxed},
-    modifier::ModifierExt,
+    modifier::{InteractionState, ModifierExt, PointerEventContext, ToggleableArgs},
     ripple_state::{RippleSpec, RippleState},
     shape_def::Shape,
     surface::{SurfaceArgsBuilder, SurfaceStyle, surface},
@@ -197,6 +194,9 @@ impl Default for SwitchController {
 #[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct SwitchArgs {
+    /// Optional modifier chain applied to the switch subtree.
+    #[builder(default = "Modifier::new()")]
+    pub modifier: Modifier,
     /// Optional callback invoked when the switch toggles.
     #[builder(default, setter(strip_option))]
     pub on_toggle: Option<Arc<dyn Fn(bool) + Send + Sync>>,
@@ -259,379 +259,269 @@ impl Default for SwitchArgs {
     }
 }
 
-fn is_cursor_in_component(size: ComputedData, pos_option: Option<tessera_ui::PxPosition>) -> bool {
-    pos_option
-        .map(|pos| {
-            pos.x.0 >= 0 && pos.x.0 < size.width.0 && pos.y.0 >= 0 && pos.y.0 < size.height.0
-        })
-        .unwrap_or(false)
-}
-
-fn handle_input_events_switch(
-    controller: State<SwitchController>,
-    on_toggle: &Option<Arc<dyn Fn(bool) + Send + Sync>>,
-    pressed: State<bool>,
-    interaction_state: Option<State<RippleState>>,
-    input: &mut tessera_ui::InputHandlerInput,
-) {
-    controller.with_mut(|c| c.update_progress());
-
-    let size = input.computed_data;
-    let is_cursor_in = is_cursor_in_component(size, input.cursor_position_rel);
-    let interactive = on_toggle.is_some();
-
-    if interactive && let Some(interaction_state) = interaction_state {
-        interaction_state.with_mut(|s| s.set_hovered(is_cursor_in));
-    }
-
-    if is_cursor_in && interactive {
-        input.requests.cursor_icon = CursorIcon::Pointer;
-    }
-
-    for e in input.cursor_events.iter() {
-        if matches!(
-            e.content,
-            CursorEventContent::Pressed(PressKeyEventType::Left)
-        ) && is_cursor_in
-        {
-            if interactive && let Some(interaction_state) = interaction_state {
-                pressed.set(true);
-                interaction_state.with_mut(|s| {
-                    s.start_animation_with_spec(
-                        [0.5, 0.5],
-                        PxSize::new(
-                            SwitchDefaults::STATE_LAYER_SIZE.to_px(),
-                            SwitchDefaults::STATE_LAYER_SIZE.to_px(),
-                        ),
-                        RippleSpec {
-                            bounded: false,
-                            radius: Some(Dp(SwitchDefaults::STATE_LAYER_SIZE.0 / 2.0)),
-                        },
-                    );
-                    s.set_pressed(true);
-                });
-            } else if interactive {
-                pressed.set(true);
-            }
-        }
-        if matches!(
-            e.content,
-            CursorEventContent::Released(PressKeyEventType::Left)
-        ) && interactive
-        {
-            pressed.set(false);
-            if let Some(interaction_state) = interaction_state {
-                interaction_state.with_mut(|s| s.release());
-            }
-        }
-        if interactive
-            && e.gesture_state == GestureState::TapCandidate
-            && matches!(
-                e.content,
-                CursorEventContent::Released(PressKeyEventType::Left)
-            )
-            && is_cursor_in
-        {
-            toggle_switch_state(controller, on_toggle);
-        }
-    }
-
-    if !is_cursor_in && interactive {
-        pressed.set(false);
-        if let Some(interaction_state) = interaction_state {
-            interaction_state.with_mut(|s| {
-                s.release();
-                s.set_hovered(false);
-            });
-        }
-    }
-}
-
-fn toggle_switch_state(
-    controller: State<SwitchController>,
-    on_toggle: &Option<Arc<dyn Fn(bool) + Send + Sync>>,
-) -> bool {
-    let Some(on_toggle) = on_toggle else {
-        return false;
-    };
-
-    controller.with_mut(|c| c.toggle());
-    let checked = controller.with(|c| c.is_checked());
-    on_toggle(checked);
-    true
-}
-
-fn apply_switch_accessibility(
-    input: &mut tessera_ui::InputHandlerInput<'_>,
-    controller: State<SwitchController>,
-    enabled: bool,
-    on_toggle: &Option<Arc<dyn Fn(bool) + Send + Sync>>,
-    label: Option<&String>,
-    description: Option<&String>,
-) {
-    let checked = controller.with(|c| c.is_checked());
-    let mut builder = input.accessibility().role(Role::Switch);
-
-    if let Some(label) = label {
-        builder = builder.label(label.clone());
-    }
-    if let Some(description) = description {
-        builder = builder.description(description.clone());
-    }
-
-    builder = builder.toggled(if checked {
-        Toggled::True
-    } else {
-        Toggled::False
-    });
-
-    if !enabled {
-        builder = builder.disabled();
-    } else if on_toggle.is_some() {
-        builder = builder.focusable().action(Action::Click);
-    }
-
-    builder.commit();
-
-    if enabled && on_toggle.is_some() {
-        let on_toggle = on_toggle.clone();
-        input.set_accessibility_action_handler(move |action| {
-            if action == Action::Click {
-                toggle_switch_state(controller, &on_toggle);
-            }
-        });
-    }
-}
-
 #[tessera]
 fn switch_inner(
     args: SwitchArgs,
     controller: State<SwitchController>,
     child: Option<Box<dyn FnOnce() + Send + Sync>>,
 ) {
-    let pressed = remember(|| false);
+    let mut modifier = args.modifier;
+
     controller.with_mut(|c| c.update_progress());
 
+    let on_toggle = args.enabled.then(|| args.on_toggle.clone()).flatten();
+    let interactive = on_toggle.is_some();
+    let interaction_state = interactive.then(|| remember(InteractionState::new));
+    let ripple_state = interactive.then(|| remember(RippleState::new));
+    let checked = controller.with(|c| c.is_checked());
+    if interactive {
+        modifier = modifier.minimum_interactive_component_size();
+        let on_toggle = on_toggle.clone();
+        let ripple_spec = RippleSpec {
+            bounded: false,
+            radius: Some(Dp(SwitchDefaults::STATE_LAYER_SIZE.0 / 2.0)),
+        };
+        let ripple_size = PxSize::new(
+            SwitchDefaults::STATE_LAYER_SIZE.to_px(),
+            SwitchDefaults::STATE_LAYER_SIZE.to_px(),
+        );
+        let press_handler = ripple_state.map(|state| {
+            let spec = ripple_spec;
+            let size = ripple_size;
+            Arc::new(move |ctx: PointerEventContext| {
+                state.with_mut(|s| s.start_animation_with_spec(ctx.normalized_pos, size, spec));
+            })
+        });
+        let release_handler = ripple_state.map(|state| {
+            Arc::new(move |_ctx: PointerEventContext| state.with_mut(|s| s.release()))
+        });
+        let mut toggle_args = ToggleableArgs::new(
+            checked,
+            Arc::new(move |_| {
+                controller.with_mut(|c| c.toggle());
+                let checked = controller.with(|c| c.is_checked());
+                if let Some(on_toggle) = on_toggle.as_ref() {
+                    on_toggle(checked);
+                }
+            }),
+        )
+        .enabled(args.enabled)
+        .role(Role::Switch);
+        if let Some(label) = args.accessibility_label.clone() {
+            toggle_args = toggle_args.label(label);
+        }
+        if let Some(desc) = args.accessibility_description.clone() {
+            toggle_args = toggle_args.description(desc);
+        }
+        if let Some(state) = interaction_state {
+            toggle_args = toggle_args.interaction_state(state);
+        }
+        if let Some(handler) = press_handler {
+            toggle_args = toggle_args.on_press(handler);
+        }
+        if let Some(handler) = release_handler {
+            toggle_args = toggle_args.on_release(handler);
+        }
+        modifier = modifier.toggleable(toggle_args);
+    }
+
     let has_thumb_content = child.is_some();
-    let is_pressed = pressed.with(|v| *v);
     let progress = controller.with(|c| c.animation_progress());
     let eased_progress = animation::easing(progress);
     let eased_progress_f64 = eased_progress as f64;
     let scheme = use_context::<MaterialTheme>().get().color_scheme;
-    let checked = controller.with(|c| c.is_checked());
     let enabled = args.enabled;
-    let on_toggle = enabled.then(|| args.on_toggle.clone()).flatten();
-    let interactive = on_toggle.is_some();
-    let interaction_state = interactive.then(|| remember(RippleState::new));
+    let is_pressed = interaction_state
+        .map(|state| state.with(|s| s.is_pressed()))
+        .unwrap_or(false);
     let colors = SwitchDefaults::resolve_colors(&args, &scheme, checked, enabled);
 
-    let off_diameter = if has_thumb_content {
-        SwitchDefaults::THUMB_DIAMETER
-    } else {
-        SwitchDefaults::UNCHECKED_THUMB_DIAMETER
-    };
-    let thumb_diameter_dp = if is_pressed {
-        SwitchDefaults::PRESSED_THUMB_DIAMETER
-    } else {
-        Dp(off_diameter.0
-            + (SwitchDefaults::THUMB_DIAMETER.0 - off_diameter.0) * eased_progress_f64)
-    };
-    let thumb_size_px = thumb_diameter_dp.to_px();
+    modifier.run(move || {
+        let off_diameter = if has_thumb_content {
+            SwitchDefaults::THUMB_DIAMETER
+        } else {
+            SwitchDefaults::UNCHECKED_THUMB_DIAMETER
+        };
+        let thumb_diameter_dp = if is_pressed {
+            SwitchDefaults::PRESSED_THUMB_DIAMETER
+        } else {
+            Dp(off_diameter.0
+                + (SwitchDefaults::THUMB_DIAMETER.0 - off_diameter.0) * eased_progress_f64)
+        };
+        let thumb_size_px = thumb_diameter_dp.to_px();
 
-    let inherited_content_color = use_context::<ContentColor>().get().current;
+        let inherited_content_color = use_context::<ContentColor>().get().current;
 
-    let track_style = if checked {
-        SurfaceStyle::Filled {
-            color: colors.track_color,
-        }
-    } else {
-        SurfaceStyle::FilledOutlined {
-            fill_color: colors.track_color,
-            border_color: colors.track_outline_color,
-            border_width: args.track_outline_width,
-        }
-    };
-
-    surface(
-        SurfaceArgsBuilder::default()
-            .modifier(Modifier::new().size(args.width, args.height))
-            .style(track_style)
-            .shape(Shape::capsule())
-            .show_state_layer(false)
-            .show_ripple(false)
-            .build()
-            .expect("builder construction failed"),
-        || {},
-    );
-
-    // A non-visual state layer for hover + ripple feedback.
-    let mut state_layer_builder = SurfaceArgsBuilder::default()
-        .modifier(Modifier::new().size(
-            SwitchDefaults::STATE_LAYER_SIZE,
-            SwitchDefaults::STATE_LAYER_SIZE,
-        ))
-        .shape(Shape::Ellipse)
-        .style(SurfaceStyle::Filled {
-            color: Color::TRANSPARENT,
-        })
-        .show_state_layer(true)
-        .show_ripple(true)
-        .ripple_bounded(false)
-        .ripple_radius(Dp(SwitchDefaults::STATE_LAYER_SIZE.0 / 2.0))
-        .ripple_color(inherited_content_color);
-    if let Some(interaction_state) = interaction_state {
-        state_layer_builder = state_layer_builder.interaction_state(interaction_state);
-    }
-    surface(
-        state_layer_builder
-            .build()
-            .expect("builder construction failed"),
-        || {},
-    );
-
-    let child = child;
-    surface(
-        SurfaceArgsBuilder::default()
-            .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(thumb_size_px)),
-                Some(DimensionValue::Fixed(thumb_size_px)),
-            ))
-            .style(SurfaceStyle::Filled {
-                color: colors.thumb_color,
-            })
-            .shape(Shape::Ellipse)
-            .content_color(colors.icon_color)
-            .build()
-            .expect("builder construction failed"),
-        move || {
-            if let Some(child) = child {
-                boxed(
-                    BoxedArgsBuilder::default()
-                        .modifier(Modifier::new().constrain(
-                            Some(DimensionValue::Fixed(thumb_size_px)),
-                            Some(DimensionValue::Fixed(thumb_size_px)),
-                        ))
-                        .alignment(Alignment::Center)
-                        .build()
-                        .expect("builder construction failed"),
-                    |scope| {
-                        scope.child(move || {
-                            child();
-                        });
-                    },
-                );
+        let track_style = if checked {
+            SurfaceStyle::Filled {
+                color: colors.track_color,
             }
-        },
-    );
+        } else {
+            SurfaceStyle::FilledOutlined {
+                fill_color: colors.track_color,
+                border_color: colors.track_outline_color,
+                border_width: args.track_outline_width,
+            }
+        };
 
-    let accessibility_on_toggle = on_toggle.clone();
-    let accessibility_label = args.accessibility_label.clone();
-    let accessibility_description = args.accessibility_description.clone();
-    let track_outline_width = args.track_outline_width;
-    let track_width = args.width;
-    let track_height = args.height;
-
-    input_handler(Box::new(move |mut input| {
-        // Delegate input handling to the extracted helper.
-        handle_input_events_switch(
-            controller,
-            &on_toggle,
-            pressed,
-            interaction_state,
-            &mut input,
+        surface(
+            SurfaceArgsBuilder::default()
+                .modifier(Modifier::new().size(args.width, args.height))
+                .style(track_style)
+                .shape(Shape::capsule())
+                .show_state_layer(false)
+                .show_ripple(false)
+                .build()
+                .expect("builder construction failed"),
+            || {},
         );
-        apply_switch_accessibility(
-            &mut input,
-            controller,
-            enabled,
-            &accessibility_on_toggle,
-            accessibility_label.as_ref(),
-            accessibility_description.as_ref(),
-        );
-    }));
 
-    measure(Box::new(move |input| {
-        let track_id = input.children_ids[0];
-        let state_layer_id = input.children_ids[1];
-        let thumb_id = input.children_ids[2];
-        let thumb_constraint = Constraint::new(
-            DimensionValue::Wrap {
-                min: None,
-                max: None,
+        // A non-visual state layer for hover + ripple feedback.
+        let mut state_layer_builder = SurfaceArgsBuilder::default()
+            .modifier(Modifier::new().size(
+                SwitchDefaults::STATE_LAYER_SIZE,
+                SwitchDefaults::STATE_LAYER_SIZE,
+            ))
+            .shape(Shape::Ellipse)
+            .style(SurfaceStyle::Filled {
+                color: Color::TRANSPARENT,
+            })
+            .show_state_layer(true)
+            .show_ripple(true)
+            .ripple_bounded(false)
+            .ripple_radius(Dp(SwitchDefaults::STATE_LAYER_SIZE.0 / 2.0))
+            .ripple_color(inherited_content_color);
+        if let Some(interaction_state) = interaction_state {
+            state_layer_builder = state_layer_builder.interaction_state(interaction_state);
+        }
+        let mut state_layer_args = state_layer_builder
+            .build()
+            .expect("builder construction failed");
+        state_layer_args.set_ripple_state(ripple_state);
+        surface(state_layer_args, || {});
+
+        let child = child;
+        surface(
+            SurfaceArgsBuilder::default()
+                .modifier(Modifier::new().constrain(
+                    Some(DimensionValue::Fixed(thumb_size_px)),
+                    Some(DimensionValue::Fixed(thumb_size_px)),
+                ))
+                .style(SurfaceStyle::Filled {
+                    color: colors.thumb_color,
+                })
+                .shape(Shape::Ellipse)
+                .content_color(colors.icon_color)
+                .build()
+                .expect("builder construction failed"),
+            move || {
+                if let Some(child) = child {
+                    boxed(
+                        BoxedArgsBuilder::default()
+                            .modifier(Modifier::new().constrain(
+                                Some(DimensionValue::Fixed(thumb_size_px)),
+                                Some(DimensionValue::Fixed(thumb_size_px)),
+                            ))
+                            .alignment(Alignment::Center)
+                            .build()
+                            .expect("builder construction failed"),
+                        |scope| {
+                            scope.child(move || {
+                                child();
+                            });
+                        },
+                    );
+                }
             },
-            DimensionValue::Wrap {
-                min: None,
-                max: None,
-            },
-        );
-        let track_size = input.measure_child(track_id, &thumb_constraint)?;
-        let state_layer_size = input.measure_child(state_layer_id, &thumb_constraint)?;
-        let thumb_size = input.measure_child(thumb_id, &thumb_constraint)?;
-
-        let min_interactive_size = Dp(48.0).to_px();
-        let self_width_px = if interactive {
-            track_size.width.max(min_interactive_size)
-        } else {
-            track_size.width
-        };
-        let self_height_px = if interactive {
-            track_size.height.max(min_interactive_size)
-        } else {
-            track_size.height
-        };
-        let track_origin_x = (self_width_px.0 - track_size.width.0) / 2;
-        let track_origin_y = (self_height_px.0 - track_size.height.0) / 2;
-
-        // Calculate thumb positioning:
-        // - unchecked offset is (trackHeight - thumbDiameter) / 2
-        // - checked offset is (trackWidth - checkedThumbDiameter) - thumbPadding
-        // - pressed snaps towards the inside by TrackOutlineWidth
-        let checked_thumb_diameter = SwitchDefaults::THUMB_DIAMETER;
-        let thumb_padding_start = Dp((track_height.0 - checked_thumb_diameter.0) / 2.0);
-        let max_bound_dp = Dp((track_width.0 - checked_thumb_diameter.0) - thumb_padding_start.0);
-
-        let min_bound_dp = Dp((track_height.0 - thumb_diameter_dp.0) / 2.0);
-        let anim_offset_dp =
-            Dp(min_bound_dp.0 + (max_bound_dp.0 - min_bound_dp.0) * eased_progress_f64);
-        let offset_dp = if is_pressed && checked {
-            Dp(max_bound_dp.0 - track_outline_width.0)
-        } else if is_pressed && !checked {
-            track_outline_width
-        } else {
-            anim_offset_dp
-        };
-        let thumb_x = offset_dp.to_px();
-
-        // State layer follows the thumb center.
-        let thumb_center_x = track_origin_x + thumb_x.0 + thumb_size.width.0 / 2;
-        let thumb_center_y = track_origin_y + track_size.height.0 / 2;
-        let state_layer_x = thumb_center_x - state_layer_size.width.0 / 2;
-        let state_layer_y = thumb_center_y - state_layer_size.height.0 / 2;
-
-        input.place_child(
-            track_id,
-            PxPosition::new(
-                tessera_ui::Px(track_origin_x),
-                tessera_ui::Px(track_origin_y),
-            ),
-        );
-        input.place_child(
-            thumb_id,
-            PxPosition::new(
-                tessera_ui::Px(track_origin_x + thumb_x.0),
-                tessera_ui::Px(track_origin_y + (track_size.height.0 - thumb_size.height.0) / 2),
-            ),
-        );
-        input.place_child(
-            state_layer_id,
-            PxPosition::new(tessera_ui::Px(state_layer_x), tessera_ui::Px(state_layer_y)),
         );
 
-        Ok(ComputedData {
-            width: self_width_px,
-            height: self_height_px,
-        })
-    }));
+        let track_outline_width = args.track_outline_width;
+        let track_width = args.width;
+        let track_height = args.height;
+
+        measure(Box::new(move |input| {
+            let track_id = input.children_ids[0];
+            let state_layer_id = input.children_ids[1];
+            let thumb_id = input.children_ids[2];
+            let thumb_constraint = Constraint::new(
+                DimensionValue::Wrap {
+                    min: None,
+                    max: None,
+                },
+                DimensionValue::Wrap {
+                    min: None,
+                    max: None,
+                },
+            );
+            let track_size = input.measure_child(track_id, &thumb_constraint)?;
+            let state_layer_size = input.measure_child(state_layer_id, &thumb_constraint)?;
+            let thumb_size = input.measure_child(thumb_id, &thumb_constraint)?;
+
+            let self_width_px = track_size
+                .width
+                .max(state_layer_size.width)
+                .max(thumb_size.width);
+            let self_height_px = track_size
+                .height
+                .max(state_layer_size.height)
+                .max(thumb_size.height);
+            let track_origin_x = (self_width_px.0 - track_size.width.0) / 2;
+            let track_origin_y = (self_height_px.0 - track_size.height.0) / 2;
+
+            // Calculate thumb positioning:
+            // - unchecked offset is (trackHeight - thumbDiameter) / 2
+            // - checked offset is (trackWidth - checkedThumbDiameter) - thumbPadding
+            // - pressed snaps towards the inside by TrackOutlineWidth
+            let checked_thumb_diameter = SwitchDefaults::THUMB_DIAMETER;
+            let thumb_padding_start = Dp((track_height.0 - checked_thumb_diameter.0) / 2.0);
+            let max_bound_dp =
+                Dp((track_width.0 - checked_thumb_diameter.0) - thumb_padding_start.0);
+
+            let min_bound_dp = Dp((track_height.0 - thumb_diameter_dp.0) / 2.0);
+            let anim_offset_dp =
+                Dp(min_bound_dp.0 + (max_bound_dp.0 - min_bound_dp.0) * eased_progress_f64);
+            let offset_dp = if is_pressed && checked {
+                Dp(max_bound_dp.0 - track_outline_width.0)
+            } else if is_pressed && !checked {
+                track_outline_width
+            } else {
+                anim_offset_dp
+            };
+            let thumb_x = offset_dp.to_px();
+
+            // State layer follows the thumb center.
+            let thumb_center_x = track_origin_x + thumb_x.0 + thumb_size.width.0 / 2;
+            let thumb_center_y = track_origin_y + track_size.height.0 / 2;
+            let state_layer_x = thumb_center_x - state_layer_size.width.0 / 2;
+            let state_layer_y = thumb_center_y - state_layer_size.height.0 / 2;
+
+            input.place_child(
+                track_id,
+                PxPosition::new(
+                    tessera_ui::Px(track_origin_x),
+                    tessera_ui::Px(track_origin_y),
+                ),
+            );
+            input.place_child(
+                thumb_id,
+                PxPosition::new(
+                    tessera_ui::Px(track_origin_x + thumb_x.0),
+                    tessera_ui::Px(
+                        track_origin_y + (track_size.height.0 - thumb_size.height.0) / 2,
+                    ),
+                ),
+            );
+            input.place_child(
+                state_layer_id,
+                PxPosition::new(tessera_ui::Px(state_layer_x), tessera_ui::Px(state_layer_y)),
+            );
+
+            Ok(ComputedData {
+                width: self_width_px,
+                height: self_height_px,
+            })
+        }));
+    });
 }
 
 /// # switch

@@ -114,6 +114,9 @@ struct MeasureWeightedChildrenArgs<'a> {
 ///     text::{TextArgsBuilder, text},
 /// };
 ///
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// row(RowArgs::default(), |scope| {
 ///     scope.child(|| {
 ///         text(
@@ -133,6 +136,8 @@ struct MeasureWeightedChildrenArgs<'a> {
 ///         )
 ///     });
 /// });
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn row<F>(args: RowArgs, scope_config: F)
@@ -140,8 +145,6 @@ where
     F: FnOnce(&mut RowScope),
 {
     let modifier = args.modifier;
-    let mut args = args;
-    args.modifier = Modifier::new();
 
     let mut child_closures: Vec<Box<dyn FnOnce() + Send + Sync>> = Vec::new();
     let mut child_weights: Vec<Option<f32>> = Vec::new();

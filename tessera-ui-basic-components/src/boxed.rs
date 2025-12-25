@@ -6,7 +6,7 @@
 use derive_builder::Builder;
 use tessera_ui::{ComputedData, Constraint, DimensionValue, Modifier, Px, PxPosition, tessera};
 
-use crate::{alignment::Alignment, modifier::ModifierExt as _};
+use crate::alignment::Alignment;
 
 /// Arguments for the `Boxed` component.
 #[derive(Clone, Debug, Builder)]
@@ -16,9 +16,7 @@ pub struct BoxedArgs {
     #[builder(default)]
     pub alignment: Alignment,
     /// Modifier chain applied to the boxed subtree.
-    #[builder(
-        default = "Modifier::new().constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP))"
-    )]
+    #[builder(default = "Modifier::new()")]
     pub modifier: Modifier,
 }
 
@@ -135,6 +133,9 @@ fn compute_child_offset(
 /// use tessera_ui_basic_components::boxed::{BoxedArgs, boxed};
 /// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
 ///
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// boxed(BoxedArgs::default(), |scope| {
 ///     // Add a child that will be in the background (rendered first).
 ///     scope.child(|| {
@@ -155,6 +156,8 @@ fn compute_child_offset(
 ///         );
 ///     });
 /// });
+/// # }
+/// # component();
 /// ```
 #[tessera]
 pub fn boxed<F>(args: BoxedArgs, scope_config: F)
@@ -162,8 +165,6 @@ where
     F: FnOnce(&mut BoxedScope),
 {
     let modifier = args.modifier;
-    let mut args = args;
-    args.modifier = Modifier::new();
 
     let mut child_closures: Vec<Box<dyn FnOnce() + Send + Sync>> = Vec::new();
     let mut child_alignments: Vec<Option<Alignment>> = Vec::new();

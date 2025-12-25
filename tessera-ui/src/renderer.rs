@@ -35,7 +35,7 @@ use crate::{
 };
 
 pub use app::WgpuApp;
-pub use command::{BarrierRequirement, Command};
+pub use command::{Command, DrawRegion, PaddingRect, SampleRegion};
 pub use compute::{
     ComputablePipeline, ComputeBatchItem, ComputePipelineRegistry, ErasedComputeBatchItem,
 };
@@ -691,7 +691,7 @@ Fps: {:.2}
         let (new_commands, window_requests, draw_cost) =
             Self::compute_draw_commands(args, screen_size);
 
-        // --- Dirty Rectangle Logic ---
+        // Dirty Rectangle Detection
         let mut dirty = false;
         if args.resized || new_commands.len() != previous_commands.len() {
             dirty = true;

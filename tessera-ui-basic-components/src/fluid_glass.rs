@@ -7,16 +7,12 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use tessera_ui::{
-    BarrierRequirement, Color, ComputedData, Constraint, CursorEventContent, DimensionValue, Dp,
-    GestureState, InputHandlerInput, PressKeyEventType, Px, PxPosition, State,
-    accesskit::{Action, Role},
-    remember,
-    renderer::DrawCommand,
-    tessera,
-    winit::window::CursorIcon,
+    Color, ComputedData, Constraint, DimensionValue, Dp, Modifier, Px, PxPosition, SampleRegion,
+    State, accesskit::Role, remember, renderer::DrawCommand, tessera,
 };
 
 use crate::{
+    modifier::{ClickableArgs, InteractionState, ModifierExt, PointerEventContext, SemanticsArgs},
     padding_utils::remove_padding_from_dimension,
     pipelines::{
         blur::command::DualBlurCommand, contrast::ContrastCommand, mean::command::MeanCommand,
@@ -104,12 +100,9 @@ pub struct FluidGlassArgs {
     /// The contrast adjustment factor.
     #[builder(default, setter(strip_option))]
     pub contrast: Option<f32>,
-    /// The optional width of the component, defined as a `DimensionValue`.
-    #[builder(default = "DimensionValue::WRAP", setter(into))]
-    pub width: DimensionValue,
-    /// The optional height of the component, defined as a `DimensionValue`.
-    #[builder(default = "DimensionValue::WRAP", setter(into))]
-    pub height: DimensionValue,
+    /// Optional modifier chain applied to the glass node.
+    #[builder(default = "Modifier::new()")]
+    pub modifier: Modifier,
     /// Padding inside the glass component.
     #[builder(default = "Dp(0.0)")]
     pub padding: Dp,
@@ -169,8 +162,6 @@ impl PartialEq for FluidGlassArgs {
             && self.noise_scale == other.noise_scale
             && self.time == other.time
             && self.contrast == other.contrast
-            && self.width == other.width
-            && self.height == other.height
             && self.padding == other.padding
             && self.ripple_center == other.ripple_center
             && self.ripple_radius == other.ripple_radius
@@ -222,8 +213,8 @@ pub struct FluidGlassCommand {
 }
 
 impl DrawCommand for FluidGlassCommand {
-    fn barrier(&self) -> Option<BarrierRequirement> {
-        Some(BarrierRequirement::uniform_padding_local(Px(10)))
+    fn sample_region(&self) -> Option<SampleRegion> {
+        Some(SampleRegion::uniform_padding_local(Px(10)))
     }
 
     fn apply_opacity(&mut self, opacity: f32) {
@@ -238,77 +229,7 @@ impl DrawCommand for FluidGlassCommand {
     }
 }
 
-// Helper: input handler logic extracted to reduce complexity of `fluid_glass`
-// These helpers operate on the injected InputHandlerInput type from the core
-// crate.
-fn handle_click_state(
-    args: &FluidGlassArgs,
-    ripple_state: Option<State<RippleState>>,
-    on_click: Arc<dyn Fn() + Send + Sync>,
-    input: &mut InputHandlerInput,
-) {
-    let size = input.computed_data;
-    let cursor_pos_option = input.cursor_position_rel;
-    let is_cursor_in = cursor_pos_option
-        .map(|pos| is_position_in_component(size, pos))
-        .unwrap_or(false);
-
-    if is_cursor_in {
-        input.requests.cursor_icon = CursorIcon::Pointer;
-
-        let press_events: Vec<_> = input
-            .cursor_events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event.content,
-                    CursorEventContent::Pressed(PressKeyEventType::Left)
-                )
-            })
-            .collect();
-
-        let release_events: Vec<_> = input
-            .cursor_events
-            .iter()
-            .filter(|event| event.gesture_state == GestureState::TapCandidate)
-            .filter(|event| {
-                matches!(
-                    event.content,
-                    CursorEventContent::Released(PressKeyEventType::Left)
-                )
-            })
-            .collect();
-
-        if !press_events.is_empty()
-            && let (Some(ripple_state), Some(pos)) =
-                (ripple_state.as_ref(), input.cursor_position_rel)
-        {
-            let denom_w = size.width.to_f32().max(1.0);
-            let denom_h = size.height.to_f32().max(1.0);
-            let normalized_pos = [
-                (pos.x.to_f32() / denom_w).clamp(0.0, 1.0),
-                (pos.y.to_f32() / denom_h).clamp(0.0, 1.0),
-            ];
-            ripple_state.with_mut(|s| {
-                s.start_animation(normalized_pos);
-                s.set_pressed(true);
-            });
-        }
-
-        if !release_events.is_empty() {
-            if let Some(ripple_state) = ripple_state.as_ref() {
-                ripple_state.with_mut(|s| s.release());
-            }
-            on_click();
-        }
-
-        if args.block_input {
-            // Consume all input events to prevent interaction with underlying components
-            input.block_all();
-        }
-    }
-}
-
+// Helper: input handler logic extracted to reduce complexity of `fluid_glass`.
 fn handle_block_input(input: &mut tessera_ui::InputHandlerInput) {
     let size = input.computed_data;
     let cursor_pos_option = input.cursor_position_rel;
@@ -319,54 +240,6 @@ fn handle_block_input(input: &mut tessera_ui::InputHandlerInput) {
     if is_cursor_in {
         // Consume all input events to prevent interaction with underlying components
         input.block_all();
-    }
-}
-
-fn apply_fluid_glass_accessibility(
-    input: &mut tessera_ui::InputHandlerInput<'_>,
-    args: &FluidGlassArgs,
-    on_click: &Option<Arc<dyn Fn() + Send + Sync>>,
-) {
-    let interactive = on_click.is_some();
-    let has_metadata = interactive
-        || args.accessibility_role.is_some()
-        || args.accessibility_label.is_some()
-        || args.accessibility_description.is_some()
-        || args.accessibility_focusable;
-
-    if !has_metadata {
-        return;
-    }
-
-    let mut builder = input.accessibility();
-
-    let role = args
-        .accessibility_role
-        .or_else(|| interactive.then_some(Role::Button));
-    if let Some(role) = role {
-        builder = builder.role(role);
-    }
-    if let Some(label) = args.accessibility_label.as_ref() {
-        builder = builder.label(label.clone());
-    }
-    if let Some(description) = args.accessibility_description.as_ref() {
-        builder = builder.description(description.clone());
-    }
-    if args.accessibility_focusable || interactive {
-        builder = builder.focusable();
-    }
-    if interactive {
-        builder = builder.action(Action::Click);
-    }
-
-    builder.commit();
-
-    if interactive && let Some(on_click) = on_click.clone() {
-        input.set_accessibility_action_handler(move |action| {
-            if action == Action::Click {
-                on_click();
-            }
-        });
     }
 }
 
@@ -392,6 +265,9 @@ fn apply_fluid_glass_accessibility(
 ///     text::{TextArgsBuilder, text},
 /// };
 ///
+/// # use tessera_ui::tessera;
+/// # #[tessera]
+/// # fn component() {
 /// fluid_glass(FluidGlassArgs::default(), || {
 ///     text(
 ///         TextArgsBuilder::default()
@@ -400,11 +276,85 @@ fn apply_fluid_glass_accessibility(
 ///             .expect("builder construction failed"),
 ///     );
 /// });
+/// # }
+/// # component();
 /// ```
 #[tessera]
-pub fn fluid_glass(mut args: FluidGlassArgs, child: impl FnOnce()) {
-    let ripple_state = args.on_click.as_ref().map(|_| remember(RippleState::new));
+pub fn fluid_glass(args: FluidGlassArgs, child: impl FnOnce() + Send + Sync + 'static) {
+    let mut modifier = args.modifier;
+    let interactive = args.on_click.is_some();
+    let interaction_state = interactive.then(|| remember(InteractionState::new));
+    let ripple_state = interactive.then(|| remember(RippleState::new));
+    let has_semantics = args.accessibility_role.is_some()
+        || args.accessibility_label.is_some()
+        || args.accessibility_description.is_some();
 
+    if interactive {
+        let press_handler = ripple_state.map(|state| {
+            Arc::new(move |ctx: PointerEventContext| {
+                state.with_mut(|s| {
+                    s.start_animation(ctx.normalized_pos);
+                });
+            })
+        });
+        let release_handler = ripple_state.map(|state| {
+            Arc::new(move |_ctx: PointerEventContext| {
+                state.with_mut(|s| s.release());
+            })
+        });
+        let mut clickable_args = ClickableArgs::new(
+            args.on_click
+                .clone()
+                .expect("interactive implies on_click is set"),
+        )
+        .block_input(args.block_input);
+
+        if let Some(role) = args.accessibility_role {
+            clickable_args = clickable_args.role(role);
+        }
+        if let Some(label) = args.accessibility_label.clone() {
+            clickable_args = clickable_args.label(label);
+        }
+        if let Some(description) = args.accessibility_description.clone() {
+            clickable_args = clickable_args.description(description);
+        }
+        if let Some(state) = interaction_state {
+            clickable_args = clickable_args.interaction_state(state);
+        }
+        if let Some(handler) = press_handler {
+            clickable_args = clickable_args.on_press(handler);
+        }
+        if let Some(handler) = release_handler {
+            clickable_args = clickable_args.on_release(handler);
+        }
+
+        modifier = modifier.clickable(clickable_args);
+    } else if args.block_input {
+        modifier = modifier.block_touch_propagation();
+    }
+    if !interactive && has_semantics {
+        let mut semantics = SemanticsArgs::new();
+        if let Some(role) = args.accessibility_role {
+            semantics = semantics.role(role);
+        }
+        if let Some(label) = args.accessibility_label.clone() {
+            semantics = semantics.label(label);
+        }
+        if let Some(desc) = args.accessibility_description.clone() {
+            semantics = semantics.description(desc);
+        }
+        modifier = modifier.semantics(semantics);
+    }
+
+    modifier.run(move || fluid_glass_inner(args, ripple_state, child));
+}
+
+#[tessera]
+fn fluid_glass_inner(
+    mut args: FluidGlassArgs,
+    ripple_state: Option<State<RippleState>>,
+    child: impl FnOnce() + Send + Sync + 'static,
+) {
     if let Some((progress, center)) = ripple_state
         .as_ref()
         .and_then(|state| state.with_mut(|s| s.get_animation_progress()))
@@ -417,11 +367,10 @@ pub fn fluid_glass(mut args: FluidGlassArgs, child: impl FnOnce()) {
     (child)();
     let args_measure_clone = args.clone();
     measure(Box::new(move |input| {
-        let glass_intrinsic_width = args_measure_clone.width;
-        let glass_intrinsic_height = args_measure_clone.height;
-        let glass_intrinsic_constraint =
-            Constraint::new(glass_intrinsic_width, glass_intrinsic_height);
-        let effective_glass_constraint = glass_intrinsic_constraint.merge(input.parent_constraint);
+        let effective_glass_constraint = Constraint::new(
+            input.parent_constraint.width(),
+            input.parent_constraint.height(),
+        );
 
         let child_constraint = Constraint::new(
             remove_padding_from_dimension(
@@ -507,37 +456,12 @@ pub fn fluid_glass(mut args: FluidGlassArgs, child: impl FnOnce()) {
         Ok(ComputedData { width, height })
     }));
 
-    if let Some(ref on_click) = args.on_click {
-        let on_click_arc = on_click.clone();
+    if args.on_click.is_none() && args.block_input {
         let args_for_handler = args.clone();
         input_handler(Box::new(move |mut input: tessera_ui::InputHandlerInput| {
-            // Apply accessibility first
-            apply_fluid_glass_accessibility(
-                &mut input,
-                &args_for_handler,
-                &args_for_handler.on_click,
-            );
-            // Then handle click state (which includes block_input logic)
-            handle_click_state(
-                &args_for_handler,
-                ripple_state,
-                on_click_arc.clone(),
-                &mut input,
-            );
-        }));
-    } else if args.block_input {
-        let args_for_handler = args.clone();
-        input_handler(Box::new(move |mut input: tessera_ui::InputHandlerInput| {
-            // Apply accessibility first
-            apply_fluid_glass_accessibility(&mut input, &args_for_handler, &None);
-            // Then handle input blocking behavior
-            handle_block_input(&mut input);
-        }));
-    } else {
-        // Only accessibility metadata, no interaction
-        let args_for_handler = args.clone();
-        input_handler(Box::new(move |mut input: tessera_ui::InputHandlerInput| {
-            apply_fluid_glass_accessibility(&mut input, &args_for_handler, &None);
+            if args_for_handler.block_input {
+                handle_block_input(&mut input);
+            }
         }));
     }
 }

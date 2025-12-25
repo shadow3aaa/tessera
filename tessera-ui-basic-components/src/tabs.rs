@@ -1026,41 +1026,48 @@ where
         controller.with_mut(|c| c.tick(Instant::now()));
 
         let is_scrollable = args.scrollable || controller.with(|c| c.tab_row_scroll_max() > Px(0));
-        if is_scrollable
-            && let Some(pos) = input.cursor_position_rel
-            && pos.y < controller.with(|c| c.tab_bar_height())
-        {
-            let mut consumed_scroll = false;
-            for event in input
-                .cursor_events
-                .iter()
-                .filter_map(|event| match &event.content {
-                    CursorEventContent::Scroll(event) => Some(event),
-                    _ => None,
-                })
-            {
-                let delta = if event.delta_x.abs() >= 0.01 {
-                    event.delta_x
-                } else {
-                    event.delta_y
-                };
-                if delta.abs() < 0.01 {
-                    continue;
+        if is_scrollable {
+            let cursor_in_tab_bar = if let Some(pos) = input.cursor_position_rel {
+                let within_x = pos.x.0 >= 0 && pos.x.0 < input.computed_data.width.0;
+                let within_y = pos.y.0 >= 0 && pos.y.0 < controller.with(|c| c.tab_bar_height()).0;
+                within_x && within_y
+            } else {
+                false
+            };
+
+            if cursor_in_tab_bar {
+                let mut consumed_scroll = false;
+                for event in input
+                    .cursor_events
+                    .iter()
+                    .filter_map(|event| match &event.content {
+                        CursorEventContent::Scroll(event) => Some(event),
+                        _ => None,
+                    })
+                {
+                    let delta = if event.delta_x.abs() >= 0.01 {
+                        event.delta_x
+                    } else {
+                        event.delta_y
+                    };
+                    if delta.abs() < 0.01 {
+                        continue;
+                    }
+
+                    controller.with_mut(|c| {
+                        let current = c.tab_row_scroll_offset.target;
+                        let max = c.tab_row_scroll_max().to_f32();
+                        let next = (current - delta).clamp(0.0, max);
+                        c.set_tab_row_scroll_immediate(Px::saturating_from_f32(next));
+                    });
+                    consumed_scroll = true;
                 }
 
-                controller.with_mut(|c| {
-                    let current = c.tab_row_scroll_offset.target;
-                    let max = c.tab_row_scroll_max().to_f32();
-                    let next = (current - delta).clamp(0.0, max);
-                    c.set_tab_row_scroll_immediate(Px::saturating_from_f32(next));
-                });
-                consumed_scroll = true;
-            }
-
-            if consumed_scroll {
-                input
-                    .cursor_events
-                    .retain(|event| !matches!(event.content, CursorEventContent::Scroll(_)));
+                if consumed_scroll {
+                    input
+                        .cursor_events
+                        .retain(|event| !matches!(event.content, CursorEventContent::Scroll(_)));
+                }
             }
         }
     }));
