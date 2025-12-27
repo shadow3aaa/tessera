@@ -5,7 +5,7 @@
 //! Use to display static or dynamically loaded images.
 use std::sync::Arc;
 
-use derive_builder::Builder;
+use derive_setters::Setters;
 use image::GenericImageView;
 use tessera_ui::{ComputedData, DimensionValue, Modifier, Px, tessera};
 
@@ -58,27 +58,25 @@ pub fn load_image_from_source(source: &ImageSource) -> Result<ImageData, image::
 /// Arguments for the `image` component.
 ///
 /// This struct holds the data and layout properties for an `image` component.
-/// It is typically created using the [`ImageArgsBuilder`] or by converting from
+/// It is typically created using fluent setters or by converting from
 /// [`ImageData`].
-#[derive(Debug, Builder, Clone)]
-#[builder(pattern = "owned")]
+#[derive(Debug, Setters, Clone)]
 pub struct ImageArgs {
     /// The decoded image data, represented by [`ImageData`]. This contains the
     /// raw pixel buffer and the image's dimensions.
-    #[builder(setter(into))]
+    #[setters(into)]
     pub data: Arc<ImageData>,
 
     /// Optional modifier chain applied to the image node.
-    #[builder(default = "Modifier::new()")]
     pub modifier: Modifier,
 }
 
 impl From<ImageData> for ImageArgs {
     fn from(data: ImageData) -> Self {
-        ImageArgsBuilder::default()
-            .data(Arc::new(data))
-            .build()
-            .expect("builder construction failed")
+        Self {
+            data: Arc::new(data),
+            modifier: Modifier::new(),
+        }
     }
 }
 
@@ -100,7 +98,7 @@ impl From<ImageData> for ImageArgs {
 /// ```ignore
 /// use std::sync::Arc;
 /// use tessera_ui_basic_components::image::{
-///     ImageArgsBuilder, ImageSource, image, load_image_from_source,
+///     ImageSource, image, load_image_from_source,
 /// };
 ///
 /// // In a real app, you might load image bytes from a file at runtime.
@@ -122,7 +120,7 @@ pub fn image(args: impl Into<ImageArgs>) {
 
 #[tessera]
 fn image_inner(args: ImageArgs) {
-    measure(Box::new(move |input| {
+    measure(move |input| {
         let intrinsic_width = Px(args.data.width as i32);
         let intrinsic_height = Px(args.data.height as i32);
 
@@ -164,5 +162,5 @@ fn image_inner(args: ImageArgs) {
             .push_draw_command(image_command);
 
         Ok(ComputedData { width, height })
-    }));
+    });
 }

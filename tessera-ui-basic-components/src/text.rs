@@ -3,7 +3,7 @@
 //! ## Usage
 //!
 //! Display labels, headings, and other text content.
-use derive_builder::Builder;
+use derive_setters::Setters;
 use tessera_ui::{
     Color, ComputedData, DimensionValue, Dp, Modifier, Px, PxPosition, accesskit::Role, tessera,
     use_context,
@@ -21,63 +21,58 @@ use crate::{
 pub use crate::pipelines::text::pipeline::{read_font_system, write_font_system};
 
 /// Configuration arguments for the `text` component.
-#[derive(Debug, Builder, Clone)]
-#[builder(pattern = "owned")]
+#[derive(Debug, Setters, Clone)]
 pub struct TextArgs {
     /// Optional modifier chain applied to the text.
-    #[builder(default = "Modifier::new()")]
     pub modifier: Modifier,
 
     /// The text content to be rendered.
-    #[builder(setter(into))]
+    #[setters(into)]
     pub text: String,
 
     /// The color of the text.
-    #[builder(default = "use_context::<ContentColor>().get().current")]
     pub color: Color,
 
     /// The font size in density-independent pixels (dp).
-    #[builder(default = "use_context::<TextStyle>().get().font_size")]
     pub size: Dp,
 
     /// Optional override for line height in density-independent pixels (dp).
-    #[builder(default, setter(strip_option))]
+    #[setters(strip_option)]
     pub line_height: Option<Dp>,
 
     /// Optional label announced by assistive technologies. Defaults to the text
     /// content.
-    #[builder(default, setter(strip_option, into))]
+    #[setters(strip_option, into)]
     pub accessibility_label: Option<String>,
 
     /// Optional description announced by assistive technologies.
-    #[builder(default, setter(strip_option, into))]
+    #[setters(strip_option, into)]
     pub accessibility_description: Option<String>,
 }
 
 impl Default for TextArgs {
     fn default() -> Self {
-        TextArgsBuilder::default()
-            .text("")
-            .build()
-            .expect("builder construction failed")
+        Self {
+            modifier: Modifier::new(),
+            text: String::new(),
+            color: use_context::<ContentColor>().get().current,
+            size: use_context::<TextStyle>().get().font_size,
+            line_height: None,
+            accessibility_label: None,
+            accessibility_description: None,
+        }
     }
 }
 
 impl From<String> for TextArgs {
     fn from(val: String) -> Self {
-        TextArgsBuilder::default()
-            .text(val)
-            .build()
-            .expect("builder construction failed")
+        TextArgs::default().text(val)
     }
 }
 
 impl From<&str> for TextArgs {
     fn from(val: &str) -> Self {
-        TextArgsBuilder::default()
-            .text(val.to_string())
-            .build()
-            .expect("builder construction failed")
+        TextArgs::default().text(val)
     }
 }
 
@@ -98,21 +93,20 @@ impl From<&str> for TextArgs {
 /// ## Examples
 ///
 /// ```
-/// use tessera_ui::{Color, Dp};
-/// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
+/// use tessera_ui::{Color, Dp, tessera};
+/// use tessera_ui_basic_components::text::{TextArgs, text};
 ///
-/// // Simple text from a string literal
-/// text("Hello, world!");
-///
-/// // Styled text using the builder
-/// text(
-///     TextArgsBuilder::default()
-///         .text("Styled Text")
+/// #[tessera]
+/// fn demo() {
+///     let args = TextArgs::default()
+///         .text("Hello, world!")
 ///         .color(Color::new(0.2, 0.5, 0.8, 1.0))
-///         .size(Dp(32.0))
-///         .build()
-///         .unwrap(),
-/// );
+///         .size(Dp(32.0));
+///     assert_eq!(args.text, "Hello, world!");
+///     text(args);
+/// }
+///
+/// demo();
 /// ```
 #[tessera]
 pub fn text(args: impl Into<TextArgs>) {
@@ -138,7 +132,7 @@ pub fn text(args: impl Into<TextArgs>) {
 fn text_inner(text_args: TextArgs) {
     let inherited_style = use_context::<TextStyle>().get();
 
-    measure(Box::new(move |input| {
+    measure(move |input| {
         let max_width: Option<Px> = match input.parent_constraint.width() {
             DimensionValue::Fixed(w) => Some(w),
             DimensionValue::Wrap { max, .. } => max, // Use max from Wrap
@@ -179,5 +173,5 @@ fn text_inner(text_args: TextArgs) {
             width: size[0].into(),
             height: size[1].into(),
         })
-    }));
+    });
 }

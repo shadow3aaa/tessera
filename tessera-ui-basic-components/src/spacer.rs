@@ -25,31 +25,17 @@ use tessera_ui::{ComputedData, Constraint, MeasurementError, Modifier, tessera};
 /// use tessera_ui_basic_components::{
 ///     row::{RowArgs, row},
 ///     spacer::spacer,
-///     text::{TextArgsBuilder, text},
+///     text::{TextArgs, text},
 /// };
 ///
 /// # use tessera_ui::tessera;
 /// # #[tessera]
 /// # fn component() {
 /// row(RowArgs::default(), |scope| {
-///     scope.child(|| {
-///         text(
-///             TextArgsBuilder::default()
-///                 .text("Left".to_string())
-///                 .build()
-///                 .expect("builder construction failed"),
-///         )
-///     });
+///     scope.child(|| text(TextArgs::default().text("Left")));
 ///     // Use weight to let the spacer expand and push the trailing content.
 ///     scope.child_weighted(|| spacer(Modifier::new()), 1.0);
-///     scope.child(|| {
-///         text(
-///             TextArgsBuilder::default()
-///                 .text("Right".to_string())
-///                 .build()
-///                 .expect("builder construction failed"),
-///         )
-///     });
+///     scope.child(|| text(TextArgs::default().text("Right")));
 /// });
 /// # }
 /// # component();
@@ -61,13 +47,11 @@ pub fn spacer(modifier: Modifier) {
 
 #[tessera]
 fn spacer_inner() {
-    measure(Box::new(
-        |input| -> Result<ComputedData, MeasurementError> {
-            let constraint = Constraint::new(
-                input.parent_constraint.width(),
-                input.parent_constraint.height(),
-            );
-            Ok(ComputedData::min_from_constraint(&constraint))
-        },
-    ));
+    measure(|input| -> Result<ComputedData, MeasurementError> {
+        let constraint = Constraint::new(
+            input.parent_constraint.width(),
+            input.parent_constraint.height(),
+        );
+        Ok(ComputedData::min_from_constraint(&constraint))
+    });
 }

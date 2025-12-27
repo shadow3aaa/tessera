@@ -3,7 +3,7 @@
 //! ## Usage
 //!
 //! Use to stack children vertically.
-use derive_builder::Builder;
+use derive_setters::Setters;
 use tessera_ui::{
     ComputedData, Constraint, DimensionValue, MeasureInput, MeasurementError, Modifier, NodeId,
     ParentConstraint, Px, PxPosition, tessera,
@@ -15,27 +15,24 @@ use crate::{
 };
 
 /// Arguments for the `column` component.
-#[derive(Builder, Clone, Debug)]
-#[builder(pattern = "owned")]
+#[derive(Clone, Debug, Setters)]
 pub struct ColumnArgs {
     /// Modifier chain applied to the column subtree.
-    #[builder(
-        default = "Modifier::new().constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP))"
-    )]
     pub modifier: Modifier,
     /// Main axis alignment (vertical alignment).
-    #[builder(default = "MainAxisAlignment::Start")]
     pub main_axis_alignment: MainAxisAlignment,
     /// Cross axis alignment (horizontal alignment).
-    #[builder(default = "CrossAxisAlignment::Start")]
     pub cross_axis_alignment: CrossAxisAlignment,
 }
 
 impl Default for ColumnArgs {
     fn default() -> Self {
-        ColumnArgsBuilder::default()
-            .build()
-            .expect("builder construction failed")
+        Self {
+            modifier: Modifier::new()
+                .constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP)),
+            main_axis_alignment: MainAxisAlignment::Start,
+            cross_axis_alignment: CrossAxisAlignment::Start,
+        }
     }
 }
 
@@ -87,29 +84,15 @@ impl<'a> ColumnScope<'a> {
 /// use tessera_ui::Modifier;
 /// use tessera_ui_basic_components::column::{ColumnArgs, column};
 /// use tessera_ui_basic_components::spacer::spacer;
-/// use tessera_ui_basic_components::text::{TextArgsBuilder, text};
+/// use tessera_ui_basic_components::text::{TextArgs, text};
 ///
 /// # use tessera_ui::tessera;
 /// # #[tessera]
 /// # fn component() {
 /// column(ColumnArgs::default(), |scope| {
-///     scope.child(|| {
-///         text(
-///             TextArgsBuilder::default()
-///                 .text("First item".to_string())
-///                 .build()
-///                 .expect("builder construction failed"),
-///         )
-///     });
+///     scope.child(|| text(TextArgs::default().text("First item")));
 ///     scope.child_weighted(|| spacer(Modifier::new()), 1.0); // This spacer will be flexible
-///     scope.child(|| {
-///         text(
-///             TextArgsBuilder::default()
-///                 .text("Last item".to_string())
-///                 .build()
-///                 .expect("builder construction failed"),
-///         )
-///     });
+///     scope.child(|| text(TextArgs::default().text("Last item")));
 /// });
 /// # }
 /// # component();
@@ -143,69 +126,67 @@ fn column_inner(
 ) {
     let n = child_closures.len();
 
-    measure(Box::new(
-        move |input| -> Result<ComputedData, MeasurementError> {
-            assert_eq!(
-                input.children_ids.len(),
-                n,
-                "Mismatch between children defined in scope and runtime children count"
+    measure(move |input| -> Result<ComputedData, MeasurementError> {
+        assert_eq!(
+            input.children_ids.len(),
+            n,
+            "Mismatch between children defined in scope and runtime children count"
+        );
+
+        let column_effective_constraint = Constraint::new(
+            input.parent_constraint.width(),
+            input.parent_constraint.height(),
+        );
+
+        let mut children_sizes = vec![None; n];
+        let mut max_child_width = Px(0);
+
+        let has_weighted_children = child_weights.iter().any(|w| w.unwrap_or(0.0) > 0.0);
+        let should_use_weight_for_height = has_weighted_children
+            && matches!(
+                column_effective_constraint.height,
+                DimensionValue::Fixed(_)
+                    | DimensionValue::Fill { max: Some(_), .. }
+                    | DimensionValue::Wrap { max: Some(_), .. }
             );
 
-            let column_effective_constraint = Constraint::new(
-                input.parent_constraint.width(),
-                input.parent_constraint.height(),
-            );
+        let (final_column_width, final_column_height, total_measured_children_height) =
+            if should_use_weight_for_height {
+                measure_weighted_column(
+                    input,
+                    &args,
+                    &child_weights,
+                    &column_effective_constraint,
+                    &mut children_sizes,
+                    &mut max_child_width,
+                )?
+            } else {
+                measure_unweighted_column(
+                    input,
+                    &args,
+                    &column_effective_constraint,
+                    &mut children_sizes,
+                    &mut max_child_width,
+                )?
+            };
 
-            let mut children_sizes = vec![None; n];
-            let mut max_child_width = Px(0);
+        place_children_with_alignment(&PlaceChildrenArgs {
+            children_sizes: &children_sizes,
+            children_ids: input.children_ids,
+            input,
+            final_column_width,
+            final_column_height,
+            total_children_height: total_measured_children_height,
+            main_axis_alignment: args.main_axis_alignment,
+            cross_axis_alignment: args.cross_axis_alignment,
+            child_count: n,
+        });
 
-            let has_weighted_children = child_weights.iter().any(|w| w.unwrap_or(0.0) > 0.0);
-            let should_use_weight_for_height = has_weighted_children
-                && matches!(
-                    column_effective_constraint.height,
-                    DimensionValue::Fixed(_)
-                        | DimensionValue::Fill { max: Some(_), .. }
-                        | DimensionValue::Wrap { max: Some(_), .. }
-                );
-
-            let (final_column_width, final_column_height, total_measured_children_height) =
-                if should_use_weight_for_height {
-                    measure_weighted_column(
-                        input,
-                        &args,
-                        &child_weights,
-                        &column_effective_constraint,
-                        &mut children_sizes,
-                        &mut max_child_width,
-                    )?
-                } else {
-                    measure_unweighted_column(
-                        input,
-                        &args,
-                        &column_effective_constraint,
-                        &mut children_sizes,
-                        &mut max_child_width,
-                    )?
-                };
-
-            place_children_with_alignment(&PlaceChildrenArgs {
-                children_sizes: &children_sizes,
-                children_ids: input.children_ids,
-                input,
-                final_column_width,
-                final_column_height,
-                total_children_height: total_measured_children_height,
-                main_axis_alignment: args.main_axis_alignment,
-                cross_axis_alignment: args.cross_axis_alignment,
-                child_count: n,
-            });
-
-            Ok(ComputedData {
-                width: final_column_width,
-                height: final_column_height,
-            })
-        },
-    ));
+        Ok(ComputedData {
+            width: final_column_width,
+            height: final_column_height,
+        })
+    });
 
     for child_closure in child_closures {
         child_closure();

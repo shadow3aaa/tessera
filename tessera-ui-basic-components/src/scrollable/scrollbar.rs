@@ -12,7 +12,7 @@ use crate::{
     modifier::ModifierExt as _,
     scrollable::{ScrollBarBehavior, ScrollableController},
     shape_def::{RoundedCorner, Shape},
-    surface::{SurfaceArgsBuilder, surface},
+    surface::{SurfaceArgs, surface},
 };
 
 #[derive(Clone, Copy)]
@@ -179,7 +179,7 @@ fn compute_thumb_color(state_lock: &ScrollBarState, args: &ScrollBarArgs) -> Col
 /// Render a rounded surface for a vertical track (radius based on width).
 fn render_track_surface_v(width: Px, height: Px, color: Color) {
     surface(
-        SurfaceArgsBuilder::default()
+        SurfaceArgs::default()
             .modifier(Modifier::new().constrain(
                 Some(DimensionValue::Fixed(width)),
                 Some(DimensionValue::Fixed(height)),
@@ -190,9 +190,7 @@ fn render_track_surface_v(width: Px, height: Px, color: Color) {
                 top_right: RoundedCorner::ZERO,
                 bottom_left: RoundedCorner::Capsule,
                 bottom_right: RoundedCorner::ZERO,
-            })
-            .build()
-            .expect("builder construction failed"),
+            }),
         || {},
     );
 }
@@ -200,7 +198,7 @@ fn render_track_surface_v(width: Px, height: Px, color: Color) {
 /// Render a rounded surface for a vertical thumb (radius based on width).
 fn render_thumb_surface_v(width: Px, height: Px, color: Color) {
     surface(
-        SurfaceArgsBuilder::default()
+        SurfaceArgs::default()
             .modifier(Modifier::new().constrain(
                 Some(DimensionValue::Fixed(width)),
                 Some(DimensionValue::Fixed(height)),
@@ -211,9 +209,7 @@ fn render_thumb_surface_v(width: Px, height: Px, color: Color) {
                 bottom_left: RoundedCorner::Capsule,
                 bottom_right: RoundedCorner::ZERO,
             })
-            .style(color.into())
-            .build()
-            .expect("builder construction failed"),
+            .style(color.into()),
         || {},
     );
 }
@@ -221,7 +217,7 @@ fn render_thumb_surface_v(width: Px, height: Px, color: Color) {
 /// Render a rounded surface for a horizontal track (radius based on height).
 fn render_track_surface_h(width: Px, height: Px, color: Color) {
     surface(
-        SurfaceArgsBuilder::default()
+        SurfaceArgs::default()
             .modifier(Modifier::new().constrain(
                 Some(DimensionValue::Fixed(width)),
                 Some(DimensionValue::Fixed(height)),
@@ -232,9 +228,7 @@ fn render_track_surface_h(width: Px, height: Px, color: Color) {
                 top_right: RoundedCorner::Capsule,
                 bottom_left: RoundedCorner::ZERO,
                 bottom_right: RoundedCorner::ZERO,
-            })
-            .build()
-            .expect("builder construction failed"),
+            }),
         || {},
     );
 }
@@ -242,7 +236,7 @@ fn render_track_surface_h(width: Px, height: Px, color: Color) {
 /// Render a rounded surface for a horizontal thumb (radius based on height).
 fn render_thumb_surface_h(width: Px, height: Px, color: Color) {
     surface(
-        SurfaceArgsBuilder::default()
+        SurfaceArgs::default()
             .modifier(Modifier::new().constrain(
                 Some(DimensionValue::Fixed(width)),
                 Some(DimensionValue::Fixed(height)),
@@ -253,9 +247,7 @@ fn render_thumb_surface_h(width: Px, height: Px, color: Color) {
                 bottom_left: RoundedCorner::ZERO,
                 bottom_right: RoundedCorner::ZERO,
             })
-            .style(color.into())
-            .build()
-            .expect("builder construction failed"),
+            .style(color.into()),
         || {},
     );
 }
@@ -686,7 +678,7 @@ pub fn scrollbar_v(args: impl Into<ScrollBarArgs>, state: ScrollBarState) {
     let progress = compute_thumb_progress(args.offset, args.total);
     let thumb_y = args.visible.to_f32() * progress;
 
-    measure(Box::new(move |input| {
+    measure(move |input| {
         // measure track
         let track_node_id = input.children_ids[0];
         let size = input.measure_child(track_node_id, &Constraint::NONE)?; // No constraints need since it's size is fixed
@@ -699,11 +691,11 @@ pub fn scrollbar_v(args: impl Into<ScrollBarArgs>, state: ScrollBarState) {
         input.place_child(thumb_node_id, [0, thumb_y as i32].into());
         // Return the size of the scrollbar track
         Ok(size)
-    }));
+    });
 
     let args_for_handler = args.clone();
     let state_for_handler = state.clone();
-    input_handler(Box::new(move |mut input| {
+    input_handler(move |mut input| {
         handle_state_v(
             &args_for_handler,
             &state_for_handler,
@@ -717,7 +709,7 @@ pub fn scrollbar_v(args: impl Into<ScrollBarArgs>, state: ScrollBarState) {
             &state_for_handler,
             ScrollOrientation::Vertical,
         );
-    }));
+    });
 }
 
 #[tessera]
@@ -763,7 +755,7 @@ pub fn scrollbar_h(args: impl Into<ScrollBarArgs>, state: ScrollBarState) {
     let progress = compute_thumb_progress(args.offset, args.total);
     let thumb_x = args.visible.to_f32() * progress;
 
-    measure(Box::new(move |input| {
+    measure(move |input| {
         // measure track
         let track_node_id = input.children_ids[0];
         let size = input.measure_child(track_node_id, &Constraint::NONE)?;
@@ -776,11 +768,11 @@ pub fn scrollbar_h(args: impl Into<ScrollBarArgs>, state: ScrollBarState) {
         input.place_child(thumb_node_id, [thumb_x as i32, 0].into());
         // Return the size of the scrollbar track
         Ok(size)
-    }));
+    });
 
     let args_for_handler = args.clone();
     let state_for_handler = state.clone();
-    input_handler(Box::new(move |mut input| {
+    input_handler(move |mut input| {
         handle_state_h(
             &args_for_handler,
             &state_for_handler,
@@ -794,5 +786,5 @@ pub fn scrollbar_h(args: impl Into<ScrollBarArgs>, state: ScrollBarState) {
             &state_for_handler,
             ScrollOrientation::Horizontal,
         );
-    }));
+    });
 }

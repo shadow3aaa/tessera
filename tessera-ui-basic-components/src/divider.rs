@@ -3,7 +3,7 @@
 //! ## Usage
 //!
 //! Separate sections in lists, menus, and settings screens.
-use derive_builder::Builder;
+use derive_setters::Setters;
 use tessera_ui::{
     Color, ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Px, tessera, use_context,
 };
@@ -55,24 +55,22 @@ impl DividerDefaults {
 }
 
 /// Arguments for [`horizontal_divider`] and [`vertical_divider`].
-#[derive(Builder, Clone, Debug)]
-#[builder(pattern = "owned")]
+#[derive(Clone, Debug, Setters)]
 pub struct DividerArgs {
     /// Thickness of the divider line.
     ///
     /// Use `Dp::ZERO` to request a single physical pixel thickness.
-    #[builder(default = "DividerDefaults::THICKNESS")]
     pub thickness: Dp,
     /// Color of the divider line.
-    #[builder(default = "DividerDefaults::color()")]
     pub color: Color,
 }
 
 impl Default for DividerArgs {
     fn default() -> Self {
-        DividerArgsBuilder::default()
-            .build()
-            .expect("builder construction failed")
+        Self {
+            thickness: DividerDefaults::THICKNESS,
+            color: DividerDefaults::color(),
+        }
     }
 }
 
@@ -92,13 +90,12 @@ impl Default for DividerArgs {
 ///
 /// ```
 /// use tessera_ui::{Color, Dp};
-/// use tessera_ui_basic_components::divider::DividerArgsBuilder;
+/// use tessera_ui_basic_components::divider::DividerArgs;
 ///
-/// let args = DividerArgsBuilder::default()
-///     .thickness(Dp::ZERO)
-///     .color(Color::BLACK)
-///     .build()
-///     .expect("builder construction failed");
+/// let args = DividerArgs {
+///     thickness: Dp::ZERO,
+///     color: Color::BLACK,
+/// };
 /// assert_eq!(args.thickness, Dp::ZERO);
 /// ```
 #[tessera]
@@ -107,22 +104,20 @@ pub fn horizontal_divider(args: impl Into<DividerArgs>) {
     let thickness_px = resolve_thickness_px(args.thickness);
     let color = args.color;
 
-    measure(Box::new(
-        move |input| -> Result<ComputedData, MeasurementError> {
-            let intrinsic =
-                Constraint::new(DimensionValue::FILLED, DimensionValue::Fixed(thickness_px));
-            let effective = intrinsic.merge(input.parent_constraint);
+    measure(move |input| -> Result<ComputedData, MeasurementError> {
+        let intrinsic =
+            Constraint::new(DimensionValue::FILLED, DimensionValue::Fixed(thickness_px));
+        let effective = intrinsic.merge(input.parent_constraint);
 
-            let width = resolve_dimension(effective.width, Px(0));
-            let height = resolve_dimension(effective.height, thickness_px);
+        let width = resolve_dimension(effective.width, Px(0));
+        let height = resolve_dimension(effective.height, thickness_px);
 
-            input
-                .metadata_mut()
-                .push_draw_command(SimpleRectCommand { color });
+        input
+            .metadata_mut()
+            .push_draw_command(SimpleRectCommand { color });
 
-            Ok(ComputedData { width, height })
-        },
-    ));
+        Ok(ComputedData { width, height })
+    });
 }
 
 /// # vertical_divider
@@ -141,13 +136,12 @@ pub fn horizontal_divider(args: impl Into<DividerArgs>) {
 ///
 /// ```
 /// use tessera_ui::{Color, Dp};
-/// use tessera_ui_basic_components::divider::DividerArgsBuilder;
+/// use tessera_ui_basic_components::divider::DividerArgs;
 ///
-/// let args = DividerArgsBuilder::default()
-///     .thickness(Dp(2.0))
-///     .color(Color::BLACK)
-///     .build()
-///     .expect("builder construction failed");
+/// let args = DividerArgs {
+///     thickness: Dp(2.0),
+///     color: Color::BLACK,
+/// };
 /// assert_eq!(args.thickness, Dp(2.0));
 /// ```
 #[tessera]
@@ -156,20 +150,18 @@ pub fn vertical_divider(args: impl Into<DividerArgs>) {
     let thickness_px = resolve_thickness_px(args.thickness);
     let color = args.color;
 
-    measure(Box::new(
-        move |input| -> Result<ComputedData, MeasurementError> {
-            let intrinsic =
-                Constraint::new(DimensionValue::Fixed(thickness_px), DimensionValue::FILLED);
-            let effective = intrinsic.merge(input.parent_constraint);
+    measure(move |input| -> Result<ComputedData, MeasurementError> {
+        let intrinsic =
+            Constraint::new(DimensionValue::Fixed(thickness_px), DimensionValue::FILLED);
+        let effective = intrinsic.merge(input.parent_constraint);
 
-            let width = resolve_dimension(effective.width, thickness_px);
-            let height = resolve_dimension(effective.height, Px(0));
+        let width = resolve_dimension(effective.width, thickness_px);
+        let height = resolve_dimension(effective.height, Px(0));
 
-            input
-                .metadata_mut()
-                .push_draw_command(SimpleRectCommand { color });
+        input
+            .metadata_mut()
+            .push_draw_command(SimpleRectCommand { color });
 
-            Ok(ComputedData { width, height })
-        },
-    ));
+        Ok(ComputedData { width, height })
+    });
 }

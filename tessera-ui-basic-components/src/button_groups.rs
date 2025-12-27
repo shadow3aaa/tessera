@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use derive_builder::Builder;
+use derive_setters::Setters;
 use tessera_ui::{
     Color, ComputedData, Dp, Modifier, Px, PxPosition, remember, tessera, use_context,
 };
@@ -110,16 +110,13 @@ impl ButtonGroupsScope<'_> {
 }
 
 /// Arguments for the [`button_groups`] component.
-#[derive(Builder, Default)]
+#[derive(Default, Setters)]
 pub struct ButtonGroupsArgs {
     /// Size of the button group.
-    #[builder(default)]
     pub size: ButtonGroupsSize,
     /// Style of the button group.
-    #[builder(default)]
     pub style: ButtonGroupsStyle,
     /// Selection mode of the button group.
-    #[builder(default)]
     pub selection_mode: ButtonGroupsSelectionMode,
 }
 
@@ -421,7 +418,7 @@ fn elastic_container(
 ) {
     child();
     let progress = state.with_mut(|s| s.item_state_mut(index).elastic_state.update());
-    measure(Box::new(move |input| {
+    measure(move |input| {
         let child_id = input.children_ids[0];
         let child_size = input.measure_child_in_parent_constraint(child_id)?;
         let additional_width = child_size.width.mul_f32(0.15 * progress);
@@ -431,5 +428,5 @@ fn elastic_container(
             width: child_size.width + additional_width,
             height: child_size.height,
         })
-    }))
+    })
 }

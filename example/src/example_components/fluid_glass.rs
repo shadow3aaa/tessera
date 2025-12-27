@@ -1,21 +1,20 @@
 use std::{fmt::Display, sync::Arc};
 
-use closure::closure;
 use tessera_ui::{Dp, Modifier, remember, shard, tessera};
 use tessera_ui_basic_components::{
     alignment::{Alignment, CrossAxisAlignment, MainAxisAlignment},
-    boxed::{BoxedArgsBuilder, boxed},
-    column::{ColumnArgsBuilder, column},
-    fluid_glass::{FluidGlassArgsBuilder, GlassBorder, fluid_glass},
-    glass_slider::{GlassSliderArgsBuilder, glass_slider},
-    image::{ImageArgsBuilder, ImageData, ImageSource, image, load_image_from_source},
+    boxed::{BoxedArgs, boxed},
+    column::{ColumnArgs, column},
+    fluid_glass::{FluidGlassArgs, GlassBorder, fluid_glass},
+    glass_slider::{GlassSliderArgs, glass_slider},
+    image::{ImageArgs, ImageData, ImageSource, image, load_image_from_source},
     modifier::ModifierExt as _,
-    row::{RowArgsBuilder, row},
-    scrollable::{ScrollableArgsBuilder, scrollable},
+    row::{RowArgs, row},
+    scrollable::{ScrollableArgs, scrollable},
     shape_def::{RoundedCorner, Shape},
     spacer::spacer,
-    surface::{SurfaceArgsBuilder, surface},
-    text::{TextArgsBuilder, text},
+    surface::{SurfaceArgs, surface},
+    text::{TextArgs, text},
 };
 
 const IMAGE_BYTES: &[u8] = include_bytes!(concat!(
@@ -94,22 +93,14 @@ impl Default for ExampleGlassState {
 #[shard]
 pub fn fluid_glass_showcase() {
     surface(
-        SurfaceArgsBuilder::default()
-            .modifier(Modifier::new().fill_max_size())
-            .build()
-            .unwrap(),
+        SurfaceArgs::default().modifier(Modifier::new().fill_max_size()),
         move || {
             scrollable(
-                ScrollableArgsBuilder::default()
-                    .modifier(Modifier::new().fill_max_width())
-                    .build()
-                    .unwrap(),
+                ScrollableArgs::default().modifier(Modifier::new().fill_max_width()),
                 move || {
                     surface(
-                        SurfaceArgsBuilder::default()
-                            .modifier(Modifier::new().fill_max_width().padding_all(Dp(16.0)))
-                            .build()
-                            .unwrap(),
+                        SurfaceArgs::default()
+                            .modifier(Modifier::new().fill_max_width().padding_all(Dp(16.0))),
                         move || {
                             test_content();
                         },
@@ -125,11 +116,9 @@ fn test_content() {
     let state = remember(ExampleGlassState::default);
     let image_data = state.with(|s| s.background_image_data.clone());
     column(
-        ColumnArgsBuilder::default()
+        ColumnArgs::default()
             .modifier(Modifier::new().fill_max_width())
-            .cross_axis_alignment(CrossAxisAlignment::Center)
-            .build()
-            .unwrap(),
+            .cross_axis_alignment(CrossAxisAlignment::Center),
         move |scope| {
             scope.child(move || {
                 let (
@@ -155,82 +144,59 @@ fn test_content() {
                 });
 
                 row(
-                    RowArgsBuilder::default()
+                    RowArgs::default()
                         .modifier(Modifier::new().fill_max_width())
                         .main_axis_alignment(MainAxisAlignment::Center)
-                        .cross_axis_alignment(CrossAxisAlignment::Center)
-                        .build()
-                        .unwrap(),
+                        .cross_axis_alignment(CrossAxisAlignment::Center),
                     move |scope| {
                         scope.child(move || {
-                            boxed(
-                                BoxedArgsBuilder::default()
-                                    .alignment(Alignment::Center)
-                                    .build()
-                                    .unwrap(),
-                                |scope| {
-                                    scope.child(|| {
-                                        image(
-                                            ImageArgsBuilder::default()
-                                                .modifier(
-                                                    Modifier::new().size(Dp(250.0), Dp(250.0)),
-                                                )
-                                                .data(image_data)
-                                                .build()
-                                                .unwrap(),
-                                        );
+                            boxed(BoxedArgs::default().alignment(Alignment::Center), |scope| {
+                                let image_for_child = image_data.clone();
+                                scope.child(move || {
+                                    image(ImageArgs {
+                                        data: image_for_child.clone(),
+                                        modifier: Modifier::new().size(Dp(250.0), Dp(250.0)),
                                     });
+                                });
 
-                                    scope.child(move || {
-                                        fluid_glass(
-                                            FluidGlassArgsBuilder::default()
-                                                .modifier(Modifier::new().size(width, height))
-                                                .blur_radius(blur_radius)
-                                                .shape(Shape::RoundedRectangle {
-                                                    top_left: RoundedCorner::manual(
-                                                        corner_radius,
-                                                        3.0,
-                                                    ),
-                                                    top_right: RoundedCorner::manual(
-                                                        corner_radius,
-                                                        3.0,
-                                                    ),
-                                                    bottom_left: RoundedCorner::manual(
-                                                        corner_radius,
-                                                        3.0,
-                                                    ),
-                                                    bottom_right: RoundedCorner::manual(
-                                                        corner_radius,
-                                                        3.0,
-                                                    ),
-                                                })
-                                                .border(GlassBorder {
-                                                    width: border_width.into(),
-                                                })
-                                                .on_click(|| {
-                                                    println!("Glass clicked");
-                                                })
-                                                .refraction_amount(refraction_amount)
-                                                .refraction_height(refraction_height)
-                                                .build()
-                                                .unwrap(),
-                                            || {},
-                                        );
-                                    });
-                                },
-                            );
+                                scope.child(move || {
+                                    fluid_glass(
+                                        FluidGlassArgs::default()
+                                            .modifier(Modifier::new().size(width, height))
+                                            .blur_radius(blur_radius)
+                                            .shape(Shape::RoundedRectangle {
+                                                top_left: RoundedCorner::manual(corner_radius, 3.0),
+                                                top_right: RoundedCorner::manual(
+                                                    corner_radius,
+                                                    3.0,
+                                                ),
+                                                bottom_left: RoundedCorner::manual(
+                                                    corner_radius,
+                                                    3.0,
+                                                ),
+                                                bottom_right: RoundedCorner::manual(
+                                                    corner_radius,
+                                                    3.0,
+                                                ),
+                                            })
+                                            .border(GlassBorder {
+                                                width: border_width.into(),
+                                            })
+                                            .on_click(|| {
+                                                println!("Glass clicked");
+                                            })
+                                            .refraction_amount(refraction_amount)
+                                            .refraction_height(refraction_height),
+                                        || {},
+                                    );
+                                });
+                            });
                         });
 
                         scope.child(|| spacer(Modifier::new().width(Dp(16.0))));
 
                         scope.child(move || {
-                            text(
-                                TextArgsBuilder::default()
-                                    .text(state_string)
-                                    .size(Dp(16.0))
-                                    .build()
-                                    .unwrap(),
-                            );
+                            text(TextArgs::default().text(state_string).size(Dp(16.0)));
                         });
                     },
                 );
@@ -242,9 +208,9 @@ fn test_content() {
                 glass_config_slider(
                     "Width",
                     state.with(|s| s.width.value.0 as f32 / 500.0),
-                    Arc::new(closure!(clone state, |value| {
+                    Arc::new(move |value| {
                         state.with_mut(|s| s.width.value = Dp(f64::from(value) * 500.0));
-                    })),
+                    }),
                 );
             });
 
@@ -254,9 +220,9 @@ fn test_content() {
                 glass_config_slider(
                     "Height",
                     state.with(|s| s.height.value.0 as f32 / 500.0),
-                    Arc::new(closure!(clone state, |value| {
+                    Arc::new(move |value| {
                         state.with_mut(|s| s.height.value = Dp(f64::from(value) * 500.0));
-                    })),
+                    }),
                 );
             });
 
@@ -266,9 +232,9 @@ fn test_content() {
                 glass_config_slider(
                     "Corner Radius",
                     state.with(|s| s.corner_radius.value.0 / 100.0),
-                    Arc::new(closure!(clone state, |value| {
+                    Arc::new(move |value| {
                         state.with_mut(|s| s.corner_radius.value = CornerRadius(value * 100.0));
-                    })),
+                    }),
                 );
             });
 
@@ -278,9 +244,9 @@ fn test_content() {
                 glass_config_slider(
                     "Border Width",
                     state.with(|s| s.border_width.value.0 as f32 / 20.0),
-                    Arc::new(closure!(clone state, |value| {
+                    Arc::new(move |value| {
                         state.with_mut(|s| s.border_width.value = Dp(f64::from(value) * 20.0));
-                    })),
+                    }),
                 );
             });
 
@@ -290,9 +256,9 @@ fn test_content() {
                 glass_config_slider(
                     "Refraction Strength",
                     state.with(|s| s.refraction_amount.value / 100.0),
-                    Arc::new(closure!(clone state, |value| {
+                    Arc::new(move |value| {
                         state.with_mut(|s| s.refraction_amount.value = value * 100.0);
-                    })),
+                    }),
                 );
             });
 
@@ -302,9 +268,9 @@ fn test_content() {
                 glass_config_slider(
                     "Refraction Height",
                     state.with(|s| s.refraction_height.value.0 as f32 / 50.0),
-                    Arc::new(closure!(clone state, |value| {
-                        state.with_mut(|s| s.refraction_height.value = Dp(f64::from(value * 50.0)));
-                    })),
+                    Arc::new(move |value| {
+                        state.with_mut(|s| s.refraction_height.value = Dp(f64::from(value * 50.0)))
+                    }),
                 );
             });
 
@@ -314,9 +280,9 @@ fn test_content() {
                 glass_config_slider(
                     "Blur Radius",
                     state.with(|s| s.blur_radius.value.0 as f32 / 100.0),
-                    Arc::new(closure!(clone state, |value| {
+                    Arc::new(move |value| {
                         state.with_mut(|s| s.blur_radius.value = Dp(f64::from(value * 100.0)));
-                    })),
+                    }),
                 );
             });
         },
@@ -327,23 +293,15 @@ fn test_content() {
 fn glass_config_slider(label: &str, value: f32, on_change: Arc<dyn Fn(f32) + Send + Sync>) {
     let label = label.to_string();
     column(
-        ColumnArgsBuilder::default()
+        ColumnArgs::default()
             .main_axis_alignment(MainAxisAlignment::Center)
             .cross_axis_alignment(CrossAxisAlignment::Center)
-            .modifier(Modifier::new().fill_max_width())
-            .build()
-            .unwrap(),
+            .modifier(Modifier::new().fill_max_width()),
         move |scope| {
             scope.child(move || {
-                column(ColumnArgsBuilder::default().build().unwrap(), |scope| {
+                column(ColumnArgs::default(), |scope| {
                     scope.child(move || {
-                        text(
-                            TextArgsBuilder::default()
-                                .text(label)
-                                .size(Dp(16.0))
-                                .build()
-                                .unwrap(),
-                        );
+                        text(TextArgs::default().text(label).size(Dp(16.0)));
                     });
 
                     scope.child(|| spacer(Modifier::new().width(Dp(16.0))));
@@ -351,12 +309,10 @@ fn glass_config_slider(label: &str, value: f32, on_change: Arc<dyn Fn(f32) + Sen
                     scope.child({
                         move || {
                             glass_slider(
-                                GlassSliderArgsBuilder::default()
+                                GlassSliderArgs::default()
                                     .value(value)
-                                    .on_change(on_change)
-                                    .modifier(Modifier::new().width(Dp(300.0)))
-                                    .build()
-                                    .unwrap(),
+                                    .on_change_shared(on_change)
+                                    .modifier(Modifier::new().width(Dp(300.0))),
                             );
                         }
                     });

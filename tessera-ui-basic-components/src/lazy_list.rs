@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use derive_builder::Builder;
+use derive_setters::Setters;
 use tessera_ui::{
     ComputedData, Constraint, DimensionValue, Dp, MeasurementError, NodeId, ParentConstraint, Px,
     PxPosition, State, key, remember, tessera,
@@ -44,76 +44,72 @@ impl LazyListController {
 }
 
 /// Arguments shared between lazy lists.
-#[derive(Builder, Clone)]
-#[builder(pattern = "owned")]
+#[derive(Clone, Setters)]
 pub struct LazyColumnArgs {
     /// Scroll container arguments. Vertical scrolling is enforced.
-    #[builder(default = "ScrollableArgs::default()")]
     pub scrollable: ScrollableArgs,
     /// How children are aligned along the cross axis (horizontal for columns).
-    #[builder(default = "CrossAxisAlignment::Start")]
     pub cross_axis_alignment: CrossAxisAlignment,
     /// Gap between successive items.
-    #[builder(default = "Dp(0.0)")]
     pub item_spacing: Dp,
     /// Number of extra items instantiated before/after the viewport.
-    #[builder(default = "2")]
     pub overscan: usize,
     /// Estimated main-axis size for each item, used before real measurements
     /// exist.
-    #[builder(default = "Dp(48.0)")]
     pub estimated_item_size: Dp,
     /// Symmetric padding applied around the lazy list content.
-    #[builder(default = "Dp(0.0)")]
     pub content_padding: Dp,
     /// Maximum viewport length reported back to parents. Prevents gigantic
     /// textures when nesting the list inside wrap/auto-sized surfaces.
-    #[builder(default = "Some(Px(8192))")]
     pub max_viewport_main: Option<Px>,
 }
 
 impl Default for LazyColumnArgs {
     fn default() -> Self {
-        LazyColumnArgsBuilder::default()
-            .build()
-            .expect("builder construction failed")
+        Self {
+            scrollable: ScrollableArgs::default(),
+            cross_axis_alignment: CrossAxisAlignment::Start,
+            item_spacing: Dp(0.0),
+            overscan: 2,
+            estimated_item_size: Dp(48.0),
+            content_padding: Dp(0.0),
+            max_viewport_main: Some(Px(8192)),
+        }
     }
 }
 
 /// Arguments for `lazy_row`. Identical to [`LazyColumnArgs`] but horizontal
 /// scrolling is enforced.
-#[derive(Builder, Clone)]
-#[builder(pattern = "owned")]
+#[derive(Clone, Setters)]
 pub struct LazyRowArgs {
     /// Scroll container arguments. Horizontal scrolling is enforced.
-    #[builder(default = "ScrollableArgs::default()")]
     pub scrollable: ScrollableArgs,
     /// How children are aligned along the cross axis (vertical for rows).
-    #[builder(default = "CrossAxisAlignment::Start")]
     pub cross_axis_alignment: CrossAxisAlignment,
     /// Gap between successive items.
-    #[builder(default = "Dp(0.0)")]
     pub item_spacing: Dp,
     /// Number of extra items instantiated before/after the viewport.
-    #[builder(default = "2")]
     pub overscan: usize,
     /// Estimated main-axis size for each item, used before real measurements
     /// exist.
-    #[builder(default = "Dp(48.0)")]
     pub estimated_item_size: Dp,
     /// Symmetric padding applied around the lazy list content.
-    #[builder(default = "Dp(0.0)")]
     pub content_padding: Dp,
     /// Maximum viewport length reported back to parents for horizontal lists.
-    #[builder(default = "Some(Px(8192))")]
     pub max_viewport_main: Option<Px>,
 }
 
 impl Default for LazyRowArgs {
     fn default() -> Self {
-        LazyRowArgsBuilder::default()
-            .build()
-            .expect("builder construction failed")
+        Self {
+            scrollable: ScrollableArgs::default(),
+            cross_axis_alignment: CrossAxisAlignment::Start,
+            item_spacing: Dp(0.0),
+            overscan: 2,
+            estimated_item_size: Dp(48.0),
+            content_padding: Dp(0.0),
+            max_viewport_main: Some(Px(8192)),
+        }
     }
 }
 
@@ -281,7 +277,7 @@ pub type LazyRowScope<'a> = LazyListScope<'a>;
 /// use tessera_ui::tessera;
 /// use tessera_ui_basic_components::{
 ///     lazy_list::{LazyColumnArgs, lazy_column},
-///     text::{TextArgsBuilder, text},
+///     text::{TextArgs, text},
 /// };
 ///
 /// #[tessera]
@@ -289,12 +285,7 @@ pub type LazyRowScope<'a> = LazyListScope<'a>;
 ///     lazy_column(LazyColumnArgs::default(), |scope| {
 ///         scope.items(1000, |i| {
 ///             let text_content = format!("Item #{i}");
-///             text(
-///                 TextArgsBuilder::default()
-///                     .text(text_content)
-///                     .build()
-///                     .expect("builder construction failed"),
-///             );
+///             text(TextArgs::default().text(text_content));
 ///         });
 ///     });
 /// }
@@ -332,7 +323,7 @@ where
 /// use tessera_ui::{remember, tessera};
 /// use tessera_ui_basic_components::{
 ///     lazy_list::{LazyColumnArgs, LazyListController, lazy_column_with_controller},
-///     text::{TextArgsBuilder, text},
+///     text::{TextArgs, text},
 /// };
 ///
 /// #[tessera]
@@ -341,12 +332,7 @@ where
 ///     lazy_column_with_controller(LazyColumnArgs::default(), controller, |scope| {
 ///         scope.items(5, |i| {
 ///             let text_content = format!("Row #{i}");
-///             text(
-///                 TextArgsBuilder::default()
-///                     .text(text_content)
-///                     .build()
-///                     .expect("builder construction failed"),
-///             );
+///             text(TextArgs::default().text(text_content));
 ///         });
 ///     });
 /// }
@@ -410,7 +396,7 @@ pub fn lazy_column_with_controller<F>(
 /// use tessera_ui::tessera;
 /// use tessera_ui_basic_components::{
 ///     lazy_list::{LazyRowArgs, lazy_row},
-///     text::{TextArgsBuilder, text},
+///     text::{TextArgs, text},
 /// };
 ///
 /// #[tessera]
@@ -418,12 +404,7 @@ pub fn lazy_column_with_controller<F>(
 ///     lazy_row(LazyRowArgs::default(), |scope| {
 ///         scope.items(100, |i| {
 ///             let text_content = format!("Item {i}");
-///             text(
-///                 TextArgsBuilder::default()
-///                     .text(text_content)
-///                     .build()
-///                     .expect("builder construction failed"),
-///             );
+///             text(TextArgs::default().text(text_content));
 ///         });
 ///     });
 /// }
@@ -461,7 +442,7 @@ where
 /// use tessera_ui::{remember, tessera};
 /// use tessera_ui_basic_components::{
 ///     lazy_list::{LazyListController, LazyRowArgs, lazy_row_with_controller},
-///     text::{TextArgsBuilder, text},
+///     text::{TextArgs, text},
 /// };
 ///
 /// #[tessera]
@@ -470,12 +451,7 @@ where
 ///     lazy_row_with_controller(LazyRowArgs::default(), controller, |scope| {
 ///         scope.items(3, |i| {
 ///             let text_content = format!("Card {i}");
-///             text(
-///                 TextArgsBuilder::default()
-///                     .text(text_content)
-///                     .build()
-///                     .expect("builder construction failed"),
-///             );
+///             text(TextArgs::default().text(text_content));
 ///         });
 ///     });
 /// }
@@ -567,7 +543,7 @@ fn lazy_list_view(
     });
 
     if visible_children.is_empty() {
-        measure(Box::new(move |_| Ok(ComputedData::ZERO)));
+        measure(move |_| Ok(ComputedData::ZERO));
         return;
     }
 
@@ -579,74 +555,71 @@ fn lazy_list_view(
     let padding_cross = view_args.padding_cross;
     let visible_plan = visible_children.clone();
 
-    measure(Box::new(
-        move |input| -> Result<ComputedData, MeasurementError> {
-            if input.children_ids.len() != visible_plan.len() {
-                return Err(MeasurementError::MeasureFnFailed(
-                    "Lazy list measured child count mismatch".into(),
-                ));
+    measure(move |input| -> Result<ComputedData, MeasurementError> {
+        if input.children_ids.len() != visible_plan.len() {
+            return Err(MeasurementError::MeasureFnFailed(
+                "Lazy list measured child count mismatch".into(),
+            ));
+        }
+
+        let mut child_constraint = child_constraint_axis.child_constraint(input.parent_constraint);
+        apply_cross_padding(&mut child_constraint, child_constraint_axis, padding_cross);
+        let (placements, inner_cross, total_main) = controller.with_mut(|c| {
+            let mut placements = Vec::with_capacity(visible_plan.len());
+            let mut max_cross = Px::ZERO;
+
+            for (visible, child_id) in visible_plan.iter().zip(input.children_ids.iter()) {
+                let item_offset =
+                    c.cache
+                        .offset_for(visible.item_index, estimated_item_main, spacing);
+                let child_size = input.measure_child(*child_id, &child_constraint)?;
+
+                c.cache.record_measurement(
+                    visible.item_index,
+                    child_constraint_axis.main(&child_size),
+                    estimated_item_main,
+                );
+
+                max_cross = max_cross.max(child_constraint_axis.cross(&child_size));
+                placements.push(Placement {
+                    child_id: *child_id,
+                    offset_main: item_offset,
+                    size: child_size,
+                });
             }
 
-            let mut child_constraint =
-                child_constraint_axis.child_constraint(input.parent_constraint);
-            apply_cross_padding(&mut child_constraint, child_constraint_axis, padding_cross);
-            let (placements, inner_cross, total_main) = controller.with_mut(|c| {
-                let mut placements = Vec::with_capacity(visible_plan.len());
-                let mut max_cross = Px::ZERO;
+            let total_main = c.cache.total_main_size(estimated_item_main, spacing);
+            Ok::<_, MeasurementError>((placements, max_cross, total_main))
+        })?;
 
-                for (visible, child_id) in visible_plan.iter().zip(input.children_ids.iter()) {
-                    let item_offset =
-                        c.cache
-                            .offset_for(visible.item_index, estimated_item_main, spacing);
-                    let child_size = input.measure_child(*child_id, &child_constraint)?;
+        let total_main_with_padding = total_main + padding_main + padding_main;
+        let cross_with_padding = inner_cross + padding_cross + padding_cross;
+        let size = child_constraint_axis.pack_size(total_main_with_padding, cross_with_padding);
+        scroll_controller.with_mut(|c| c.override_child_size(size));
 
-                    c.cache.record_measurement(
-                        visible.item_index,
-                        child_constraint_axis.main(&child_size),
-                        estimated_item_main,
-                    );
+        let reported_main = clamp_reported_main(
+            child_constraint_axis,
+            input.parent_constraint,
+            total_main_with_padding,
+            viewport_limit,
+            view_args.max_viewport_main,
+        );
 
-                    max_cross = max_cross.max(child_constraint_axis.cross(&child_size));
-                    placements.push(Placement {
-                        child_id: *child_id,
-                        offset_main: item_offset,
-                        size: child_size,
-                    });
-                }
-
-                let total_main = c.cache.total_main_size(estimated_item_main, spacing);
-                Ok::<_, MeasurementError>((placements, max_cross, total_main))
-            })?;
-
-            let total_main_with_padding = total_main + padding_main + padding_main;
-            let cross_with_padding = inner_cross + padding_cross + padding_cross;
-            let size = child_constraint_axis.pack_size(total_main_with_padding, cross_with_padding);
-            scroll_controller.with_mut(|c| c.override_child_size(size));
-
-            let reported_main = clamp_reported_main(
-                child_constraint_axis,
-                input.parent_constraint,
-                total_main_with_padding,
-                viewport_limit,
-                view_args.max_viewport_main,
+        for placement in &placements {
+            let cross_offset = compute_cross_offset(
+                inner_cross,
+                child_constraint_axis.cross(&placement.size),
+                cross_alignment,
             );
+            let position = child_constraint_axis.position(
+                placement.offset_main + padding_main,
+                padding_cross + cross_offset,
+            );
+            input.place_child(placement.child_id, position);
+        }
 
-            for placement in &placements {
-                let cross_offset = compute_cross_offset(
-                    inner_cross,
-                    child_constraint_axis.cross(&placement.size),
-                    cross_alignment,
-                );
-                let position = child_constraint_axis.position(
-                    placement.offset_main + padding_main,
-                    padding_cross + cross_offset,
-                );
-                input.place_child(placement.child_id, position);
-            }
-
-            Ok(child_constraint_axis.pack_size(reported_main, cross_with_padding))
-        },
-    ));
+        Ok(child_constraint_axis.pack_size(reported_main, cross_with_padding))
+    });
 
     for child in visible_children {
         key(child.key_hash, || {

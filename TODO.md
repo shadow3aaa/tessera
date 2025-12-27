@@ -7,9 +7,24 @@
   - [x] image_vector
   - [x] icon
   - [x] icon_button (and it's glass variant)
-  - [x] lazy_column
-  - [x] lazy_row
-  - [ ] [material design components](https://m3.material.io/components)
+- [x] lazy_column
+- [x] lazy_row
+- [ ] [material design components](https://m3.material.io/components)
+  - [ ] WindowInsets padding/size helpers
+  - [x] FlowRow/FlowColumn
+  - [ ] Pull-to-refresh
+  - [ ] Lazy vertical/horizontal grids
+  - [ ] Staggered grids
+  - [ ] Pager
+  - [ ] TextField/Outlined/Secure variants with defaults, context menu/input transforms, Material text selection colors.
+  - [ ] Appbar/TopAppBar
+  - [ ] FloatingActionButton
+  - [x] Chip
+  - [ ] ListItem
+  - [ ] NavigationRail
+  - [ ] Snackbar/SnackbarHost
+  - [ ] ExposedDropdownMenu
+  - [ ] Date/Time pickers/dialogs
 - [ ] Documentation of pluggable graphics rendering pipelines
 - [x] CLI tool (`cargo-tessera`):
   - [x] Project scaffolding (`cargo tessera new`)
