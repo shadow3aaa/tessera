@@ -13,18 +13,18 @@
   - [ ] WindowInsets padding/size helpers
   - [x] FlowRow/FlowColumn
   - [ ] Pull-to-refresh
-  - [ ] Lazy vertical/horizontal grids
-  - [ ] Staggered grids
+  - [x] Lazy vertical/horizontal grids
+  - [x] Staggered grids
   - [ ] Pager
   - [ ] TextField/Outlined/Secure variants with defaults, context menu/input transforms, Material text selection colors.
-  - [ ] Appbar/TopAppBar
-  - [ ] FloatingActionButton
+  - [x] Appbar/TopAppBar
+  - [x] FloatingActionButton
   - [x] Chip
   - [ ] ListItem
-  - [ ] NavigationRail
+  - [x] NavigationRail
   - [ ] Snackbar/SnackbarHost
   - [ ] ExposedDropdownMenu
-  - [ ] Date/Time pickers/dialogs
+  - [x] Date/Time pickers/dialogs
 - [ ] Documentation of pluggable graphics rendering pipelines
 - [x] CLI tool (`cargo-tessera`):
   - [x] Project scaffolding (`cargo tessera new`)

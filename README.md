@@ -30,7 +30,8 @@ Tessera is a cross-platform UI library focused on performance and extensibility.
 - Achieve any visual effect (native support for custom shaders)
 - Standalone basic component library (including `text_editor`, `scrollable`, and more)
 - Parallel layout support
-- Immediate mode
+- Cross-platform support(TODO for mobile and platform-specific features)
+- Modern performance profiling system
 
 Tessera is an experimental framework. If you encounter any issues, please feel free to [submit an issue](https://github.com/tessera-ui/tessera/issues).
 
@@ -55,26 +56,12 @@ Then we write its UI logic:
 #[tessera]
 fn app() {
     surface(
-        SurfaceArgs {
-            width: DimensionValue::FILLED,
-            height: DimensionValue::FILLED,
-            ..Default::default()
-        },
+        SurfaceArgs::default().modifier(Modifier::new().fill_max_size()),
         || {
             column(ColumnArgs::default(), |scope| {
-                scope.child(|| {
-                    button(
-                        ButtonArgs::filled(|| {}),
-                        || text("+"),
-                    )
-                });
+                scope.child(|| button(ButtonArgs::filled(|| {}), || text("+")));
                 scope.child(|| text("count: 0"));
-                scope.child(|| {
-                    button(
-                        ButtonArgs::filled(|| {}),
-                        || text("-"),
-                    )
-                });
+                scope.child(|| button(ButtonArgs::filled(|| {}), || text("-")));
             });
         },
     );
@@ -87,11 +74,7 @@ Next, to actually implement the counter we need to use `remember` to store the c
 #[tessera]
 fn app() {
     surface(
-        SurfaceArgs {
-            width: DimensionValue::FILLED,
-            height: DimensionValue::FILLED,
-            ..Default::default()
-        },
+        SurfaceArgs::default().modifier(Modifier::new().fill_max_size()),
         || {
             let count = remember(|| 0);
             column(ColumnArgs::default(), move |scope| {
