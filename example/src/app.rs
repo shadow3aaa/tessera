@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use closure::closure;
 use tessera_ui::{
-    Color, Dp, Modifier, State, remember,
+    Color, Dp, Modifier, State, remember, retain,
     router::{Router, router_root},
     shard, tessera, use_context,
 };
@@ -21,7 +21,7 @@ use tessera_ui_basic_components::{
     },
     icon::{IconArgs, icon},
     icon_button::{IconButtonArgs, icon_button},
-    lazy_list::{LazyColumnArgs, lazy_column},
+    lazy_list::{LazyColumnArgs, LazyListController, lazy_column_with_controller},
     material_icons::filled::{self, menu_icon, menu_open_icon},
     modifier::{ModifierExt as _, Padding},
     navigation_bar::{NavigationBarItem, navigation_bar},
@@ -29,7 +29,6 @@ use tessera_ui_basic_components::{
         NavigationRailController, NavigationRailItem, navigation_rail_with_controller,
     },
     row::{RowArgs, row},
-    scrollable::ScrollableArgs,
     shape_def::Shape,
     side_bar::{
         SideBarController, SideBarProviderArgs, SideBarStyle, side_bar_provider_with_controller,
@@ -667,14 +666,16 @@ fn home(
     surface(
         SurfaceArgs::default().modifier(Modifier::new().fill_max_size()),
         move || {
-            lazy_column(
+            let controller = retain(LazyListController::new);
+            lazy_column_with_controller(
                 LazyColumnArgs::default()
-                    .scrollable(ScrollableArgs::default().modifier(Modifier::new().fill_max_size()))
+                    .modifier(Modifier::new().fill_max_size())
                     .item_spacing(Dp(16.0))
                     .content_padding(Dp(8.0))
                     .cross_axis_alignment(CrossAxisAlignment::Stretch)
                     .estimated_item_size(Dp(140.0))
                     .content_padding(Dp(16.0)),
+                controller,
                 move |scope| {
                     scope.items_from_iter(examples.iter().cloned(), move |_, example| {
                         let on_click = example.on_click.clone();
@@ -769,10 +770,10 @@ fn about() {
                 TextArgs::default()
                     .modifier(Modifier::new().padding(Padding::all(Dp(16.0))))
                     .text(
-                        r#"This is an example app of Tessera UI Framework.,
-Made with ❤️ by tessera-ui devs.,
+                        r#"This is an example app of Tessera UI Framework.
+Made with ❤️ by tessera-ui devs.
 
-Copyright 2025 Tessera UI Framework Developers,
+Copyright 2025 Tessera UI Framework Developers
 "#
                         .to_string(),
                     )
