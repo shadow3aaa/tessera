@@ -11,7 +11,7 @@ readme = "../README.md"
 
 [features]
 default = ["shard"]
-shard = ["tessera-ui-shard"]
+shard = ["tessera-shard"]
 profiling = ["serde", "serde_json"]
 
 [dependencies]
@@ -24,8 +24,8 @@ indextree = "4.7.4"
 rayon = "1.11.0"
 dashmap = "6.1.0"
 uuid = { version = "1.19.0", features = ["v4"] }
-tessera-ui-macros = { path = "../tessera-ui-macros" }
-tessera-ui-shard = { path = "../tessera-ui-shard", optional = true }
+tessera-macros = { path = "../tessera-macros" }
+tessera-shard = { path = "../tessera-shard", optional = true }
 petgraph = "0.8.3"
 accesskit = "0.22.0"
 accesskit_winit = "0.30.0"
@@ -33,10 +33,10 @@ smallvec = "1.15.1"
 dirs = "6.0.0"
 im = "15.1.0"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
-serde_json = { version = "1.0.148", optional = true }
+serde_json = { version = "1.0.149", optional = true }
 
 [target.'cfg(target_family = "unix")'.dependencies]
-libc = "0.2.179"
+libc = "0.2.180"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_System_Threading"] }

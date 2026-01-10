@@ -7,7 +7,7 @@
 //!
 //! # Component Library
 //!
-//! The tessera-ui crate itself does not contain built-in components, but the official project provides a [basic component library](https://crates.io/crates/tessera-ui-basic-components).
+//! The tessera-ui crate itself does not contain built-in components, but the official project provides a [basic component library](https://crates.io/crates/tessera-components).
 //!
 //! It contains commonly used UI components such as buttons, text boxes, labels,
 //! etc., which help developers quickly build user interfaces.
@@ -342,7 +342,7 @@ pub mod router;
 
 pub use accesskit;
 pub use indextree::{Arena, NodeId};
-pub use tessera_ui_macros::tessera;
+pub use tessera_macros::tessera;
 pub use wgpu;
 pub use winit;
 
@@ -376,6 +376,6 @@ pub use crate::{
 use ime_state::ImeState;
 
 #[cfg(feature = "shard")]
-pub use tessera_ui_macros::shard;
+pub use tessera_macros::shard;
 #[cfg(feature = "shard")]
-pub use tessera_ui_shard;
+pub use tessera_shard;

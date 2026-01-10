@@ -3,20 +3,17 @@
 - [ ] Better IME support on Android
 - [x] Performance improvement
 - [x] Switch to Semver for versioning
-- [ ] New components:
-  - [x] image_vector
-  - [x] icon
-  - [x] icon_button (and it's glass variant)
+- [ ] Platform-specific plugin system
 - [x] lazy_column
 - [x] lazy_row
 - [ ] [material design components](https://m3.material.io/components)
   - [ ] WindowInsets padding/size helpers
   - [x] FlowRow/FlowColumn
-  - [ ] Pull-to-refresh
+  - [x] Pull-to-refresh
   - [x] Lazy vertical/horizontal grids
   - [x] Staggered grids
   - [x] Pager
-  - [ ] TextField/Outlined/Secure variants with defaults, context menu/input transforms, Material text selection colors.
+  - [x] TextField/Outlined/Secure variants with defaults, context menu/input transforms, Material text selection colors.
   - [x] Appbar/TopAppBar
   - [x] FloatingActionButton
   - [x] Chip
@@ -31,3 +28,4 @@
   - [x] Development server (`cargo tessera dev`)
   - [x] Build automation (`cargo tessera build`)
   - [x] Documentation of cargo-tessera commands
+  - [ ] Performance profiling tools integration

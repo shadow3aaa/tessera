@@ -1,12 +1,7 @@
 use std::sync::Arc;
 
 use closure::closure;
-use tessera_ui::{
-    Color, Dp, Modifier, State, remember, retain,
-    router::{Router, router_root},
-    shard, tessera, use_context,
-};
-use tessera_ui_basic_components::{
+use tessera_components::{
     alignment::CrossAxisAlignment,
     app_bar::{AppBarArgs, TopAppBarArgs, top_app_bar as material_top_app_bar},
     bottom_sheet::{
@@ -38,6 +33,11 @@ use tessera_ui_basic_components::{
     text::{TextArgs, text},
     theme::{MaterialTheme, material_theme},
 };
+use tessera_ui::{
+    Color, Dp, Modifier, State, remember, retain,
+    router::{Router, router_root},
+    shard, tessera, use_context,
+};
 
 use crate::example_components::{
     badge::BadgeShowcaseDestination,
@@ -62,6 +62,7 @@ use crate::example_components::{
     pager::PagerShowcaseDestination,
     progress::ProgressShowcaseDestination,
     progress_indicator::ProgressIndicatorShowcaseDestination,
+    pull_refresh::PullRefreshShowcaseDestination,
     radio_button::RadioButtonShowcaseDestination,
     slider::SliderShowcaseDestination,
     spacer::SpacerShowcaseDestination,
@@ -70,7 +71,7 @@ use crate::example_components::{
     switch::SwitchShowcaseDestination,
     tabs::TabsShowcaseDestination,
     text::TextShowcaseDestination,
-    text_editor::TextEditorShowcaseDestination,
+    text_input::TextInputShowcaseDestination,
 };
 
 const NAVIGATION_RAIL_BREAKPOINT: Dp = Dp(600.0);
@@ -373,11 +374,11 @@ fn home(
 ) {
     let examples = Arc::new(vec![
         ComponentExampleDesc::new(
-            "Text Editor",
+            "Text Input",
             "A basic component for multiline text input.",
             || {
                 Router::with_mut(|router| {
-                    router.push(TextEditorShowcaseDestination {});
+                    router.push(TextInputShowcaseDestination {});
                 });
             },
         ),
@@ -465,6 +466,15 @@ fn home(
             || {
                 Router::with_mut(|router| {
                     router.push(ProgressIndicatorShowcaseDestination {});
+                });
+            },
+        ),
+        ComponentExampleDesc::new(
+            "Pull-to-refresh",
+            "Pull down to trigger a refresh and show a progress indicator.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(PullRefreshShowcaseDestination {});
                 });
             },
         ),
