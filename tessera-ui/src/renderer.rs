@@ -30,6 +30,7 @@ use crate::{
     cursor::{CursorEvent, CursorEventContent, CursorState, GestureState},
     dp::SCALE_FACTOR,
     keyboard_state::KeyboardState,
+    plugin::{PluginContext, PluginHost},
     px::PxSize,
     runtime::{TesseraRuntime, begin_frame_slots},
     thread_utils,
@@ -197,7 +198,9 @@ impl Default for TesseraConfig {
 ///     my_app, // Entry point function
 ///     |app| {
 ///         // Register rendering pipelines
-///         // For example, tessera_components::pipelines::register_pipelines(app);
+///         // For example:
+///         // let mut context = tessera_ui::PipelineContext::new(app);
+///         // tessera_components::init(&mut context);
 ///     },
 /// )
 /// .unwrap();
@@ -249,6 +252,8 @@ pub struct Renderer<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> {
     ime_state: ImeState,
     /// Function called during initialization to register rendering pipelines
     register_pipelines_fn: R,
+    /// Lifecycle hooks for registered plugins.
+    plugins: PluginHost,
     /// Configuration settings for the renderer
     config: TesseraConfig,
     /// Clipboard manager
@@ -282,7 +287,8 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     ///   root UI components.
     /// - `register_pipelines_fn`: A function that registers rendering pipelines
     ///   with the WGPU app. Typically, you'll call
-    ///   `tessera_components::pipelines::register_pipelines(app)` here.
+    ///   `tessera_components::init(&mut context)` here after creating a
+    ///   [`PipelineContext`].
     ///
     /// # Returns
     ///
@@ -302,7 +308,8 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     Renderer::run(my_ui, |_app| {
     ///         // Register your rendering pipelines here
-    ///         // tessera_components::pipelines::register_pipelines(app);
+    ///         // let mut context = tessera_ui::PipelineContext::new(app);
+    ///         // tessera_components::init(&mut context);
     ///     })?;
     ///     Ok(())
     /// }
@@ -372,6 +379,7 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
             cursor_state,
             keyboard_state,
             register_pipelines_fn,
+            plugins: PluginHost::new(),
             ime_state,
             config,
             clipboard,
@@ -491,6 +499,7 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
             cursor_state,
             keyboard_state,
             register_pipelines_fn,
+            plugins: PluginHost::new(),
             ime_state,
             android_ime_opened: false,
             config,
@@ -897,8 +906,26 @@ Fps: {:.2}
 }
 
 impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
+    #[cfg(target_os = "android")]
+    fn plugin_context(&self, event_loop: &ActiveEventLoop) -> Option<PluginContext> {
+        let app = self.app.as_ref()?;
+        Some(PluginContext::new(
+            app.window.clone(),
+            event_loop.android_app().clone(),
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn plugin_context(&self, _event_loop: &ActiveEventLoop) -> Option<PluginContext> {
+        let app = self.app.as_ref()?;
+        Some(PluginContext::new(app.window.clone()))
+    }
+
     // These keep behavior identical but reduce per-function complexity.
     fn handle_close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(context) = self.plugin_context(event_loop) {
+            self.plugins.shutdown(&context);
+        }
         TesseraRuntime::with(|rt| rt.trigger_close_callbacks());
         if let Some(ref app) = self.app
             && let Err(e) = app.save_pipeline_cache()
@@ -1159,6 +1186,10 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> ApplicationHandler<AccessKi
         {
             self.clipboard = Clipboard::new();
         }
+
+        if let Some(context) = self.plugin_context(event_loop) {
+            self.plugins.resumed(&context);
+        }
     }
 
     /// Called when the application is suspended.
@@ -1172,8 +1203,12 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> ApplicationHandler<AccessKi
     /// - **Desktop**: Rarely called, mainly during shutdown
     /// - **Android**: Called when app goes to background
     /// - **iOS**: Called during app lifecycle transitions
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         debug!("Suspending renderer; tearing down WGPU resources.");
+
+        if let Some(context) = self.plugin_context(event_loop) {
+            self.plugins.suspended(&context);
+        }
 
         if let Some(app) = self.app.take() {
             app.resource_manager.write().clear();

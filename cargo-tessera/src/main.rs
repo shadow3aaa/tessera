@@ -1,9 +1,15 @@
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
-use commands::android::{self, AndroidFormat};
+use commands::{
+    android::{self, AndroidFormat},
+    plugin,
+};
 
 mod commands;
+mod template;
 
 #[derive(Parser)]
 #[command(name = "cargo-tessera")]
@@ -66,14 +72,39 @@ enum TesseraCommands {
         #[command(subcommand)]
         command: AndroidCommands,
     },
+    /// Create a new Tessera plugin
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
 }
 
 #[derive(Subcommand)]
 enum AndroidCommands {
-    /// Build Android artifacts using xbuild
+    /// Initialize Android project (Gradle) for Tessera app
+    Init {
+        /// Skip installing Rust targets automatically
+        #[arg(long)]
+        skip_targets_install: bool,
+    },
+    /// Build Android artifacts using Gradle
     Build(AndroidBuildArgs),
-    /// Run/install the app on an Android device via xbuild
+    /// Run/install the app on an Android device via Gradle
     Dev(AndroidDevArgs),
+    /// Build Rust library for a single Android target (used by Gradle)
+    RustBuild(AndroidRustBuildArgs),
+}
+
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// Create a new Tessera plugin
+    New {
+        /// Name of the plugin (optional, will prompt if not provided)
+        name: Option<String>,
+        /// Use a specific template
+        #[arg(short, long)]
+        template: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -103,12 +134,32 @@ struct AndroidDevArgs {
     /// Override package/binary name (-p)
     #[arg(long, short)]
     package: Option<String>,
-    /// Device id used by `x run --device`
+    /// Device id from `adb devices`
     #[arg(long, short)]
     device: Option<String>,
 }
 
-fn main() -> Result<()> {
+#[derive(Args)]
+struct AndroidRustBuildArgs {
+    /// Build in release mode
+    #[arg(long, short)]
+    release: bool,
+    /// Target triple (e.g. aarch64-linux-android)
+    target: String,
+    /// Override package/binary name (-p)
+    #[arg(long, short)]
+    package: Option<String>,
+}
+
+fn main() -> ExitCode {
+    if let Err(err) = run() {
+        print_error(&err);
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+fn run() -> Result<()> {
     let Cli { command } = Cli::parse();
 
     match command {
@@ -124,6 +175,19 @@ fn main() -> Result<()> {
                 };
                 commands::new::execute(&name, &template)?;
             }
+            TesseraCommands::Plugin { command } => match command {
+                PluginCommands::New { name, template } => {
+                    let name = match name {
+                        Some(n) => n,
+                        None => plugin::prompt_plugin_name()?,
+                    };
+                    let template = match template {
+                        Some(t) => t,
+                        None => plugin::select_template_interactive()?,
+                    };
+                    plugin::execute(&name, &template)?;
+                }
+            },
             TesseraCommands::Dev {
                 verbose,
                 package,
@@ -139,6 +203,11 @@ fn main() -> Result<()> {
                 commands::build::execute(release, target.as_deref(), package.as_deref())?;
             }
             TesseraCommands::Android { command } => match command {
+                AndroidCommands::Init {
+                    skip_targets_install,
+                } => {
+                    commands::android::init(skip_targets_install)?;
+                }
                 AndroidCommands::Build(build_args) => {
                     android::build(android::BuildOptions {
                         release: build_args.release,
@@ -155,9 +224,23 @@ fn main() -> Result<()> {
                         device: dev_args.device.clone(),
                     })?;
                 }
+                AndroidCommands::RustBuild(build_args) => {
+                    android::rust_build(android::RustBuildOptions {
+                        release: build_args.release,
+                        target: build_args.target.clone(),
+                        package: build_args.package.clone(),
+                    })?;
+                }
             },
         },
     }
 
     Ok(())
+}
+
+fn print_error(err: &anyhow::Error) {
+    eprintln!("Error: {err}");
+    for cause in err.chain().skip(1) {
+        eprintln!("Caused by: {cause}");
+    }
 }

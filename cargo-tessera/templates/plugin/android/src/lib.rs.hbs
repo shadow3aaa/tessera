@@ -1,0 +1,84 @@
+use std::sync::Mutex;
+
+use tessera_ui::{Plugin, PluginContext, PluginResult};
+
+#[cfg(target_os = "android")]
+use tessera_ui::android::{activity, ActivityRef};
+#[cfg(target_os = "android")]
+use winit::platform::android::activity::AndroidApp;
+
+#[cfg(target_os = "android")]
+tessera_ui::android::jni_bind! {
+    class "{{android.package}}.HelloPlugin" as HelloPluginJni {
+        fn hello(activity: ActivityRef) -> String;
+    }
+}
+
+pub struct HelloPlugin {
+    message: String,
+    #[cfg(target_os = "android")]
+    android_app: Mutex<Option<AndroidApp>>,
+}
+
+impl HelloPlugin {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn android_app(&self) -> Option<AndroidApp> {
+        self.android_app
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn hello_from_kotlin(&self) -> Option<String> {
+        let android_app = self.android_app()?;
+        let activity = activity(&android_app);
+        match HelloPluginJni::hello(&android_app, activity) {
+            Ok(value) => Some(value),
+            Err(err) => {
+                eprintln!("JNI call failed: {err}");
+                None
+            }
+        }
+    }
+}
+
+impl Plugin for HelloPlugin {
+    fn on_resumed(&self, ctx: &PluginContext) -> PluginResult {
+        #[cfg(target_os = "android")]
+        {
+            *self
+                .android_app
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = Some(ctx.android_app().clone());
+        }
+        Ok(())
+    }
+
+    fn on_suspended(&self, _ctx: &PluginContext) -> PluginResult {
+        #[cfg(target_os = "android")]
+        {
+            *self
+                .android_app
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = None;
+        }
+        Ok(())
+    }
+}
+
+pub fn init() -> impl Plugin {
+    HelloPlugin {
+        message: format!("Hello from {{project_name}}"),
+        #[cfg(target_os = "android")]
+        android_app: Mutex::new(None),
+    }
+}
+
+pub fn with_plugin<R>(f: impl FnOnce(&HelloPlugin) -> R) -> R {
+    tessera_ui::with_plugin::<HelloPlugin, R>(f)
+}
