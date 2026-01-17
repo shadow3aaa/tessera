@@ -2,13 +2,11 @@
 //! the main [`Renderer`] struct that manages the application lifecycle, event
 //! handling, and rendering pipeline for cross-platform UI applications.
 
-pub mod app;
-pub mod command;
 pub mod compute;
 pub mod drawer;
-pub mod reorder;
+pub mod render_core;
 
-use std::{any::TypeId, sync::Arc, thread, time::Instant};
+use std::{sync::Arc, thread, time::Instant};
 
 use accesskit::{self, TreeUpdate};
 use accesskit_winit::{Adapter as AccessKitAdapter, Event as AccessKitEvent};
@@ -30,18 +28,22 @@ use crate::{
     cursor::{CursorEvent, CursorEventContent, CursorState, GestureState},
     dp::SCALE_FACTOR,
     keyboard_state::KeyboardState,
+    pipeline_context::PipelineContext,
     plugin::{PluginContext, PluginHost},
     px::PxSize,
+    render_graph::{RenderGraph, RenderGraphExecution, RenderGraphOp, RenderResource},
+    render_module::{RenderMiddleware, RenderMiddlewareContext, RenderModule},
     runtime::{TesseraRuntime, begin_frame_slots},
     thread_utils,
 };
 
-pub use app::WgpuApp;
-pub use command::{Command, DrawRegion, PaddingRect, SampleRegion};
+pub use crate::render_scene::{Command, DrawRegion, PaddingRect, SampleRegion};
+
 pub use compute::{
     ComputablePipeline, ComputeBatchItem, ComputePipelineRegistry, ErasedComputeBatchItem,
 };
 pub use drawer::{DrawCommand, DrawablePipeline, PipelineRegistry};
+pub use render_core::{RenderCore, RenderResources};
 
 #[cfg(feature = "profiling")]
 use crate::profiler::{
@@ -56,23 +58,7 @@ use winit::platform::android::{
     ActiveEventLoopExtAndroid, EventLoopBuilderExtAndroid, activity::AndroidApp,
 };
 
-/// Unified render command type with metadata.
-/// Render command plus layout metadata and accumulated opacity.
-#[derive(Clone)]
-pub struct RenderCommand {
-    /// The draw/compute/clip command to execute.
-    pub command: Command,
-    /// Type identifier of the concrete command, used for batching.
-    pub type_id: TypeId,
-    /// Measured size of the component issuing the command.
-    pub size: PxSize,
-    /// Absolute position of the component issuing the command.
-    pub position: PxPosition,
-    /// Accumulated opacity applied to this command.
-    pub opacity: f32,
-}
-
-type RenderComputationOutput = (Vec<RenderCommand>, WindowRequests, std::time::Duration);
+type RenderComputationOutput = (RenderGraph, WindowRequests, std::time::Duration);
 
 /// Configuration for the Tessera runtime and renderer.
 ///
@@ -157,8 +143,6 @@ impl Default for TesseraConfig {
 ///
 /// - `F`: The entry point function type that defines your UI. Must implement
 ///   `Fn()`.
-/// - `R`: The pipeline registration function type. Must implement `Fn(&mut
-///   WgpuApp) + Clone + 'static`.
 ///
 /// ## Lifecycle
 ///
@@ -186,7 +170,14 @@ impl Default for TesseraConfig {
 /// to use the renderer through the [`Renderer::run`] method:
 ///
 /// ```no_run
-/// use tessera_ui::Renderer;
+/// use tessera_ui::{PipelineContext, RenderModule, Renderer};
+///
+/// #[derive(Debug)]
+/// struct DemoModule;
+///
+/// impl RenderModule for DemoModule {
+///     fn register_pipelines(&self, _context: &mut PipelineContext<'_>) {}
+/// }
 ///
 /// // Define your UI entry point
 /// fn my_app() {
@@ -194,16 +185,7 @@ impl Default for TesseraConfig {
 /// }
 ///
 /// // Run the application
-/// Renderer::run(
-///     my_app, // Entry point function
-///     |app| {
-///         // Register rendering pipelines
-///         // For example:
-///         // let mut context = tessera_ui::PipelineContext::new(app);
-///         // tessera_components::init(&mut context);
-///     },
-/// )
-/// .unwrap();
+/// Renderer::run(my_app, vec![Box::new(DemoModule)]).unwrap();
 /// ```
 ///
 /// ### Android Usage
@@ -217,20 +199,23 @@ impl Default for TesseraConfig {
 /// using [`Renderer::run_with_config`]. instead of [`Renderer::run`].
 ///
 /// ```no_run
-/// use tessera_ui::{Renderer, renderer::TesseraConfig};
+/// use tessera_ui::{PipelineContext, RenderModule, Renderer, renderer::TesseraConfig};
 ///
 /// # fn foo() -> Result<(), Box<dyn std::error::Error>> {
+/// #[derive(Debug)]
+/// struct DemoModule;
+///
+/// impl RenderModule for DemoModule {
+///     fn register_pipelines(&self, _context: &mut PipelineContext<'_>) {}
+/// }
+///
 /// let config = TesseraConfig {
 ///     sample_count: 8,                            // 8x MSAA
 ///     window_title: "My Tessera App".to_string(), // Custom window title
 ///     ..Default::default()
 /// };
 ///
-/// Renderer::run_with_config(
-///     || { /* my_app */ },
-///     |_app| { /* register_pipelines */ },
-///     config,
-/// )?;
+/// Renderer::run_with_config(|| { /* my_app */ }, vec![Box::new(DemoModule)], config)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -239,9 +224,9 @@ impl Default for TesseraConfig {
 ///
 /// The renderer includes built-in performance monitoring that logs frame
 /// statistics when performance drops below 60 FPS.
-pub struct Renderer<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> {
+pub struct Renderer<F: Fn()> {
     /// The WGPU application context, initialized after window creation
-    app: Option<WgpuApp>,
+    app: Option<RenderCore>,
     /// The entry point function that defines the root of your UI component tree
     entry_point: F,
     /// Tracks cursor/mouse position and button states
@@ -250,16 +235,21 @@ pub struct Renderer<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> {
     keyboard_state: KeyboardState,
     /// Tracks Input Method Editor (IME) state for international text input
     ime_state: ImeState,
-    /// Function called during initialization to register rendering pipelines
-    register_pipelines_fn: R,
+    /// Render modules providing pipelines and middleware.
+    modules: Vec<Box<dyn RenderModule>>,
+    /// Per-frame render middlewares derived from modules.
+    middlewares: Vec<Box<dyn RenderMiddleware>>,
     /// Lifecycle hooks for registered plugins.
     plugins: PluginHost,
     /// Configuration settings for the renderer
     config: TesseraConfig,
     /// Clipboard manager
     clipboard: Clipboard,
-    /// Commands from the previous frame, for dirty rectangle optimization
-    previous_commands: Vec<RenderCommand>,
+    /// Ordered render ops from the previous frame, for dirty rectangle
+    /// optimization.
+    previous_ops: Vec<RenderGraphOp>,
+    /// Resource declarations from the previous frame, for dirty detection.
+    previous_resources: Vec<RenderResource>,
     /// AccessKit adapter for accessibility support
     accessibility_adapter: Option<AccessKitAdapter>,
     /// Event loop proxy for sending accessibility events
@@ -272,7 +262,7 @@ pub struct Renderer<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> {
     android_ime_opened: bool,
 }
 
-impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
+impl<F: Fn()> Renderer<F> {
     /// Runs the Tessera application with default configuration on desktop
     /// platforms.
     ///
@@ -285,10 +275,8 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// - `entry_point`: A function that defines your UI. This function will be
     ///   called every frame to build the component tree. It should contain your
     ///   root UI components.
-    /// - `register_pipelines_fn`: A function that registers rendering pipelines
-    ///   with the WGPU app. Typically, you'll call
-    ///   `tessera_components::init(&mut context)` here after creating a
-    ///   [`PipelineContext`].
+    /// - `modules`: Render modules that register pipelines and provide
+    ///   middleware.
     ///
     /// # Returns
     ///
@@ -299,25 +287,28 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// # Examples
     ///
     /// ```no_run
-    /// use tessera_ui::Renderer;
+    /// use tessera_ui::{PipelineContext, RenderModule, Renderer};
+    ///
+    /// #[derive(Debug)]
+    /// struct DemoModule;
+    ///
+    /// impl RenderModule for DemoModule {
+    ///     fn register_pipelines(&self, _context: &mut PipelineContext<'_>) {}
+    /// }
     ///
     /// fn my_ui() {
     ///     // Your UI components go here
     /// }
     ///
     /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     Renderer::run(my_ui, |_app| {
-    ///         // Register your rendering pipelines here
-    ///         // let mut context = tessera_ui::PipelineContext::new(app);
-    ///         // tessera_components::init(&mut context);
-    ///     })?;
+    ///     Renderer::run(my_ui, vec![Box::new(DemoModule)])?;
     ///     Ok(())
     /// }
     /// ```
     #[cfg(not(target_os = "android"))]
-    #[tracing::instrument(level = "info", skip(entry_point, register_pipelines_fn))]
-    pub fn run(entry_point: F, register_pipelines_fn: R) -> Result<(), EventLoopError> {
-        Self::run_with_config(entry_point, register_pipelines_fn, Default::default())
+    #[tracing::instrument(level = "info", skip(entry_point, modules))]
+    pub fn run(entry_point: F, modules: Vec<Box<dyn RenderModule>>) -> Result<(), EventLoopError> {
+        Self::run_with_config(entry_point, modules, Default::default())
     }
 
     /// Runs the Tessera application with custom configuration on desktop
@@ -330,7 +321,8 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// # Parameters
     ///
     /// - `entry_point`: A function that defines your UI
-    /// - `register_pipelines_fn`: A function that registers rendering pipelines
+    /// - `modules`: Render modules that register pipelines and provide
+    ///   middleware
     /// - `config`: Custom configuration for the renderer
     ///
     /// # Returns
@@ -341,27 +333,30 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// # Examples
     ///
     /// ```no_run
-    /// use tessera_ui::{Renderer, renderer::TesseraConfig};
+    /// use tessera_ui::{PipelineContext, RenderModule, Renderer, renderer::TesseraConfig};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// #[derive(Debug)]
+    /// struct DemoModule;
+    ///
+    /// impl RenderModule for DemoModule {
+    ///     fn register_pipelines(&self, _context: &mut PipelineContext<'_>) {}
+    /// }
+    ///
     /// let config = TesseraConfig {
     ///     sample_count: 8, // 8x MSAA for higher quality
     ///     ..Default::default()
     /// };
     ///
-    /// Renderer::run_with_config(
-    ///     || { /* my_ui */ },
-    ///     |_app| { /* register_pipelines */ },
-    ///     config,
-    /// )?;
+    /// Renderer::run_with_config(|| { /* my_ui */ }, vec![Box::new(DemoModule)], config)?;
     /// # Ok(())
     /// # }
     /// ```
-    #[tracing::instrument(level = "info", skip(entry_point, register_pipelines_fn))]
+    #[tracing::instrument(level = "info", skip(entry_point, modules))]
     #[cfg(not(any(target_os = "android")))]
     pub fn run_with_config(
         entry_point: F,
-        register_pipelines_fn: R,
+        modules: Vec<Box<dyn RenderModule>>,
         config: TesseraConfig,
     ) -> Result<(), EventLoopError> {
         let event_loop = EventLoop::<AccessKitEvent>::with_user_event().build()?;
@@ -378,12 +373,14 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
             entry_point,
             cursor_state,
             keyboard_state,
-            register_pipelines_fn,
+            modules,
+            middlewares: Vec::new(),
             plugins: PluginHost::new(),
             ime_state,
             config,
             clipboard,
-            previous_commands: Vec::new(),
+            previous_ops: Vec::new(),
+            previous_resources: Vec::new(),
             accessibility_adapter: None,
             event_loop_proxy: Some(event_loop_proxy),
             frame_index: 0,
@@ -401,7 +398,8 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// # Parameters
     ///
     /// - `entry_point`: A function that defines your UI
-    /// - `register_pipelines_fn`: A function that registers rendering pipelines
+    /// - `modules`: Render modules that register pipelines and provide
+    ///   middleware
     /// - `android_app`: The Android application context
     ///
     /// # Returns
@@ -416,26 +414,27 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// use winit::platform::android::activity::AndroidApp;
     ///
     /// fn my_ui() {}
-    /// fn register_pipelines(_: &mut tessera_ui::renderer::WgpuApp) {}
+    ///
+    /// #[derive(Debug)]
+    /// struct DemoModule;
+    ///
+    /// impl tessera_ui::RenderModule for DemoModule {
+    ///     fn register_pipelines(&self, _context: &mut tessera_ui::PipelineContext<'_>) {}
+    /// }
     ///
     /// #[unsafe(no_mangle)]
     /// fn android_main(android_app: AndroidApp) {
-    ///     Renderer::run(my_ui, register_pipelines, android_app).unwrap();
+    ///     Renderer::run(my_ui, vec![Box::new(DemoModule)], android_app).unwrap();
     /// }
     /// ```
     #[cfg(target_os = "android")]
-    #[tracing::instrument(level = "info", skip(entry_point, register_pipelines_fn, android_app))]
+    #[tracing::instrument(level = "info", skip(entry_point, modules, android_app))]
     pub fn run(
         entry_point: F,
-        register_pipelines_fn: R,
+        modules: Vec<Box<dyn RenderModule>>,
         android_app: AndroidApp,
     ) -> Result<(), EventLoopError> {
-        Self::run_with_config(
-            entry_point,
-            register_pipelines_fn,
-            android_app,
-            Default::default(),
-        )
+        Self::run_with_config(entry_point, modules, android_app, Default::default())
     }
 
     /// Runs the Tessera application with custom configuration on Android.
@@ -446,7 +445,8 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// # Parameters
     ///
     /// - `entry_point`: A function that defines your UI
-    /// - `register_pipelines_fn`: A function that registers rendering pipelines
+    /// - `modules`: Render modules that register pipelines and provide
+    ///   middleware
     /// - `android_app`: The Android application context
     /// - `config`: Custom configuration for the renderer
     ///
@@ -462,7 +462,13 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     /// use winit::platform::android::activity::AndroidApp;
     ///
     /// fn my_ui() {}
-    /// fn register_pipelines(_: &mut tessera_ui::renderer::WgpuApp) {}
+    ///
+    /// #[derive(Debug)]
+    /// struct DemoModule;
+    ///
+    /// impl tessera_ui::RenderModule for DemoModule {
+    ///     fn register_pipelines(&self, _context: &mut tessera_ui::PipelineContext<'_>) {}
+    /// }
     ///
     /// #[unsafe(no_mangle)]
     /// fn android_main(android_app: AndroidApp) {
@@ -470,14 +476,14 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     ///         sample_count: 2, // Lower MSAA for mobile performance
     ///     };
     ///
-    ///     Renderer::run_with_config(my_ui, register_pipelines, android_app, config).unwrap();
+    ///     Renderer::run_with_config(my_ui, vec![Box::new(DemoModule)], android_app, config).unwrap();
     /// }
     /// ```
     #[cfg(target_os = "android")]
-    #[tracing::instrument(level = "info", skip(entry_point, register_pipelines_fn, android_app))]
+    #[tracing::instrument(level = "info", skip(entry_point, modules, android_app))]
     pub fn run_with_config(
         entry_point: F,
-        register_pipelines_fn: R,
+        modules: Vec<Box<dyn RenderModule>>,
         android_app: AndroidApp,
         config: TesseraConfig,
     ) -> Result<(), EventLoopError> {
@@ -498,13 +504,15 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
             entry_point,
             cursor_state,
             keyboard_state,
-            register_pipelines_fn,
+            modules,
+            middlewares: Vec::new(),
             plugins: PluginHost::new(),
             ime_state,
             android_ime_opened: false,
             config,
             clipboard,
-            previous_commands: Vec::new(),
+            previous_ops: Vec::new(),
+            previous_resources: Vec::new(),
             accessibility_adapter: None,
             event_loop_proxy: Some(event_loop_proxy),
             frame_index: 0,
@@ -523,13 +531,24 @@ struct RenderFrameArgs<'a> {
     pub ime_state: &'a mut ImeState,
     #[cfg(target_os = "android")]
     pub android_ime_opened: &'a mut bool,
-    pub app: &'a mut WgpuApp,
+    pub app: &'a mut RenderCore,
     #[cfg(target_os = "android")]
     pub event_loop: &'a ActiveEventLoop,
     pub clipboard: &'a mut Clipboard,
 }
 
-impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
+struct RenderFrameContext<'a, F: Fn()> {
+    entry_point: &'a F,
+    args: &'a mut RenderFrameArgs<'a>,
+    previous_ops: &'a mut Vec<RenderGraphOp>,
+    previous_resources: &'a mut Vec<RenderResource>,
+    middlewares: &'a mut Vec<Box<dyn RenderMiddleware>>,
+    accessibility_enabled: bool,
+    window_label: &'a str,
+    frame_idx: u64,
+}
+
+impl<F: Fn()> Renderer<F> {
     fn should_set_cursor_pos(
         cursor_position: Option<crate::PxPosition>,
         window_width: f64,
@@ -641,9 +660,9 @@ Fps: {:.2}
         let ime_events = args.ime_state.take_events();
 
         // Clear any existing compute resources
-        args.app.resource_manager.write().clear();
+        args.app.compute_resource_manager().write().clear();
 
-        let (commands, window_requests) = TesseraRuntime::with_mut(|rt| {
+        let (graph, window_requests) = TesseraRuntime::with_mut(|rt| {
             let frame_trace = rt.take_frame_trace();
             let layout_cache = &mut rt.layout_cache;
             let component_tree = &mut rt.component_tree;
@@ -654,8 +673,8 @@ Fps: {:.2}
                 keyboard_events,
                 ime_events,
                 modifiers: args.keyboard_state.modifiers(),
-                compute_resource_manager: args.app.resource_manager.clone(),
-                gpu: &args.app.gpu,
+                compute_resource_manager: args.app.compute_resource_manager(),
+                gpu: args.app.device(),
                 clipboard: args.clipboard,
                 layout_cache,
                 frame_trace,
@@ -664,15 +683,31 @@ Fps: {:.2}
 
         let draw_cost = draw_timer.elapsed();
         debug!("Draw commands computed in {draw_cost:?}");
-        (commands, window_requests, draw_cost)
+        (graph, window_requests, draw_cost)
+    }
+
+    fn apply_middlewares(
+        scene: RenderGraph,
+        context: RenderMiddlewareContext,
+        middlewares: &mut [Box<dyn RenderMiddleware>],
+    ) -> RenderGraph {
+        if middlewares.is_empty() {
+            return scene;
+        }
+
+        let mut scene = scene;
+        for middleware in middlewares.iter_mut() {
+            scene = middleware.process(scene, &context);
+        }
+        scene
     }
 
     /// Perform the actual GPU rendering for the provided commands and return
     /// the render duration.
-    #[instrument(level = "debug", skip(args, commands))]
+    #[instrument(level = "debug", skip(args, execution))]
     fn perform_render<'a>(
         args: &mut RenderFrameArgs<'a>,
-        commands: impl IntoIterator<Item = RenderCommand>,
+        execution: RenderGraphExecution,
     ) -> std::time::Duration {
         #[cfg(feature = "profiling")]
         let _profiler_guard =
@@ -681,12 +716,12 @@ Fps: {:.2}
 
         // skip actual rendering if window is minimized
         if TesseraRuntime::with(|rt| rt.window_minimized) {
-            args.app.window.request_redraw();
+            args.app.window().request_redraw();
             return render_timer.elapsed();
         }
 
         debug!("Rendering draw commands...");
-        if let Err(e) = args.app.render(commands) {
+        if let Err(e) = args.app.render(execution) {
             match e {
                 wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
                     debug!("Surface outdated/lost, resizing...");
@@ -707,15 +742,18 @@ Fps: {:.2}
         render_cost
     }
 
-    #[instrument(level = "debug", skip(entry_point, args, previous_commands))]
-    fn execute_render_frame(
-        entry_point: &F,
-        args: &mut RenderFrameArgs<'_>,
-        previous_commands: &mut Vec<RenderCommand>,
-        accessibility_enabled: bool,
-        window_label: &str,
-        frame_idx: u64,
-    ) -> Option<TreeUpdate> {
+    #[instrument(level = "debug", skip(context))]
+    fn execute_render_frame(context: RenderFrameContext<'_, F>) -> Option<TreeUpdate> {
+        let RenderFrameContext {
+            entry_point,
+            args,
+            previous_ops,
+            previous_resources,
+            middlewares,
+            accessibility_enabled,
+            window_label,
+            frame_idx,
+        } = context;
         #[cfg(feature = "profiling")]
         let frame_timer = std::time::Instant::now();
         #[cfg(feature = "profiling")]
@@ -723,37 +761,48 @@ Fps: {:.2}
         // notify the windowing system before rendering
         // this will help winit to properly schedule and make assumptions about its
         // internal state
-        args.app.window.pre_present_notify();
+        args.app.window().pre_present_notify();
         // and tell runtime the new size
         TesseraRuntime::with_mut(|rt: &mut TesseraRuntime| rt.window_size = args.app.size().into());
-        // Clear any registered callbacks
-        TesseraRuntime::with_mut(|rt| rt.clear_frame_callbacks());
-
         // Build the component tree and measure time
         let build_tree_cost = Self::build_component_tree(entry_point);
 
         // Compute draw commands
         let screen_size: PxSize = args.app.size().into();
-        let (new_commands, window_requests, draw_cost) =
+        let (new_graph, window_requests, draw_cost) =
             Self::compute_draw_commands(args, screen_size, frame_idx);
+        let new_graph = Self::apply_middlewares(
+            new_graph,
+            RenderMiddlewareContext {
+                frame_size: screen_size,
+                surface_format: args.app.surface_config().format,
+                sample_count: args.app.sample_count(),
+            },
+            middlewares,
+        );
+        let RenderGraphExecution { ops, resources } = new_graph.into_execution();
+        let new_ops = ops;
+        let new_resources = resources;
 
         #[cfg(feature = "profiling")]
         let mut render_duration_ns: Option<u128> = None;
         // Dirty Rectangle Detection
         let mut dirty = false;
-        if args.resized || new_commands.len() != previous_commands.len() {
+        if args.resized
+            || new_ops.len() != previous_ops.len()
+            || new_resources.len() != previous_resources.len()
+        {
             dirty = true;
         } else {
-            for (new_cmd_tuple, old_cmd_tuple) in new_commands.iter().zip(previous_commands.iter())
-            {
-                let RenderCommand {
+            for (new_cmd_tuple, old_cmd_tuple) in new_ops.iter().zip(previous_ops.iter()) {
+                let RenderGraphOp {
                     command: new_cmd,
                     size: new_size,
                     position: new_pos,
                     opacity: new_opacity,
                     ..
                 } = new_cmd_tuple;
-                let RenderCommand {
+                let RenderGraphOp {
                     command: old_cmd,
                     size: old_size,
                     position: old_pos,
@@ -784,11 +833,27 @@ Fps: {:.2}
                     break;
                 }
             }
+            if !dirty {
+                for (new_resource, old_resource) in
+                    new_resources.iter().zip(previous_resources.iter())
+                {
+                    if new_resource != old_resource {
+                        dirty = true;
+                        break;
+                    }
+                }
+            }
         }
 
         if dirty {
             // Perform GPU render
-            let render_cost = Self::perform_render(args, new_commands.clone());
+            let render_cost = Self::perform_render(
+                args,
+                RenderGraphExecution {
+                    ops: new_ops.clone(),
+                    resources: new_resources.clone(),
+                },
+            );
             // Log frame statistics
             Self::log_frame_stats(build_tree_cost, draw_cost, render_cost);
             #[cfg(feature = "profiling")]
@@ -850,35 +915,35 @@ Fps: {:.2}
 
         if should_set_cursor {
             args.app
-                .window
+                .window()
                 .set_cursor(winit::window::Cursor::Icon(window_requests.cursor_icon));
         }
 
         if let Some(ime_request) = window_requests.ime_request {
             #[cfg(not(target_os = "android"))]
-            args.app.window.set_ime_allowed(true);
+            args.app.window().set_ime_allowed(true);
             #[cfg(target_os = "android")]
             {
                 if !*args.android_ime_opened {
-                    args.app.window.set_ime_allowed(true);
+                    args.app.window().set_ime_allowed(true);
                     show_soft_input(true, args.event_loop.android_app());
                     *args.android_ime_opened = true;
                 }
             }
             if let Some(position) = ime_request.position {
                 args.app
-                    .window
+                    .window()
                     .set_ime_cursor_area::<PxPosition, PxSize>(position, ime_request.size);
             } else {
                 warn!("IME request missing position; skipping IME cursor area update");
             }
         } else {
             #[cfg(not(target_os = "android"))]
-            args.app.window.set_ime_allowed(false);
+            args.app.window().set_ime_allowed(false);
             #[cfg(target_os = "android")]
             {
                 if *args.android_ime_opened {
-                    args.app.window.set_ime_allowed(false);
+                    args.app.window().set_ime_allowed(false);
                     hide_soft_input(args.event_loop.android_app());
                     *args.android_ime_opened = false;
                 }
@@ -894,23 +959,24 @@ Fps: {:.2}
         crate::modifier::clear_modifiers();
 
         // Store the commands for the next frame's comparison
-        *previous_commands = new_commands;
+        *previous_ops = new_ops;
+        *previous_resources = new_resources;
 
         // Currently we render every frame, but with dirty checking, this could be
         // conditional. For now, we still request a redraw to keep the event
         // loop spinning for animations.
-        args.app.window.request_redraw();
+        args.app.window().request_redraw();
 
         accessibility_update
     }
 }
 
-impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
+impl<F: Fn()> Renderer<F> {
     #[cfg(target_os = "android")]
     fn plugin_context(&self, event_loop: &ActiveEventLoop) -> Option<PluginContext> {
         let app = self.app.as_ref()?;
         Some(PluginContext::new(
-            app.window.clone(),
+            app.window_arc(),
             event_loop.android_app().clone(),
         ))
     }
@@ -918,7 +984,7 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
     #[cfg(not(target_os = "android"))]
     fn plugin_context(&self, _event_loop: &ActiveEventLoop) -> Option<PluginContext> {
         let app = self.app.as_ref()?;
-        Some(PluginContext::new(app.window.clone()))
+        Some(PluginContext::new(app.window_arc()))
     }
 
     // These keep behavior identical but reduce per-function complexity.
@@ -926,7 +992,6 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
         if let Some(context) = self.plugin_context(event_loop) {
             self.plugins.shutdown(&context);
         }
-        TesseraRuntime::with(|rt| rt.trigger_close_callbacks());
         if let Some(ref app) = self.app
             && let Err(e) = app.save_pipeline_cache()
         {
@@ -944,19 +1009,15 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
         };
 
         if size.width == 0 || size.height == 0 {
-            // Window minimize handling & callback API
             TesseraRuntime::with_mut(|rt| {
                 if !rt.window_minimized {
                     rt.window_minimized = true;
-                    rt.trigger_minimize_callbacks(true);
                 }
             });
         } else {
-            // Window (un)minimize handling & callback API
             TesseraRuntime::with_mut(|rt| {
                 if rt.window_minimized {
                     rt.window_minimized = false;
-                    rt.trigger_minimize_callbacks(false);
                 }
             });
             app.resize(size);
@@ -1087,14 +1148,16 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
             event_loop,
             clipboard: &mut self.clipboard,
         };
-        let accessibility_update = Self::execute_render_frame(
-            &self.entry_point,
-            &mut args,
-            &mut self.previous_commands,
-            self.accessibility_adapter.is_some(),
-            &self.config.window_title,
-            self.frame_index,
-        );
+        let accessibility_update = Self::execute_render_frame(RenderFrameContext {
+            entry_point: &self.entry_point,
+            args: &mut args,
+            previous_ops: &mut self.previous_ops,
+            previous_resources: &mut self.previous_resources,
+            middlewares: &mut self.middlewares,
+            accessibility_enabled: self.accessibility_adapter.is_some(),
+            window_label: &self.config.window_title,
+            frame_idx: self.frame_index,
+        });
 
         self.frame_index = self.frame_index.wrapping_add(1);
 
@@ -1111,9 +1174,7 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> Renderer<F, R> {
 /// including window creation, suspension/resumption, and various window events.
 /// It bridges the gap between winit's event system and Tessera's
 /// component-based UI framework.
-impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> ApplicationHandler<AccessKitEvent>
-    for Renderer<F, R>
-{
+impl<F: Fn()> ApplicationHandler<AccessKitEvent> for Renderer<F> {
     /// Called when the application is resumed or started.
     ///
     /// This method is responsible for:
@@ -1135,9 +1196,9 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> ApplicationHandler<AccessKi
     ///
     /// ## Pipeline Registration
     ///
-    /// After WGPU initialization, the `register_pipelines_fn` is called to set
-    /// up all rendering pipelines. This typically includes basic component
-    /// pipelines and any custom shaders your application requires.
+    /// After WGPU initialization, render modules register pipelines through
+    /// [`PipelineContext`]. This typically includes basic component pipelines
+    /// and any custom shaders your application requires.
     #[tracing::instrument(level = "debug", skip(self, event_loop))]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Just return if the app is already created
@@ -1168,15 +1229,22 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> ApplicationHandler<AccessKi
         // Now show the window after AccessKit is initialized
         window.set_visible(true);
 
-        let register_pipelines_fn = self.register_pipelines_fn.clone();
-
-        let mut wgpu_app =
-            pollster::block_on(WgpuApp::new(window.clone(), self.config.sample_count));
+        let mut render_core =
+            pollster::block_on(RenderCore::new(window.clone(), self.config.sample_count));
 
         // Register pipelines
-        wgpu_app.register_pipelines(register_pipelines_fn);
+        let mut context = PipelineContext::new(&mut render_core);
+        for module in &self.modules {
+            module.register_pipelines(&mut context);
+        }
 
-        self.app = Some(wgpu_app);
+        self.middlewares = self
+            .modules
+            .iter()
+            .flat_map(|module| module.create_middlewares())
+            .collect();
+
+        self.app = Some(render_core);
 
         #[cfg(target_os = "android")]
         {
@@ -1211,16 +1279,18 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> ApplicationHandler<AccessKi
         }
 
         if let Some(app) = self.app.take() {
-            app.resource_manager.write().clear();
+            app.compute_resource_manager().write().clear();
         }
 
         // Clean up AccessKit adapter
         self.accessibility_adapter = None;
 
-        self.previous_commands.clear();
+        self.previous_ops = Vec::new();
+        self.previous_resources = Vec::new();
         self.cursor_state = CursorState::default();
         self.keyboard_state = KeyboardState::default();
         self.ime_state = ImeState::default();
+        self.middlewares.clear();
 
         #[cfg(target_os = "android")]
         {
@@ -1288,7 +1358,7 @@ impl<F: Fn(), R: Fn(&mut WgpuApp) + Clone + 'static> ApplicationHandler<AccessKi
 
         // Forward event to AccessKit adapter
         if let (Some(adapter), Some(app)) = (&mut self.accessibility_adapter, &self.app) {
-            adapter.process_event(&app.window, &event);
+            adapter.process_event(app.window(), &event);
         }
 
         // Handle window events

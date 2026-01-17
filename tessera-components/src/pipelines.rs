@@ -12,6 +12,7 @@ pub(crate) mod image_vector;
 pub(crate) mod mean;
 pub(crate) mod pos_misc;
 pub(crate) mod progress_arc;
+pub(crate) mod shadow;
 pub(crate) mod shape;
 pub(crate) mod simple_rect;
 pub(crate) mod text;
@@ -20,7 +21,7 @@ mod compute;
 mod draw;
 
 /// Register all draw and compute pipelines required by this crate.
-pub fn register_pipelines(app: &mut tessera_ui::renderer::WgpuApp) {
-    draw::register(app);
-    compute::register(app);
+pub fn register_pipelines(context: &mut tessera_ui::PipelineContext<'_>) {
+    draw::register(context);
+    compute::register(context);
 }
