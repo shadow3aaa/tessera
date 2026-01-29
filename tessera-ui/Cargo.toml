@@ -24,13 +24,15 @@ wgpu = "28.0.0"
 indextree = "4.7.4"
 rayon = "1.11.0"
 dashmap = "6.1.0"
-uuid = { version = "1.19.0", features = ["v4"] }
+uuid = { version = "1.20.0", features = ["v4"] }
 tessera-macros = { path = "../tessera-macros" }
 tessera-shard = { path = "../tessera-shard", optional = true }
 petgraph = "0.8.3"
 accesskit = "0.23.0"
 accesskit_winit = "0.31.1"
 smallvec = "1.15.1"
+downcast-rs = "2.0.2"
+dyn-clone = "1.0.20"
 dirs = "6.0.0"
 im = "15.1.0"
 serde = { version = "1.0.228", features = ["derive"], optional = true }

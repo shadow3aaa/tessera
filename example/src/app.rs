@@ -3,7 +3,7 @@ use std::sync::Arc;
 use closure::closure;
 use tessera_components::{
     alignment::CrossAxisAlignment,
-    app_bar::{AppBarArgs, TopAppBarArgs, top_app_bar as material_top_app_bar},
+    app_bar::{AppBarArgs, AppBarDefaults, TopAppBarArgs, top_app_bar as material_top_app_bar},
     bottom_sheet::{
         BottomSheetController, BottomSheetProviderArgs, BottomSheetStyle,
         bottom_sheet_provider_with_controller,
@@ -24,9 +24,11 @@ use tessera_components::{
         NavigationRailController, NavigationRailItem, navigation_rail_with_controller,
     },
     row::{RowArgs, row},
+    scaffold::{ScaffoldArgs, scaffold},
+    search::{SearchBarArgs, SearchBarController, docked_search_bar_with_controller},
     shape_def::Shape,
-    side_bar::{
-        SideBarController, SideBarProviderArgs, SideBarStyle, side_bar_provider_with_controller,
+    side_sheet::{
+        SideSheetController, SideSheetProviderArgs, modal_side_sheet_provider_with_controller,
     },
     spacer::spacer,
     surface::{SurfaceArgs, SurfaceStyle, surface},
@@ -58,14 +60,18 @@ use crate::example_components::{
     layouts::LayoutsShowcaseDestination,
     lazy_grids::LazyGridsShowcaseDestination,
     lazy_lists::LazyListsShowcaseDestination,
+    list_item::ListItemShowcaseDestination,
     menus::MenusShowcaseDestination,
     pager::PagerShowcaseDestination,
     progress::ProgressShowcaseDestination,
     progress_indicator::ProgressIndicatorShowcaseDestination,
     pull_refresh::PullRefreshShowcaseDestination,
     radio_button::RadioButtonShowcaseDestination,
+    segmented_buttons::SegmentedButtonsShowcaseDestination,
     slider::SliderShowcaseDestination,
+    snackbar::SnackbarShowcaseDestination,
     spacer::SpacerShowcaseDestination,
+    split_buttons::SplitButtonsShowcaseDestination,
     staggered_grids::StaggeredGridsShowcaseDestination,
     surface::SurfaceShowcaseDestination,
     switch::SwitchShowcaseDestination,
@@ -97,18 +103,17 @@ pub fn app() {
 
 #[tessera]
 fn app_inner() {
-    let side_bar_controller = remember(SideBarController::default);
+    let side_sheet_controller = remember(SideSheetController::default);
     let bottom_sheet_controller = remember(BottomSheetController::default);
     let dialog_controller = remember(DialogController::default);
     let navigation_width = remember(|| Dp::ZERO);
     let navigation_rail_controller = remember(|| NavigationRailController::new(0));
 
-    side_bar_provider_with_controller(
-        SideBarProviderArgs::new(move || {
-            side_bar_controller.with_mut(|c| c.close());
-        })
-        .style(SideBarStyle::Glass),
-        side_bar_controller,
+    modal_side_sheet_provider_with_controller(
+        SideSheetProviderArgs::new(move || {
+            side_sheet_controller.with_mut(|c| c.close());
+        }),
+        side_sheet_controller,
         move || {
             bottom_sheet_provider_with_controller(
                 BottomSheetProviderArgs::new(move || {
@@ -144,7 +149,7 @@ fn app_inner() {
                                                     Router::with_mut(|router| {
                                                         router.reset_with(HomeDestination {
                                                             bottom_sheet_controller,
-                                                            side_bar_controller,
+                                                            side_sheet_controller,
                                                             dialog_controller,
                                                         });
                                                     });
@@ -212,22 +217,18 @@ fn app_inner() {
 
                                             row_scope.child_weighted(
                                                 move || {
-                                                    column(
-                                                        ColumnArgs::default().modifier(
-                                                            Modifier::new().fill_max_size(),
-                                                        ),
-                                                        |scope| {
-                                                            scope.child(top_app_bar);
-                                                            scope.child_weighted(
-                                                                move || {
-                                                                    router_root(HomeDestination {
-                                                                        bottom_sheet_controller,
-                                                                        side_bar_controller,
-                                                                        dialog_controller,
-                                                                    });
-                                                                },
-                                                                1.0,
-                                                            );
+                                                    scaffold(
+                                                        ScaffoldArgs::default()
+                                                            .top_bar_height(
+                                                                AppBarDefaults::TOP_APP_BAR_HEIGHT,
+                                                            )
+                                                            .top_bar(top_app_bar),
+                                                        move || {
+                                                            router_root(HomeDestination {
+                                                                bottom_sheet_controller,
+                                                                side_sheet_controller,
+                                                                dialog_controller,
+                                                            });
                                                         },
                                                     );
                                                 },
@@ -237,14 +238,22 @@ fn app_inner() {
                                     );
                                 } else {
                                     column(ColumnArgs::default(), |scope| {
-                                        scope.child(top_app_bar);
                                         scope.child_weighted(
                                             move || {
-                                                router_root(HomeDestination {
-                                                    bottom_sheet_controller,
-                                                    side_bar_controller,
-                                                    dialog_controller,
-                                                });
+                                                scaffold(
+                                                    ScaffoldArgs::default()
+                                                        .top_bar_height(
+                                                            AppBarDefaults::TOP_APP_BAR_HEIGHT,
+                                                        )
+                                                        .top_bar(top_app_bar),
+                                                    move || {
+                                                        router_root(HomeDestination {
+                                                            bottom_sheet_controller,
+                                                            side_sheet_controller,
+                                                            dialog_controller,
+                                                        });
+                                                    },
+                                                );
                                             },
                                             1.0,
                                         );
@@ -258,7 +267,7 @@ fn app_inner() {
                                                 Router::with_mut(|router| {
                                                     router.reset_with(HomeDestination {
                                                         bottom_sheet_controller,
-                                                        side_bar_controller,
+                                                        side_sheet_controller,
                                                         dialog_controller,
                                                     });
                                                 });
@@ -340,9 +349,9 @@ fn app_inner() {
         },
         || {
             text(
-                r#"Hi, I'm side bar!
+                r#"Hi, I'm a side sheet!
 
-Side bars are bars at side, side at bars, bars side at, at side bars..."#,
+Side sheets provide secondary content or tools that slide in from the screen edge."#,
             );
         },
     );
@@ -369,9 +378,11 @@ impl ComponentExampleDesc {
 #[shard]
 fn home(
     bottom_sheet_controller: State<BottomSheetController>,
-    side_bar_controller: State<SideBarController>,
+    side_sheet_controller: State<SideSheetController>,
     dialog_controller: State<DialogController>,
 ) {
+    let search_query = remember(String::new);
+    let search_controller = remember(SearchBarController::default);
     let examples = Arc::new(vec![
         ComponentExampleDesc::new(
             "Text Input",
@@ -425,6 +436,24 @@ fn home(
             || {
                 Router::with_mut(|router| {
                     router.push(ChipShowcaseDestination {});
+                });
+            },
+        ),
+        ComponentExampleDesc::new(
+            "List Item",
+            "Material 3 list rows with leading, supporting, and trailing content.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(ListItemShowcaseDestination {});
+                });
+            },
+        ),
+        ComponentExampleDesc::new(
+            "Snackbar",
+            "Transient messages with optional actions and dismiss controls.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(SnackbarShowcaseDestination {});
                 });
             },
         ),
@@ -577,11 +606,29 @@ fn home(
             },
         ),
         ComponentExampleDesc::new(
-            "Button Group",
-            "Material 3 segmented buttons supporting single or multiple selection.",
+            "Button Groups",
+            "Grouped buttons for related actions with shared spacing and styling.",
             || {
                 Router::with_mut(|router| {
                     router.push(ButtonGroupShowcaseDestination {});
+                });
+            },
+        ),
+        ComponentExampleDesc::new(
+            "Segmented Buttons",
+            "Connected buttons for single or multi-select options.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(SegmentedButtonsShowcaseDestination {});
+                });
+            },
+        ),
+        ComponentExampleDesc::new(
+            "Split Buttons",
+            "Primary and secondary actions combined into a split button.",
+            || {
+                Router::with_mut(|router| {
+                    router.push(SplitButtonsShowcaseDestination {});
                 });
             },
         ),
@@ -665,10 +712,10 @@ fn home(
             },
         ),
         ComponentExampleDesc::new(
-            "Side Bar",
-            "side bar displays content sliding in from the left side of the screen.",
+            "Side Sheet",
+            "Side sheets display supporting content sliding in from the screen edge.",
             move || {
-                side_bar_controller.with_mut(|c| c.open());
+                side_sheet_controller.with_mut(|c| c.open());
             },
         ),
     ]);
@@ -676,7 +723,23 @@ fn home(
     surface(
         SurfaceArgs::default().modifier(Modifier::new().fill_max_size()),
         move || {
-            let controller = retain(LazyListController::new);
+            let list_controller = retain(LazyListController::new);
+            let query = search_query.get();
+            let query = query.trim().to_lowercase();
+            let filtered: Vec<ComponentExampleDesc> = if query.is_empty() {
+                examples.iter().cloned().collect()
+            } else {
+                examples
+                    .iter()
+                    .filter(|&example| {
+                        let title = example.title.to_lowercase();
+                        let description = example.desription.to_lowercase();
+                        title.contains(&query) || description.contains(&query)
+                    })
+                    .cloned()
+                    .collect()
+            };
+
             lazy_column_with_controller(
                 LazyColumnArgs::default()
                     .modifier(Modifier::new().fill_max_size())
@@ -685,9 +748,31 @@ fn home(
                     .cross_axis_alignment(CrossAxisAlignment::Stretch)
                     .estimated_item_size(Dp(140.0))
                     .content_padding(Dp(16.0)),
-                controller,
+                list_controller,
                 move |scope| {
-                    scope.items_from_iter(examples.iter().cloned(), move |_, example| {
+                    scope.sticky_header(move || {
+                        let search_query = search_query;
+                        let controller = search_controller;
+                        let args = SearchBarArgs::default()
+                            .modifier(Modifier::new().fill_max_width())
+                            .placeholder("Search components")
+                            .leading_icon(|| {
+                                icon(IconArgs::from(filled::search_icon()));
+                            })
+                            .on_query_change(move |text| {
+                                search_query.set(text.clone());
+                                text
+                            })
+                            .on_active_change(move |is_active| {
+                                if is_active {
+                                    controller.with_mut(|c| c.close());
+                                }
+                            });
+
+                        docked_search_bar_with_controller(args, controller, || {});
+                    });
+
+                    scope.items_from_iter(filtered, move |_, example| {
                         let on_click = example.on_click.clone();
                         let title = example.title.clone();
                         let description = example.desription.clone();

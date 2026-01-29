@@ -82,6 +82,7 @@ pub mod interaction_state;
 pub mod lazy_grid;
 pub mod lazy_list;
 pub mod lazy_staggered_grid;
+pub mod list_item;
 pub mod material_icons;
 pub mod menus;
 pub mod modifier;
@@ -96,13 +97,18 @@ pub mod pull_refresh;
 pub mod radio_button;
 pub mod ripple_state;
 pub mod row;
+pub mod scaffold;
 pub mod scrollable;
+pub mod search;
+pub mod segmented_buttons;
 mod selection_highlight_rect;
 pub mod shadow;
 pub mod shape_def;
-pub mod side_bar;
+pub mod side_sheet;
 pub mod slider;
+pub mod snackbar;
 pub mod spacer;
+pub mod split_buttons;
 pub mod surface;
 pub mod switch;
 pub mod tabs;
@@ -114,7 +120,7 @@ pub mod theme;
 pub mod time_picker;
 
 use tessera_platform::PlatformPackage;
-use tessera_ui::{EntryRegistry, PipelineContext, RenderMiddleware, RenderModule, TesseraPackage};
+use tessera_ui::{EntryRegistry, PipelineContext, RenderModule, TesseraPackage};
 
 pub use pipelines::shape::command::RippleProps;
 pub use ripple_state::RippleState;
@@ -126,12 +132,6 @@ struct TesseraComponents;
 impl RenderModule for TesseraComponents {
     fn register_pipelines(&self, context: &mut PipelineContext<'_>) {
         pipelines::register_pipelines(context);
-    }
-
-    fn create_middlewares(&self) -> Vec<Box<dyn RenderMiddleware>> {
-        vec![Box::new(
-            pipelines::shadow::atlas::ShadowAtlasMiddleware::new(),
-        )]
     }
 }
 

@@ -25,11 +25,19 @@
   - [x] Appbar/TopAppBar
   - [x] FloatingActionButton
   - [x] Chip
-  - [ ] ListItem
+  - [x] ListItem
   - [x] NavigationRail
-  - [ ] Snackbar/SnackbarHost
+  - [x] Snackbar/SnackbarHost
   - [ ] ExposedDropdownMenu
   - [x] Date/Time pickers/dialogs
+  - [x] Segmented buttons
+  - [x] Split buttons
+  - [ ] FAB menu
+  - [ ] Extanded FABs
+  - [ ] Loading indicators (A replacement for indeterminate circular progress indicators when no progress value is needed)
+  - [x] Side sheets
+  - [x] Search
+  - [ ] Tooltips
 - [ ] Documentation of pluggable graphics rendering pipelines
 - [x] CLI tool (`cargo-tessera`):
   - [x] Project scaffolding (`cargo tessera new`)
