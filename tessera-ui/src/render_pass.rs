@@ -1,14 +1,10 @@
-//! Render pass planning for Tessera frames.
-//!
-//! ## Usage
-//!
-//! Build render pass plans from ordered render graph ops.
+//! Render pass planning
 
 use smallvec::SmallVec;
 
 use crate::{
     Command, ComputeCommand, DrawCommand, DrawRegion, Px, PxPosition, PxRect, PxSize, SampleRegion,
-    render_graph::{RenderGraphOp, RenderResource, RenderResourceId},
+    render_graph::{ExternalTextureDesc, RenderGraphOp, RenderResource, RenderResourceId},
 };
 
 /// A pass planning result for the current frame.
@@ -21,6 +17,7 @@ impl RenderPassGraph {
     pub(crate) fn build(
         ops: Vec<RenderGraphOp>,
         resources: &[RenderResource],
+        external_resources: &[ExternalTextureDesc],
         texture_size: wgpu::Extent3d,
     ) -> Self {
         let mut passes = Vec::new();
@@ -49,9 +46,16 @@ impl RenderPassGraph {
                             .is_some()
                             .then_some(RenderResourceId::SceneColor)
                     });
-                    let target_extent = resource_extent(write_resource, resources, texture_size);
+                    let target_extent = resource_extent(
+                        write_resource,
+                        resources,
+                        external_resources,
+                        texture_size,
+                    );
                     let read_extent = read_resource
-                        .map(|resource| resource_extent(resource, resources, texture_size))
+                        .map(|resource| {
+                            resource_extent(resource, resources, external_resources, texture_size)
+                        })
                         .unwrap_or(target_extent);
                     let needs_flush = draw_builder.ensure_resources(read_resource, write_resource);
                     if needs_flush {
@@ -94,8 +98,14 @@ impl RenderPassGraph {
                     flush_draw_pass(&mut passes, &mut draw_builder);
 
                     let read_resource = read_resource.unwrap_or(RenderResourceId::SceneColor);
-                    let read_extent = resource_extent(read_resource, resources, texture_size);
-                    let write_extent = resource_extent(write_resource, resources, texture_size);
+                    let read_extent =
+                        resource_extent(read_resource, resources, external_resources, texture_size);
+                    let write_extent = resource_extent(
+                        write_resource,
+                        resources,
+                        external_resources,
+                        texture_size,
+                    );
                     let needs_flush =
                         compute_builder.ensure_resources(read_resource, write_resource);
                     if needs_flush {
@@ -145,7 +155,6 @@ pub(crate) struct RenderPassPlan {
     pub(crate) kind: RenderPassKind,
     pub(crate) draws: SmallVec<[DrawOrClip; 32]>,
     pub(crate) compute: Vec<ComputePlanItem>,
-    pub(crate) copy_rect: Option<PxRect>,
     pub(crate) read_resource: Option<RenderResourceId>,
     pub(crate) write_resource: RenderResourceId,
 }
@@ -242,16 +251,10 @@ impl DrawPassBuilder {
             return None;
         }
 
-        let copy_rect = if self.reads_scene {
-            union_rects(&self.sampling_rects)
-        } else {
-            None
-        };
         Some(RenderPassPlan {
             kind: RenderPassKind::Draw,
             draws: std::mem::take(&mut self.draws),
             compute: Vec::new(),
-            copy_rect,
             read_resource: self.reads_scene.then_some(RenderResourceId::SceneColor),
             write_resource: self.write_resource.unwrap_or(RenderResourceId::SceneColor),
         })
@@ -291,7 +294,6 @@ pub(crate) enum ClipOps {
 
 struct ComputePassBuilder {
     items: Vec<ComputePlanItem>,
-    sampling_rects: SmallVec<[PxRect; 16]>,
     read_resource: Option<RenderResourceId>,
     write_resource: Option<RenderResourceId>,
 }
@@ -300,7 +302,6 @@ impl ComputePassBuilder {
     fn new() -> Self {
         Self {
             items: Vec::new(),
-            sampling_rects: SmallVec::new(),
             read_resource: None,
             write_resource: None,
         }
@@ -328,7 +329,6 @@ impl ComputePassBuilder {
     }
 
     fn push_compute(&mut self, item: ComputePlanItem) {
-        self.sampling_rects.push(item.sampling_rect);
         self.items.push(item);
     }
 }
@@ -466,15 +466,6 @@ fn should_start_new_pass(
     }
 }
 
-fn union_rects(rects: &[PxRect]) -> Option<PxRect> {
-    let mut iter = rects.iter().copied();
-    let mut combined = iter.next()?;
-    for rect in iter {
-        combined = combined.union(&rect);
-    }
-    Some(combined)
-}
-
 fn flush_draw_pass(passes: &mut Vec<RenderPassPlan>, builder: &mut DrawPassBuilder) {
     if let Some(pass) = builder.finish() {
         passes.push(pass);
@@ -488,24 +479,15 @@ fn flush_compute_pass(passes: &mut Vec<RenderPassPlan>, builder: &mut ComputePas
     if builder.items.is_empty() {
         return;
     }
-    let copy_rect = if builder.read_resource == builder.write_resource
-        || builder.read_resource == Some(RenderResourceId::SceneColor)
-    {
-        union_rects(&builder.sampling_rects)
-    } else {
-        None
-    };
     passes.push(RenderPassPlan {
         kind: RenderPassKind::Compute,
         draws: SmallVec::new(),
         compute: std::mem::take(&mut builder.items),
-        copy_rect,
         read_resource: builder.read_resource,
         write_resource: builder
             .write_resource
             .unwrap_or(RenderResourceId::SceneColor),
     });
-    builder.sampling_rects.clear();
     builder.read_resource = None;
     builder.write_resource = None;
 }
@@ -513,12 +495,17 @@ fn flush_compute_pass(passes: &mut Vec<RenderPassPlan>, builder: &mut ComputePas
 fn resource_extent(
     id: RenderResourceId,
     resources: &[RenderResource],
+    external_resources: &[ExternalTextureDesc],
     surface_size: wgpu::Extent3d,
 ) -> wgpu::Extent3d {
     match id {
         RenderResourceId::SceneColor | RenderResourceId::SceneDepth => surface_size,
         RenderResourceId::Local(index) => match resources.get(index as usize) {
             Some(RenderResource::Texture(desc)) => extent_from_px(desc.size),
+            None => surface_size,
+        },
+        RenderResourceId::External(index) => match external_resources.get(index as usize) {
+            Some(desc) => extent_from_px(desc.size),
             None => surface_size,
         },
     }

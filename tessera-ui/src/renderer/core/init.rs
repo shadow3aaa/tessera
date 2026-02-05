@@ -10,7 +10,9 @@ use crate::{
     compute::resource::ComputeResourceManager,
     dp::SCALE_FACTOR,
     pipeline_cache::initialize_cache,
-    renderer::{compute::ComputePipelineRegistry, drawer::Drawer},
+    renderer::{
+        compute::ComputePipelineRegistry, drawer::Drawer, external::ExternalTextureRegistry,
+    },
 };
 
 use super::{BlitState, ComputeState, FrameTargets, LocalTexturePool, RenderCore, RenderPipelines};
@@ -95,14 +97,7 @@ impl RenderCore {
     pub(crate) async fn new(window: Arc<Window>, sample_count: u32) -> Self {
         // Looking for adapters
         let instance: wgpu::Instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            /* Currently the renderer's design only supports VULKAN.
-             * Given VULKAN's broad compatibility, this does not affect cross-platform support
-             * for now.
-             *
-             * TODO: Refactor the renderer to support additional backends.
-             */
-            backends: wgpu::Backends::VULKAN,
-            // backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::all(),
             ..Default::default()
         });
         // Create a surface
@@ -130,7 +125,7 @@ impl RenderCore {
         };
         info!("Using present mode: {present_mode:?}");
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: caps.formats[0],
             width: size.width,
             height: size.height,
@@ -149,6 +144,7 @@ impl RenderCore {
 
         // Create Pass Targets (Offscreen and Compute)
         let offscreen_texture = Self::create_pass_target(&device, &config, "Offscreen");
+        let offscreen_copy_texture = Self::create_pass_target(&device, &config, "Offscreen Copy");
         let compute_target_a = Self::create_compute_pass_target(
             &device,
             &config,
@@ -252,6 +248,7 @@ impl RenderCore {
 
         let targets = FrameTargets {
             offscreen: offscreen_texture,
+            offscreen_copy: offscreen_copy_texture,
             msaa_texture,
             msaa_view,
             sample_count,
@@ -285,7 +282,9 @@ impl RenderCore {
             compute,
             blit,
             local_textures: LocalTexturePool::new(),
+            external_textures: ExternalTextureRegistry::new(),
             frame_index: 0,
+            last_render_breakdown: None,
         }
     }
 
@@ -373,10 +372,13 @@ impl RenderCore {
     pub(crate) fn rebuild_pass_targets(&mut self) {
         self.local_textures.clear();
         self.targets.offscreen.texture().destroy();
+        self.targets.offscreen_copy.texture().destroy();
         self.compute.target_a.texture().destroy();
         self.compute.target_b.texture().destroy();
 
         self.targets.offscreen = Self::create_pass_target(&self.device, &self.config, "Offscreen");
+        self.targets.offscreen_copy =
+            Self::create_pass_target(&self.device, &self.config, "Offscreen Copy");
         self.compute.target_a = Self::create_compute_pass_target(
             &self.device,
             &self.config,
@@ -402,12 +404,10 @@ impl RenderCore {
     }
 
     /// Resize the surface if needed.
-    pub(crate) fn resize_if_needed(&mut self) -> bool {
-        let result = self.size_changed;
+    pub(crate) fn resize_if_needed(&mut self) {
         if self.size_changed {
             self.resize_surface();
             self.size_changed = false;
         }
-        result
     }
 }

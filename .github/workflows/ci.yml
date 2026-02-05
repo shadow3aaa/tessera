@@ -57,9 +57,10 @@ jobs:
       - name: Check Android target
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           cargo +stable ndk -t arm64-v8a check -p tessera-ui --verbose
           cargo +stable ndk -t arm64-v8a check -p tessera-components --verbose
           cargo +stable ndk -t arm64-v8a check -p tessera-macros --verbose
           cargo +stable ndk -t arm64-v8a check -p tessera-shard --verbose
-          cargo +stable ndk -t arm64-v8a check -p example --verbose
+          cargo tessera android build --format apk -p example
