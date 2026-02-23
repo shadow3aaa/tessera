@@ -24,6 +24,18 @@ cargo tessera dev
 ```
 `cargo tessera dev` watches `src/`, `Cargo.toml`, and (if present) `build.rs`, then rebuilds and restarts the app whenever changes are saved. Pass `--verbose` to see the underlying `cargo` commands.
 
+Enable profiler output during desktop dev:
+
+```bash
+cargo tessera dev -p example --profiling-output profiles/dev.jsonl
+```
+
+Enable dirty replay overlay during desktop dev:
+
+```bash
+cargo tessera dev -p example --debug-dirty-overlay
+```
+
 ### Build for release
 
 ```bash
@@ -34,6 +46,40 @@ Cross-compile for a specific target:
 
 ```bash
 cargo tessera build --release --target x86_64-pc-windows-msvc
+```
+
+Enable profiler instrumentation in desktop build artifacts:
+
+```bash
+cargo tessera build -p example --profiling-output profiles/build.jsonl
+```
+
+Enable dirty replay overlay in desktop build artifacts:
+
+```bash
+cargo tessera build -p example --debug-dirty-overlay
+```
+
+### Analyze profiler output
+
+```bash
+cargo tessera profiling analyze profiles/dev.jsonl --top 30
+```
+
+Optional CSV export:
+
+```bash
+cargo tessera profiling analyze profiles/dev.jsonl --csv profiles/components.csv
+```
+
+Android pull + analyze in one step:
+
+```bash
+cargo tessera profiling analyze-android \
+  --package com.example.my_app \
+  --device 8cd1353b \
+  --remote-path files/tessera-profiler.jsonl \
+  --pull-to profiles/android.jsonl
 ```
 
 ### Build for Android (experimental)
@@ -55,11 +101,38 @@ cargo tessera android dev --device 8cd1353b
 
 `cargo tessera android dev` requires `--device <device_id>` (list devices with `adb devices`).
 
+Enable profiler data on Android builds by passing a sandbox path:
+
+```bash
+cargo tessera android dev \
+  --device 8cd1353b \
+  --profiling-output files/tessera-profiler.jsonl
+```
+
+Enable dirty replay overlay on Android:
+
+```bash
+cargo tessera android dev \
+  --device 8cd1353b \
+  --debug-dirty-overlay
+```
+
+Then pull and analyze:
+
+```bash
+cargo tessera profiling analyze-android \
+  --package com.example.my_app \
+  --device 8cd1353b \
+  --remote-path files/tessera-profiler.jsonl
+```
+
 ## Commands
 
 - `cargo tessera new <name>` - Create a new Tessera project
 - `cargo tessera dev` - Start development server with automatic rebuild/restart
 - `cargo tessera build` - Build desktop targets
+- `cargo tessera profiling analyze <file>` - Analyze profiler JSONL output
+- `cargo tessera profiling analyze-android` - Pull Android profiler JSONL via adb, then analyze
 - `cargo tessera android <subcommand>` - Android helpers (`build`, `dev`)
 
 ## License

@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command},
     sync::mpsc::channel,
     time::{Duration, Instant},
@@ -12,10 +12,22 @@ use crate::output;
 
 use super::find_package_dir;
 
-pub fn execute(verbose: bool, package: Option<&str>, release: bool) -> Result<()> {
+pub fn execute(
+    verbose: bool,
+    package: Option<&str>,
+    release: bool,
+    profiling_output: Option<&Path>,
+    debug_dirty_overlay: bool,
+) -> Result<()> {
     output::status("Starting", "dev server (auto rebuild/restart)");
     if let Some(pkg) = package {
         output::status("Package", format!("`{}`", pkg));
+    }
+    if let Some(path) = profiling_output {
+        output::status("Profiling", format!("enabled ({})", path.display()));
+    }
+    if debug_dirty_overlay {
+        output::status("Debug Dirty Overlay", "enabled");
     }
     output::status("Watching", "for file changes");
 
@@ -102,6 +114,7 @@ pub fn execute(verbose: bool, package: Option<&str>, release: bool) -> Result<()
             if let Some(pkg) = package {
                 build_cmd.arg("-p").arg(pkg);
             }
+            configure_tessera_ui_features(&mut build_cmd, profiling_output, debug_dirty_overlay);
 
             match build_cmd.spawn() {
                 Ok(c) => {
@@ -131,6 +144,11 @@ pub fn execute(verbose: bool, package: Option<&str>, release: bool) -> Result<()
                         if let Some(pkg) = package {
                             run_cmd.arg("-p").arg(pkg);
                         }
+                        configure_tessera_ui_features(
+                            &mut run_cmd,
+                            profiling_output,
+                            debug_dirty_overlay,
+                        );
 
                         match run_cmd.spawn() {
                             Ok(c) => {
@@ -189,4 +207,24 @@ pub fn execute(verbose: bool, package: Option<&str>, release: bool) -> Result<()
     }
 
     Ok(())
+}
+
+fn configure_tessera_ui_features(
+    cmd: &mut Command,
+    profiling_output: Option<&Path>,
+    debug_dirty_overlay: bool,
+) {
+    let mut features = Vec::new();
+    if profiling_output.is_some() {
+        features.push("tessera-ui/profiling");
+    }
+    if debug_dirty_overlay {
+        features.push("tessera-ui/debug-dirty-overlay");
+    }
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
+    if let Some(output_path) = profiling_output {
+        cmd.env("TESSERA_PROFILING_OUTPUT", output_path);
+    }
 }

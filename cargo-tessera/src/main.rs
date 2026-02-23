@@ -1,4 +1,4 @@
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -55,6 +55,13 @@ enum TesseraCommands {
         /// Enable release mode
         #[arg(short, long)]
         release: bool,
+        /// Enable profiling output and write records to this JSONL file
+        /// (desktop only)
+        #[arg(long, value_name = "FILE")]
+        profiling_output: Option<PathBuf>,
+        /// Overlay dirty replay regions with a translucent debug color
+        #[arg(long)]
+        debug_dirty_overlay: bool,
     },
     /// Build the project for release (native targets)
     Build {
@@ -67,6 +74,18 @@ enum TesseraCommands {
         /// Specify package to build
         #[arg(short, long)]
         package: Option<String>,
+        /// Enable profiling output and write records to this JSONL file
+        /// (desktop only)
+        #[arg(long, value_name = "FILE")]
+        profiling_output: Option<PathBuf>,
+        /// Overlay dirty replay regions with a translucent debug color
+        #[arg(long)]
+        debug_dirty_overlay: bool,
+    },
+    /// Profiling utilities
+    Profiling {
+        #[command(subcommand)]
+        command: ProfilingCommands,
     },
     /// Android-specific helpers (build/dev)
     Android {
@@ -108,6 +127,54 @@ enum PluginCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum ProfilingCommands {
+    /// Analyze profiler JSONL output
+    Analyze {
+        /// Path to tessera profiler JSONL output file
+        path: PathBuf,
+        /// Show top N component entries per section
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        /// Minimum sample count per component to include in top lists
+        #[arg(long, default_value_t = 1)]
+        min_count: u64,
+        /// Skip non-frame JSON lines that fail parsing
+        #[arg(long)]
+        skip_invalid: bool,
+        /// Export full per-component aggregated stats to CSV
+        #[arg(long, value_name = "FILE")]
+        csv: Option<PathBuf>,
+    },
+    /// Pull profiler JSONL from Android via adb and analyze it
+    AnalyzeAndroid {
+        /// Android app package name (applicationId)
+        #[arg(long)]
+        package: String,
+        /// Device id from `adb devices`
+        #[arg(long, short)]
+        device: Option<String>,
+        /// Path inside app sandbox (default: auto-detect common paths)
+        #[arg(long, value_name = "REMOTE_PATH")]
+        remote_path: Option<String>,
+        /// Local output path for pulled JSONL before analysis
+        #[arg(long, value_name = "FILE", default_value = "profiles/android.jsonl")]
+        pull_to: PathBuf,
+        /// Show top N component entries per section
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        /// Minimum sample count per component to include in top lists
+        #[arg(long, default_value_t = 1)]
+        min_count: u64,
+        /// Skip non-frame JSON lines that fail parsing
+        #[arg(long)]
+        skip_invalid: bool,
+        /// Export full per-component aggregated stats to CSV
+        #[arg(long, value_name = "FILE")]
+        csv: Option<PathBuf>,
+    },
+}
+
 #[derive(Args)]
 struct AndroidBuildArgs {
     /// Build in release mode
@@ -122,6 +189,12 @@ struct AndroidBuildArgs {
     /// Override artifact format (apk or aab)
     #[arg(long, short, value_enum)]
     format: Option<AndroidFormat>,
+    /// Enable profiling and write JSONL inside app sandbox at this path
+    #[arg(long, value_name = "REMOTE_PATH")]
+    profiling_output: Option<String>,
+    /// Overlay dirty replay regions with a translucent debug color
+    #[arg(long)]
+    debug_dirty_overlay: bool,
 }
 
 #[derive(Args)]
@@ -138,6 +211,12 @@ struct AndroidDevArgs {
     /// Device id from `adb devices`
     #[arg(long, short)]
     device: Option<String>,
+    /// Enable profiling and write JSONL inside app sandbox at this path
+    #[arg(long, value_name = "REMOTE_PATH")]
+    profiling_output: Option<String>,
+    /// Overlay dirty replay regions with a translucent debug color
+    #[arg(long)]
+    debug_dirty_overlay: bool,
 }
 
 #[derive(Args)]
@@ -150,6 +229,12 @@ struct AndroidRustBuildArgs {
     /// Override package/binary name (-p)
     #[arg(long, short)]
     package: Option<String>,
+    /// Enable profiling and write JSONL inside app sandbox at this path
+    #[arg(long, value_name = "REMOTE_PATH")]
+    profiling_output: Option<String>,
+    /// Overlay dirty replay regions with a translucent debug color
+    #[arg(long)]
+    debug_dirty_overlay: bool,
 }
 
 fn main() -> ExitCode {
@@ -193,16 +278,72 @@ fn run() -> Result<()> {
                 verbose,
                 package,
                 release,
+                profiling_output,
+                debug_dirty_overlay,
             } => {
-                commands::dev::execute(verbose, package.as_deref(), release)?;
+                commands::dev::execute(
+                    verbose,
+                    package.as_deref(),
+                    release,
+                    profiling_output.as_deref(),
+                    debug_dirty_overlay,
+                )?;
             }
             TesseraCommands::Build {
                 release,
                 target,
                 package,
+                profiling_output,
+                debug_dirty_overlay,
             } => {
-                commands::build::execute(release, target.as_deref(), package.as_deref())?;
+                commands::build::execute(
+                    release,
+                    target.as_deref(),
+                    package.as_deref(),
+                    profiling_output.as_deref(),
+                    debug_dirty_overlay,
+                )?;
             }
+            TesseraCommands::Profiling { command } => match command {
+                ProfilingCommands::Analyze {
+                    path,
+                    top,
+                    min_count,
+                    skip_invalid,
+                    csv,
+                } => {
+                    commands::profiling::analyze(
+                        &path,
+                        top,
+                        min_count,
+                        skip_invalid,
+                        csv.as_deref(),
+                    )?;
+                }
+                ProfilingCommands::AnalyzeAndroid {
+                    package,
+                    device,
+                    remote_path,
+                    pull_to,
+                    top,
+                    min_count,
+                    skip_invalid,
+                    csv,
+                } => {
+                    commands::profiling::analyze_android(
+                        commands::profiling::AnalyzeAndroidOptions {
+                            package: &package,
+                            device: device.as_deref(),
+                            remote_path: remote_path.as_deref(),
+                            pull_to: &pull_to,
+                            top,
+                            min_count,
+                            skip_invalid,
+                            csv: csv.as_deref(),
+                        },
+                    )?;
+                }
+            },
             TesseraCommands::Android { command } => match command {
                 AndroidCommands::Init {
                     skip_targets_install,
@@ -215,6 +356,8 @@ fn run() -> Result<()> {
                         arch: build_args.arch.clone(),
                         package: build_args.package.clone(),
                         format: build_args.format,
+                        profiling_output: build_args.profiling_output.clone(),
+                        debug_dirty_overlay: build_args.debug_dirty_overlay,
                     })?;
                 }
                 AndroidCommands::Dev(dev_args) => {
@@ -223,6 +366,8 @@ fn run() -> Result<()> {
                         arch: dev_args.arch.clone(),
                         package: dev_args.package.clone(),
                         device: dev_args.device.clone(),
+                        profiling_output: dev_args.profiling_output.clone(),
+                        debug_dirty_overlay: dev_args.debug_dirty_overlay,
                     })?;
                 }
                 AndroidCommands::RustBuild(build_args) => {
@@ -230,6 +375,8 @@ fn run() -> Result<()> {
                         release: build_args.release,
                         target: build_args.target.clone(),
                         package: build_args.package.clone(),
+                        profiling_output: build_args.profiling_output.clone(),
+                        debug_dirty_overlay: build_args.debug_dirty_overlay,
                     })?;
                 }
             },
