@@ -4,15 +4,12 @@
 //!
 //! Group related content into a single, elevated or outlined container.
 
-use std::sync::Arc;
-
 use tessera_ui::{
-    Callback, Color, Dp, Modifier, Prop, State, current_frame_nanos, receive_frame_nanos, remember,
-    tessera, use_context,
+    Callback, Color, Dp, Modifier, Prop, RenderSlot, State, receive_frame_nanos, remember, tessera,
+    use_context,
 };
 
 use crate::{
-    column::{ColumnArgs, ColumnScope, column},
     modifier::InteractionState,
     shape_def::Shape,
     surface::{SurfaceArgs, SurfaceStyle, surface},
@@ -398,6 +395,9 @@ pub struct CardArgs {
     pub elevation: Option<CardElevation>,
     /// Optional border stroke for the card container.
     pub border: Option<CardBorder>,
+    /// Content rendered inside the card container.
+    #[prop(skip_setter)]
+    pub content: Option<RenderSlot>,
 }
 
 impl CardArgs {
@@ -413,6 +413,21 @@ impl CardArgs {
     /// Set the click handler using a shared callback.
     pub fn on_click_shared(mut self, on_click: impl Into<Callback>) -> Self {
         self.on_click = Some(on_click.into());
+        self
+    }
+
+    /// Set the card content slot.
+    pub fn content<F>(mut self, content: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.content = Some(RenderSlot::new(content));
+        self
+    }
+
+    /// Set the card content slot using a shared slot.
+    pub fn content_shared(mut self, content: impl Into<RenderSlot>) -> Self {
+        self.content = Some(content.into());
         self
     }
 }
@@ -448,6 +463,7 @@ impl Default for CardArgs {
             colors: None,
             elevation: None,
             border: None,
+            content: None,
         }
     }
 }
@@ -465,7 +481,6 @@ impl Default for CardArgs {
 ///
 /// - `args` — configures the card variant, colors, elevation, and interaction;
 ///   see [`CardArgs`].
-/// - `content` — builds the card body as a [`Column`] using a [`ColumnScope`].
 ///
 /// ## Examples
 ///
@@ -479,7 +494,7 @@ impl Default for CardArgs {
 /// #     let args = tessera_components::theme::MaterialThemeProviderArgs::new(
 /// #         || MaterialTheme::default(),
 /// #         || {
-///     card(CardArgs::filled(), |_scope| {});
+///     card(&CardArgs::filled().content(|| {}));
 /// #         },
 /// #     );
 /// #     material_theme(&args);
@@ -487,45 +502,10 @@ impl Default for CardArgs {
 ///
 /// component();
 /// ```
-pub fn card<F>(args: CardArgs, content: F)
-where
-    F: for<'a> Fn(&mut ColumnScope<'a>) + Send + Sync + 'static,
-{
-    let render_args = CardRenderArgs {
-        modifier: args.modifier,
-        on_click: args.on_click,
-        enabled: args.enabled,
-        variant: args.variant,
-        interaction_state: args.interaction_state,
-        shape: args.shape,
-        colors: args.colors,
-        elevation: args.elevation,
-        border: args.border,
-        content: Arc::new(content),
-    };
-    card_node(&render_args);
-}
-
-type CardContentBuilder = dyn for<'a> Fn(&mut ColumnScope<'a>) + Send + Sync;
-
-#[derive(Clone, Prop)]
-struct CardRenderArgs {
-    modifier: Modifier,
-    on_click: Option<Callback>,
-    enabled: bool,
-    variant: CardVariant,
-    interaction_state: Option<State<InteractionState>>,
-    shape: Option<Shape>,
-    colors: Option<CardColors>,
-    elevation: Option<CardElevation>,
-    border: Option<CardBorder>,
-    content: Arc<CardContentBuilder>,
-}
-
 #[tessera]
-fn card_node(args: &CardRenderArgs) {
+pub fn card(args: &CardArgs) {
     let args = args.clone();
-    let content = Arc::clone(&args.content);
+    let content = args.content.unwrap_or_else(|| RenderSlot::new(|| {}));
 
     let shape = args.shape.unwrap_or_else(|| match args.variant {
         CardVariant::Filled => CardDefaults::shape(),
@@ -566,16 +546,25 @@ fn card_node(args: &CardRenderArgs) {
     let elevation_spring = remember(|| CardElevationSpring::new(elevation.default_elevation()));
 
     let enabled = args.enabled;
-    let frame_nanos = current_frame_nanos();
     let target = elevation.target(enabled, interaction_state);
-    let should_schedule_frame = elevation_spring.with_mut(|spring| {
-        spring.set_target(target);
+    let should_update_spring = elevation_spring.with(|spring| {
+        let mut next = spring.clone();
+        next.set_target(target);
         if !enabled {
-            spring.snap_to(target);
+            next.snap_to(target);
         }
-        spring.tick(frame_nanos);
-        spring.is_animating()
+        next != *spring
     });
+    if should_update_spring {
+        elevation_spring.with_mut(|spring| {
+            spring.set_target(target);
+            if !enabled {
+                spring.snap_to(target);
+            }
+        });
+    }
+
+    let should_schedule_frame = elevation_spring.with(|spring| spring.is_animating());
 
     if should_schedule_frame {
         let elevation_spring_for_frame = elevation_spring;
@@ -632,10 +621,7 @@ fn card_node(args: &CardRenderArgs) {
     surface(&crate::surface::SurfaceArgs::with_child(
         surface_args,
         move || {
-            let content = Arc::clone(&content);
-            column(ColumnArgs::default(), move |scope| {
-                (content)(scope);
-            });
+            content.render();
         },
     ));
 }

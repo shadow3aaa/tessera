@@ -280,7 +280,7 @@ impl ScrollableController {
         let diff_y = self.target_position.y.to_f32() - self.child_position.y.to_f32();
 
         // If we're close enough to target, snap to it
-        if diff_x.abs() < 1.0 && diff_y.abs() < 1.0 {
+        if diff_x.abs() <= 1.0 && diff_y.abs() <= 1.0 {
             if self.child_position != self.target_position {
                 self.child_position = self.target_position;
                 return true;
@@ -302,6 +302,13 @@ impl ScrollableController {
             x: Px::saturating_from_f32(self.child_position.x.to_f32() + diff_x * movement_factor),
             y: Px::saturating_from_f32(self.child_position.y.to_f32() + diff_y * movement_factor),
         };
+
+        // If interpolation rounds back to the same pixel, snap to target to
+        // avoid an endless pending-animation loop.
+        if old_position == self.child_position && self.child_position != self.target_position {
+            self.child_position = self.target_position;
+            return true;
+        }
 
         // Return true if position changed significantly
         old_position != self.child_position
@@ -603,13 +610,13 @@ impl LayoutSpec for ScrollableInnerLayout {
         let child_node_id = input.children_ids()[0];
         let child_measurement = input.measure_child(child_node_id, &child_constraint)?;
         let current_child_position = self.child_position;
-        self.controller.with_mut(|c| {
-            if let Some(override_size) = c.override_child_size.take() {
-                c.child_size = override_size;
-            } else {
-                c.child_size = child_measurement;
-            }
-        });
+        let next_child_size = self
+            .controller
+            .with(|c| c.override_child_size.unwrap_or(child_measurement));
+        let needs_child_size_update = self.controller.with(|c| c.child_size != next_child_size);
+        if needs_child_size_update {
+            self.controller.with_mut(|c| c.child_size = next_child_size);
+        }
 
         output.place_child(child_node_id, current_child_position);
 
@@ -624,7 +631,10 @@ impl LayoutSpec for ScrollableInnerLayout {
         }
 
         let computed_data = ComputedData { width, height };
-        self.controller.with_mut(|c| c.visible_size = computed_data);
+        let needs_visible_size_update = self.controller.with(|c| c.visible_size != computed_data);
+        if needs_visible_size_update {
+            self.controller.with_mut(|c| c.visible_size = computed_data);
+        }
         Ok(computed_data)
     }
 
@@ -700,14 +710,14 @@ struct ScrollableInnerArgs {
 ///         ..Default::default()
 ///     }
 ///     .child(|| {
-///         column(ColumnArgs::default(), |scope| {
+///         column(&ColumnArgs::default().children(|scope| {
 ///             for i in 0..20 {
 ///                 let text_content = format!("Item #{}", i + 1);
 ///                 scope.child(move || {
 ///                     text(&TextArgs::default().text(text_content.clone()));
 ///                 });
 ///             }
-///         });
+///         }));
 ///     });
 ///     scrollable(&render_args);
 /// }
@@ -841,52 +851,52 @@ fn scrollable_with_overlay_scrollbar(args: &ScrollableOverlayArgs) {
     let scrollbar_behavior = args.scrollbar_behavior;
 
     boxed(
-        BoxedArgs::default()
+        &BoxedArgs::default()
             .modifier(Modifier::new().fill_max_size())
-            .alignment(Alignment::BottomEnd),
-        move |scope| {
-            scope.child({
-                let child = child.clone();
-                let scrollbar_v_state = controller.with(|c| c.scrollbar_state_v());
-                let scrollbar_h_state = controller.with(|c| c.scrollbar_state_h());
-                let scrollbar_behavior = scrollbar_behavior.clone();
-                move || {
-                    let inner_args = ScrollableInnerArgs {
-                        vertical,
-                        horizontal,
-                        scroll_smoothing,
-                        scrollbar_behavior: scrollbar_behavior.clone(),
-                        controller,
-                        scrollbar_state_v: scrollbar_v_state.clone(),
-                        scrollbar_state_h: scrollbar_h_state.clone(),
-                        child: child.clone(),
-                    };
-                    scrollable_inner(&inner_args);
-                }
-            });
-            scope.child({
-                let scrollbar_args_v = scrollbar_args_v.clone();
-                let scrollbar_v_state = controller.with(|c| c.scrollbar_state_v());
-                move || {
-                    if vertical {
-                        let mut scrollbar_args = scrollbar_args_v.clone();
-                        scrollbar_args.scrollbar_state = Some(scrollbar_v_state.clone());
-                        scrollbar_v(&scrollbar_args);
+            .alignment(Alignment::BottomEnd)
+            .children(move |scope| {
+                scope.child({
+                    let child = child.clone();
+                    let scrollbar_v_state = controller.with(|c| c.scrollbar_state_v());
+                    let scrollbar_h_state = controller.with(|c| c.scrollbar_state_h());
+                    let scrollbar_behavior = scrollbar_behavior.clone();
+                    move || {
+                        let inner_args = ScrollableInnerArgs {
+                            vertical,
+                            horizontal,
+                            scroll_smoothing,
+                            scrollbar_behavior: scrollbar_behavior.clone(),
+                            controller,
+                            scrollbar_state_v: scrollbar_v_state.clone(),
+                            scrollbar_state_h: scrollbar_h_state.clone(),
+                            child: child.clone(),
+                        };
+                        scrollable_inner(&inner_args);
                     }
-                }
-            });
-            scope.child({
-                let scrollbar_args_h = scrollbar_args_h.clone();
-                let scrollbar_h_state = controller.with(|c| c.scrollbar_state_h());
-                move || {
-                    if horizontal {
-                        let mut scrollbar_args = scrollbar_args_h.clone();
-                        scrollbar_args.scrollbar_state = Some(scrollbar_h_state.clone());
-                        scrollbar_h(&scrollbar_args);
+                });
+                scope.child({
+                    let scrollbar_args_v = scrollbar_args_v.clone();
+                    let scrollbar_v_state = controller.with(|c| c.scrollbar_state_v());
+                    move || {
+                        if vertical {
+                            let mut scrollbar_args = scrollbar_args_v.clone();
+                            scrollbar_args.scrollbar_state = Some(scrollbar_v_state.clone());
+                            scrollbar_v(&scrollbar_args);
+                        }
                     }
-                }
-            });
-        },
+                });
+                scope.child({
+                    let scrollbar_args_h = scrollbar_args_h.clone();
+                    let scrollbar_h_state = controller.with(|c| c.scrollbar_state_h());
+                    move || {
+                        if horizontal {
+                            let mut scrollbar_args = scrollbar_args_h.clone();
+                            scrollbar_args.scrollbar_state = Some(scrollbar_h_state.clone());
+                            scrollbar_h(&scrollbar_args);
+                        }
+                    }
+                });
+            }),
     );
 }
 
@@ -919,8 +929,6 @@ fn scrollable_inner(args: &ScrollableInnerArgs) {
     let scrollbar_state_v = args.scrollbar_state_v.clone();
     let scrollbar_state_h = args.scrollbar_state_h.clone();
     let controller = args.controller;
-    let frame_nanos = current_frame_nanos();
-    controller.with_mut(|c| c.update_scroll_position(frame_nanos, args.scroll_smoothing));
     if controller.with(|c| c.has_pending_animation_frame()) {
         let controller_for_frame = controller;
         let smoothing = args.scroll_smoothing;
@@ -962,7 +970,9 @@ fn scrollable_inner(args: &ScrollableInnerArgs) {
             for cursor_event in input.cursor_events.iter() {
                 match &cursor_event.content {
                     CursorEventContent::Scroll(scroll_event) => {
-                        controller.with_mut(|c| c.cancel_inertia());
+                        if controller.with(|c| c.active_inertia.is_some()) {
+                            controller.with_mut(|c| c.cancel_inertia());
+                        }
                         let scroll_delta_x = scroll_event.delta_x;
                         let scroll_delta_y = scroll_event.delta_y;
                         let (consumed_x, consumed_y) = controller.with_mut(|c| {
@@ -1024,11 +1034,15 @@ fn scrollable_inner(args: &ScrollableInnerArgs) {
                         }
                     }
                     CursorEventContent::Pressed(_) => {
-                        controller.with_mut(|c| c.cancel_inertia());
+                        if controller.with(|c| c.active_inertia.is_some()) {
+                            controller.with_mut(|c| c.cancel_inertia());
+                        }
                         remaining_events.push(cursor_event.clone());
                     }
                     CursorEventContent::Released(_) => {
-                        controller.with_mut(|c| c.end_touch_scroll(cursor_event.timestamp));
+                        if controller.with(|c| c.velocity_tracker.is_some()) {
+                            controller.with_mut(|c| c.end_touch_scroll(cursor_event.timestamp));
+                        }
                         remaining_events.push(cursor_event.clone());
                     }
                 }
@@ -1045,23 +1059,27 @@ fn scrollable_inner(args: &ScrollableInnerArgs) {
                 args.vertical,
                 args.horizontal,
             );
-            controller.with_mut(|c| c.set_target_position(constrained_position));
+            if target != constrained_position {
+                controller.with_mut(|c| c.set_target_position(constrained_position));
+            }
 
             input.cursor_events.clear();
             input.cursor_events.extend(remaining_events);
         }
 
         if !is_cursor_in_component {
-            controller.with_mut(|c| {
-                if c.should_trigger_idle_inertia(now) {
-                    c.end_touch_scroll(now);
-                }
-            });
+            let should_trigger_idle_inertia =
+                controller.with(|c| c.should_trigger_idle_inertia(now));
+            if should_trigger_idle_inertia {
+                controller.with_mut(|c| c.end_touch_scroll(now));
+            }
         }
 
-        controller.with_mut(|c| {
-            c.advance_inertia(now, &input.computed_data, args.vertical, args.horizontal);
-        });
+        if controller.with(|c| c.active_inertia.is_some()) {
+            controller.with_mut(|c| {
+                c.advance_inertia(now, &input.computed_data, args.vertical, args.horizontal);
+            });
+        }
     });
 
     // Add child component

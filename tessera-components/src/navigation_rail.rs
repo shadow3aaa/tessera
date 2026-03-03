@@ -391,11 +391,39 @@ struct NavigationRailItemArgs {
     item_min_height: Dp,
 }
 
-#[derive(Clone, Prop)]
-struct NavigationRailComposeArgs {
-    controller: State<NavigationRailController>,
-    items: Vec<NavigationRailItem>,
-    header: Option<RenderSlot>,
+/// Arguments for [`navigation_rail`].
+#[derive(Clone, Default, Prop)]
+pub struct NavigationRailArgs {
+    /// Optional external controller.
+    pub controller: Option<State<NavigationRailController>>,
+    /// Items rendered in the rail.
+    pub items: Vec<NavigationRailItem>,
+    /// Optional header rendered above items.
+    #[prop(skip_setter)]
+    pub header: Option<RenderSlot>,
+}
+
+impl NavigationRailArgs {
+    /// Append a navigation item.
+    pub fn item(mut self, item: impl Into<NavigationRailItem>) -> Self {
+        self.items.push(item.into());
+        self
+    }
+
+    /// Set the header slot.
+    pub fn header<F>(mut self, header: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.header = Some(RenderSlot::new(header));
+        self
+    }
+
+    /// Set the header slot using a shared slot.
+    pub fn header_shared(mut self, header: impl Into<RenderSlot>) -> Self {
+        self.header = Some(header.into());
+        self
+    }
 }
 
 #[derive(Clone, Prop)]
@@ -574,14 +602,15 @@ impl Default for NavigationRailItem {
 ///
 /// ## Parameters
 ///
-/// - `scope_config` — closure that registers items and an optional header via
-///   [`NavigationRailScope`].
+/// - `args` — configures controller, items, and optional header; see
+///   [`NavigationRailArgs`].
 ///
 /// ## Examples
 ///
 /// ```
 /// use tessera_components::navigation_rail::{
-///     NavigationRailController, NavigationRailItem, NavigationRailValue, navigation_rail,
+///     NavigationRailArgs, NavigationRailController, NavigationRailItem, NavigationRailValue,
+///     navigation_rail,
 /// };
 /// use tessera_ui::{remember, tessera};
 ///
@@ -594,40 +623,23 @@ impl Default for NavigationRailItem {
 ///     let item = NavigationRailItem::new("Home");
 ///     assert_eq!(item.label, "Home");
 ///
-///     navigation_rail(|scope| {
-///         scope.item(item);
-///     });
+///     navigation_rail(
+///         &NavigationRailArgs::default()
+///             .controller(controller)
+///             .item(item),
+///     );
 /// }
 /// ```
-pub fn navigation_rail<F>(scope_config: F)
-where
-    F: FnOnce(&mut NavigationRailScope),
-{
-    let controller = remember(|| NavigationRailController::new(0));
-    let mut items = Vec::new();
-    let mut header: Option<RenderSlot> = None;
-    {
-        let mut scope = NavigationRailScope {
-            controller,
-            items: &mut items,
-            header: &mut header,
-        };
-        scope_config(&mut scope);
-    }
-    let render_args = NavigationRailComposeArgs {
-        controller,
-        items,
-        header,
-    };
-    navigation_rail_node(&render_args);
-}
-
 #[tessera]
-fn navigation_rail_node(args: &NavigationRailComposeArgs) {
+pub fn navigation_rail(args: &NavigationRailArgs) {
+    let args = args.clone();
+    let controller = args
+        .controller
+        .unwrap_or_else(|| remember(|| NavigationRailController::new(0)));
     let render_args = NavigationRailRenderArgs {
-        controller: args.controller,
-        items: args.items.clone(),
-        header: args.header.clone(),
+        controller,
+        items: args.items,
+        header: args.header,
     };
     navigation_rail_render_node(&render_args);
 }
@@ -643,19 +655,16 @@ fn navigation_rail_render_node(args: &NavigationRailRenderArgs) {
         .color_scheme;
     let frame_nanos = current_frame_nanos();
     let selection_progress = controller
-        .with_mut(|c| c.selection_animation_progress(frame_nanos))
+        .with(|c| c.selection_animation_progress(frame_nanos))
         .unwrap_or(1.0);
     let selected_index = controller.with(|c| c.selected());
     let previous_index = controller.with(|c| c.previous_selected());
-    let expand_fraction = controller.with_mut(|c| c.expand_fraction(frame_nanos));
+    let expand_fraction = controller.with(|c| c.expand_fraction(frame_nanos));
     if controller.with(|c| c.is_animating(frame_nanos)) {
         let controller_for_frame = controller;
         receive_frame_nanos(move |frame_nanos| {
-            let is_animating = controller_for_frame.with_mut(|controller| {
-                let _ = controller.selection_animation_progress(frame_nanos);
-                let _ = controller.expand_fraction(frame_nanos);
-                controller.is_animating(frame_nanos)
-            });
+            let is_animating =
+                controller_for_frame.with(|controller| controller.is_animating(frame_nanos));
             if is_animating {
                 tessera_ui::FrameNanosControl::Continue
             } else {
@@ -691,7 +700,7 @@ fn navigation_rail_render_node(args: &NavigationRailRenderArgs) {
             let header = header.clone();
             let items = items.clone();
             column(
-                ColumnArgs::default()
+                &ColumnArgs::default()
                     .modifier(Modifier::new().fill_max_size().padding(Padding::new(
                         Dp::ZERO,
                         TOP_PADDING,
@@ -699,59 +708,58 @@ fn navigation_rail_render_node(args: &NavigationRailRenderArgs) {
                         Dp::ZERO,
                     )))
                     .main_axis_alignment(MainAxisAlignment::Start)
-                    .cross_axis_alignment(CrossAxisAlignment::Start),
-                move |column_scope| {
-                    if let Some(header) = header.clone() {
-                        column_scope.child(move || {
-                            let header = header.clone();
-                            row(
-                                RowArgs::default().modifier(Modifier::new().padding(Padding::new(
-                                    ITEM_HORIZONTAL_PADDING,
-                                    Dp::ZERO,
-                                    Dp::ZERO,
-                                    Dp::ZERO,
-                                ))),
-                                move |row_scope| {
-                                    row_scope.child(move || {
-                                        header.render();
-                                    });
-                                },
-                            );
-                        });
-                        column_scope.child(move || {
-                            spacer(&crate::spacer::SpacerArgs::new(
-                                Modifier::new().height(HEADER_BOTTOM_PADDING),
-                            ));
-                        });
-                    }
-
-                    let last_index = items.len().saturating_sub(1);
-                    for (index, item) in items.iter().cloned().enumerate() {
-                        column_scope.child(move || {
-                            let item_args = NavigationRailItemArgs {
-                                controller,
-                                index,
-                                item: item.clone(),
-                                selected_index,
-                                previous_index,
-                                selection_progress,
-                                icon_position,
-                                indicator_start_width,
-                                item_min_height,
-                            };
-                            navigation_rail_item_node(&item_args);
-                        });
-
-                        if index != last_index && item_spacing.0 > 0.0 {
-                            let spacing = item_spacing;
+                    .cross_axis_alignment(CrossAxisAlignment::Start)
+                    .children(move |column_scope| {
+                        if let Some(header) = header.clone() {
+                            column_scope.child(move || {
+                                let header = header.clone();
+                                row(&RowArgs::default()
+                                    .modifier(Modifier::new().padding(Padding::new(
+                                        ITEM_HORIZONTAL_PADDING,
+                                        Dp::ZERO,
+                                        Dp::ZERO,
+                                        Dp::ZERO,
+                                    )))
+                                    .children(move |row_scope| {
+                                        row_scope.child(move || {
+                                            header.render();
+                                        });
+                                    }));
+                            });
                             column_scope.child(move || {
                                 spacer(&crate::spacer::SpacerArgs::new(
-                                    Modifier::new().height(spacing),
+                                    Modifier::new().height(HEADER_BOTTOM_PADDING),
                                 ));
                             });
                         }
-                    }
-                },
+
+                        let last_index = items.len().saturating_sub(1);
+                        for (index, item) in items.iter().cloned().enumerate() {
+                            column_scope.child(move || {
+                                let item_args = NavigationRailItemArgs {
+                                    controller,
+                                    index,
+                                    item: item.clone(),
+                                    selected_index,
+                                    previous_index,
+                                    selection_progress,
+                                    icon_position,
+                                    indicator_start_width,
+                                    item_min_height,
+                                };
+                                navigation_rail_item_node(&item_args);
+                            });
+
+                            if index != last_index && item_spacing.0 > 0.0 {
+                                let spacing = item_spacing;
+                                column_scope.child(move || {
+                                    spacer(&crate::spacer::SpacerArgs::new(
+                                        Modifier::new().height(spacing),
+                                    ));
+                                });
+                            }
+                        }
+                    }),
             );
         },
     ));
@@ -853,7 +861,7 @@ impl NavigationRailController {
         }
     }
 
-    fn selection_animation_progress(&mut self, frame_nanos: u64) -> Option<f32> {
+    fn selection_animation_progress(&self, frame_nanos: u64) -> Option<f32> {
         if let Some(start_frame_nanos) = self.selection_start_frame_nanos {
             let elapsed_nanos = frame_nanos.saturating_sub(start_frame_nanos);
             let animation_nanos = ANIMATION_DURATION.as_nanos().min(u64::MAX as u128) as u64;
@@ -862,7 +870,6 @@ impl NavigationRailController {
                     elapsed_nanos as f32 / animation_nanos as f32,
                 ))
             } else {
-                self.selection_start_frame_nanos = None;
                 None
             }
         } else {
@@ -870,7 +877,7 @@ impl NavigationRailController {
         }
     }
 
-    fn expand_fraction(&mut self, frame_nanos: u64) -> f32 {
+    fn expand_fraction(&self, frame_nanos: u64) -> f32 {
         let progress = calc_progress_from_timer(self.expand_start_frame_nanos, frame_nanos);
         if self.expanded {
             progress
@@ -917,34 +924,4 @@ fn calc_progress_from_timer(animation_start_frame_nanos: Option<u64>, frame_nano
         }
     };
     animation::easing(raw)
-}
-
-/// Scope passed to the closure for defining children of the NavigationRail.
-pub struct NavigationRailScope<'a> {
-    controller: State<NavigationRailController>,
-    items: &'a mut Vec<NavigationRailItem>,
-    header: &'a mut Option<RenderSlot>,
-}
-
-impl<'a> NavigationRailScope<'a> {
-    /// Returns the controller for expanded/collapsed and selection state.
-    pub fn controller(&self) -> State<NavigationRailController> {
-        self.controller
-    }
-
-    /// Set an optional header above the rail items.
-    pub fn header<F>(&mut self, header: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        *self.header = Some(RenderSlot::new(header));
-    }
-
-    /// Add a navigation item to the rail.
-    pub fn item<I>(&mut self, item: I)
-    where
-        I: Into<NavigationRailItem>,
-    {
-        self.items.push(item.into());
-    }
 }

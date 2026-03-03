@@ -42,9 +42,8 @@ android {
 
 rust {
     rootDirRel = "{{root-dir-rel}}"
-{{#if android-profiling-output}}
-    profilingOutput = "{{android-profiling-output}}"
-{{/if}}
+    profilingOutput = System.getenv("TESSERA_PROFILING_OUTPUT")
+    debugDirtyOverlay = System.getenv("TESSERA_DEBUG_DIRTY_OVERLAY") == "1"
 }
 
 dependencies {

@@ -5,10 +5,7 @@ use std::{
     cell::RefCell,
     hash::{Hash, Hasher},
     marker::PhantomData,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -331,7 +328,6 @@ static STATE_READ_DEPENDENCY_TRACKER: OnceLock<RwLock<StateReadDependencyTracker
     OnceLock::new();
 type RedrawWaker = Arc<dyn Fn() + Send + Sync + 'static>;
 static REDRAW_WAKER: OnceLock<RwLock<Option<RedrawWaker>>> = OnceLock::new();
-static REDRAW_REQUEST_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn build_invalidation_tracker() -> &'static RwLock<BuildInvalidationTracker> {
     BUILD_INVALIDATION_TRACKER.get_or_init(|| RwLock::new(BuildInvalidationTracker::default()))
@@ -346,38 +342,18 @@ fn redraw_waker() -> &'static RwLock<Option<RedrawWaker>> {
 }
 
 fn schedule_runtime_redraw() {
-    if REDRAW_REQUEST_PENDING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-
     let callback = redraw_waker().read().clone();
     if let Some(callback) = callback {
         callback();
-    } else {
-        REDRAW_REQUEST_PENDING.store(false, Ordering::Release);
     }
 }
 
 pub(crate) fn install_redraw_waker(callback: RedrawWaker) {
     *redraw_waker().write() = Some(callback);
-    if REDRAW_REQUEST_PENDING.load(Ordering::Acquire) {
-        let callback = redraw_waker().read().clone();
-        if let Some(callback) = callback {
-            callback();
-        }
-    }
 }
 
 pub(crate) fn clear_redraw_waker() {
     *redraw_waker().write() = None;
-    REDRAW_REQUEST_PENDING.store(false, Ordering::Release);
-}
-
-pub(crate) fn consume_scheduled_redraw() {
-    REDRAW_REQUEST_PENDING.store(false, Ordering::Release);
 }
 
 fn current_component_instance_key_from_scope() -> Option<u64> {
@@ -693,13 +669,14 @@ pub fn frame_delta() -> Duration {
 
 fn ensure_frame_receive_phase() {
     match current_phase() {
-        Some(RuntimePhase::Build) | Some(RuntimePhase::Input) => {}
+        Some(RuntimePhase::Build) => {}
         Some(RuntimePhase::Measure) => {
             panic!("receive_frame_nanos must not be called inside measure")
         }
-        None => panic!(
-            "receive_frame_nanos must be called inside a tessera component build or input handler"
-        ),
+        Some(RuntimePhase::Input) => {
+            panic!("receive_frame_nanos must be called inside a tessera component build")
+        }
+        None => panic!("receive_frame_nanos must be called inside a tessera component build"),
     }
 }
 
@@ -743,19 +720,27 @@ where
     F: FnMut(u64) -> FrameNanosControl + Send + 'static,
 {
     ensure_frame_receive_phase();
+    let frame_nanos_state = remember(current_frame_nanos);
+    let _ = frame_nanos_state.get();
 
     let owner_instance_key = current_component_instance_key_for_receiver()
         .unwrap_or_else(|| panic!("receive_frame_nanos requires an active component node context"));
     let key = compute_frame_nanos_receiver_key();
 
     let mut tracker = frame_clock_tracker().lock();
-    tracker
-        .receivers
-        .entry(key)
-        .or_insert_with(|| FrameNanosReceiver {
+    tracker.receivers.entry(key).or_insert_with(|| {
+        let mut callback = callback;
+        FrameNanosReceiver {
             owner_instance_key,
-            callback: Box::new(callback),
-        });
+            callback: Box::new(move |frame_nanos| {
+                if !frame_nanos_state.is_alive() {
+                    return FrameNanosControl::Stop;
+                }
+                frame_nanos_state.set(frame_nanos);
+                callback(frame_nanos)
+            }),
+        }
+    });
 }
 
 pub(crate) fn drop_slots_for_instance_logic_ids(instance_logic_ids: &HashSet<u64>) {
@@ -959,6 +944,17 @@ impl<T> State<T>
 where
     T: Send + Sync + 'static,
 {
+    fn is_alive(&self) -> bool {
+        let table = slot_table().read();
+        let Some(entry) = table.entries.get(self.slot) else {
+            return false;
+        };
+
+        entry.generation == self.generation
+            && entry.key.type_id == TypeId::of::<T>()
+            && entry.value.is_some()
+    }
+
     fn load_entry(&self) -> Arc<dyn Any + Send + Sync> {
         let table = slot_table().read();
         let entry = table
@@ -2106,6 +2102,15 @@ mod tests {
         reset_frame_clock();
         begin_frame_clock(Instant::now());
 
+        let result = std::panic::catch_unwind(|| {
+            receive_frame_nanos(|_| FrameNanosControl::Continue);
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn receive_frame_nanos_panics_in_input_phase() {
+        let _phase_guard = push_phase(RuntimePhase::Input);
         let result = std::panic::catch_unwind(|| {
             receive_frame_nanos(|_| FrameNanosControl::Continue);
         });

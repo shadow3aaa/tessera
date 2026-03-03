@@ -11,7 +11,7 @@
   - [ ] Windows Package Support
   - [ ] macOS Package Support
   - [ ] Linux Package Support
-
+- [x] Asset management system
 - [x] lazy_column
 - [x] lazy_row
 - [ ] [material design components](https://m3.material.io/components)
@@ -44,4 +44,4 @@
   - [x] Development server (`cargo tessera dev`)
   - [x] Build automation (`cargo tessera build`)
   - [x] Documentation of cargo-tessera commands
-  - [ ] Performance profiling tools integration
+  - [x] Performance profiling tools integration

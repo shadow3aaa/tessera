@@ -301,6 +301,34 @@ impl SnackbarHostState {
             .unwrap_or(true)
     }
 
+    fn should_dismiss_current_timeout(&self, frame_nanos: u64) -> bool {
+        let Some(current) = &self.current else {
+            return false;
+        };
+        let Some(timeout) = current.resolved.duration.timeout() else {
+            return false;
+        };
+        let Some(started_frame_nanos) = self.current_started_frame_nanos else {
+            return false;
+        };
+
+        let elapsed_nanos = frame_nanos.saturating_sub(started_frame_nanos);
+        let timeout_nanos = timeout.as_nanos().min(u64::MAX as u128) as u64;
+        elapsed_nanos >= timeout_nanos && self.current.as_ref().map(|r| r.id) == Some(current.id)
+    }
+
+    fn should_poll(&self, frame_nanos: u64) -> bool {
+        if self.current.is_none() {
+            return !self.queue.is_empty();
+        }
+
+        if self.current_started_frame_nanos.is_none() {
+            return true;
+        }
+
+        self.should_dismiss_current_timeout(frame_nanos)
+    }
+
     fn resolve_current(&mut self, id: u64, result: SnackbarResult) -> bool {
         if self.current.as_ref().map(|record| record.id) != Some(id) {
             return false;
@@ -752,14 +780,24 @@ pub fn snackbar_host(args: &SnackbarHostArgs) {
     let state = args.state;
     let snackbar_slot = args.snackbar;
     let frame_nanos = current_frame_nanos();
-    let record = state.with_mut(|host| host.poll(frame_nanos));
+    let should_poll = state.with(|host| host.should_poll(frame_nanos));
+    let record = if should_poll {
+        state.with_mut(|host| host.poll(frame_nanos))
+    } else {
+        state.with(|host| host.current.clone())
+    };
     if state.with(|host| host.has_pending_timeout(frame_nanos)) {
         let state_for_frame = state;
         receive_frame_nanos(move |frame_nanos| {
-            let has_pending_timeout = state_for_frame.with_mut(|host| {
-                let _ = host.poll(frame_nanos);
-                host.has_pending_timeout(frame_nanos)
-            });
+            let should_dismiss =
+                state_for_frame.with(|host| host.should_dismiss_current_timeout(frame_nanos));
+            if should_dismiss {
+                state_for_frame.with_mut(|host| {
+                    let _ = host.poll(frame_nanos);
+                });
+            }
+            let has_pending_timeout =
+                state_for_frame.with(|host| host.has_pending_timeout(frame_nanos));
             if has_pending_timeout {
                 tessera_ui::FrameNanosControl::Continue
             } else {
@@ -799,22 +837,26 @@ fn render_snackbar_row(args: SnackbarLayoutArgs) {
         on_dismiss,
         padding,
     } = args;
-    row(
-        RowArgs::default()
-            .modifier(Modifier::new().fill_max_width().padding(padding))
-            .cross_axis_alignment(CrossAxisAlignment::Center),
-        |scope| {
+    row(&RowArgs::default()
+        .modifier(Modifier::new().fill_max_width().padding(padding))
+        .cross_axis_alignment(CrossAxisAlignment::Center)
+        .children(|scope| {
             let message_text = message.clone();
             scope.child_weighted(
                 move || {
                     boxed(
-                        BoxedArgs::default().alignment(Alignment::CenterStart),
-                        |boxed_scope| {
-                            let message_text = message_text.clone();
-                            boxed_scope.child(move || {
-                                render_message(message_text.clone(), message_style, message_color);
-                            });
-                        },
+                        &BoxedArgs::default()
+                            .alignment(Alignment::CenterStart)
+                            .children(|boxed_scope| {
+                                let message_text = message_text.clone();
+                                boxed_scope.child(move || {
+                                    render_message(
+                                        message_text.clone(),
+                                        message_style,
+                                        message_color,
+                                    );
+                                });
+                            }),
                     );
                 },
                 1.0,
@@ -841,8 +883,7 @@ fn render_snackbar_row(args: SnackbarLayoutArgs) {
                     render_dismiss_button(dismiss_action_color, on_dismiss.clone());
                 });
             }
-        },
-    );
+        }));
 }
 
 fn render_snackbar_column(args: SnackbarLayoutArgs) {
@@ -858,61 +899,62 @@ fn render_snackbar_column(args: SnackbarLayoutArgs) {
         padding,
     } = args;
     column(
-        ColumnArgs::default()
+        &ColumnArgs::default()
             .modifier(Modifier::new().fill_max_width().padding(padding))
-            .cross_axis_alignment(CrossAxisAlignment::Start),
-        |scope| {
-            let message_text = message.clone();
-            scope.child(move || {
-                render_message(message_text.clone(), message_style, message_color);
-            });
-
-            if action_label.is_some() || on_dismiss.is_some() {
-                scope.child(|| {
-                    spacer(&crate::spacer::SpacerArgs::new(
-                        Modifier::new().height(SnackbarDefaults::ACTION_VERTICAL_SPACING),
-                    ))
-                });
-                let action_label_for_row = action_label.clone();
-                let on_action_for_row = on_action.clone();
-                let on_dismiss_for_row = on_dismiss.clone();
+            .cross_axis_alignment(CrossAxisAlignment::Start)
+            .children(|scope| {
+                let message_text = message.clone();
                 scope.child(move || {
-                    let action_label_for_row = action_label_for_row.clone();
-                    let on_action_for_row = on_action_for_row.clone();
-                    let on_dismiss_for_row = on_dismiss_for_row.clone();
-                    row(
-                        RowArgs::default()
+                    render_message(message_text.clone(), message_style, message_color);
+                });
+
+                if action_label.is_some() || on_dismiss.is_some() {
+                    scope.child(|| {
+                        spacer(&crate::spacer::SpacerArgs::new(
+                            Modifier::new().height(SnackbarDefaults::ACTION_VERTICAL_SPACING),
+                        ))
+                    });
+                    let action_label_for_row = action_label.clone();
+                    let on_action_for_row = on_action.clone();
+                    let on_dismiss_for_row = on_dismiss.clone();
+                    scope.child(move || {
+                        let action_label_for_row = action_label_for_row.clone();
+                        let on_action_for_row = on_action_for_row.clone();
+                        let on_dismiss_for_row = on_dismiss_for_row.clone();
+                        row(&RowArgs::default()
                             .modifier(Modifier::new().fill_max_width())
                             .main_axis_alignment(MainAxisAlignment::End)
-                            .cross_axis_alignment(CrossAxisAlignment::Center),
-                        move |row_scope| {
-                            if let Some(label) = action_label_for_row.clone() {
-                                let on_action = on_action_for_row.clone();
-                                row_scope.child(move || {
-                                    render_action_button(
-                                        label.clone(),
-                                        action_color,
-                                        on_action.clone(),
-                                    );
-                                });
-                            }
+                            .cross_axis_alignment(CrossAxisAlignment::Center)
+                            .children(move |row_scope| {
+                                if let Some(label) = action_label_for_row.clone() {
+                                    let on_action = on_action_for_row.clone();
+                                    row_scope.child(move || {
+                                        render_action_button(
+                                            label.clone(),
+                                            action_color,
+                                            on_action.clone(),
+                                        );
+                                    });
+                                }
 
-                            if on_dismiss_for_row.is_some() {
-                                row_scope.child(|| {
-                                    spacer(&crate::spacer::SpacerArgs::new(
-                                        Modifier::new().width(SnackbarDefaults::ACTION_SPACING),
-                                    ));
-                                });
-                                let on_dismiss = on_dismiss_for_row.clone();
-                                row_scope.child(move || {
-                                    render_dismiss_button(dismiss_action_color, on_dismiss.clone());
-                                });
-                            }
-                        },
-                    );
-                });
-            }
-        },
+                                if on_dismiss_for_row.is_some() {
+                                    row_scope.child(|| {
+                                        spacer(&crate::spacer::SpacerArgs::new(
+                                            Modifier::new().width(SnackbarDefaults::ACTION_SPACING),
+                                        ));
+                                    });
+                                    let on_dismiss = on_dismiss_for_row.clone();
+                                    row_scope.child(move || {
+                                        render_dismiss_button(
+                                            dismiss_action_color,
+                                            on_dismiss.clone(),
+                                        );
+                                    });
+                                }
+                            }));
+                    });
+                }
+            }),
     );
 }
 

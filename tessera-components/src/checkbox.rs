@@ -331,7 +331,6 @@ fn checkbox_node(args: &CheckboxArgs) {
         .controller
         .expect("checkbox_node requires controller to be set");
     let enabled = !args.disabled;
-    controller.with_mut(|c| c.update_progress(current_frame_nanos()));
     if controller.with(|c| c.is_animating()) {
         let controller_for_frame = controller;
         receive_frame_nanos(move |frame_nanos| {
@@ -410,21 +409,21 @@ fn checkbox_node(args: &CheckboxArgs) {
         let progress = controller.with(|c| c.progress());
         if progress > 0.0 {
             boxed(
-                BoxedArgs::default()
+                &BoxedArgs::default()
                     .alignment(Alignment::Center)
-                    .modifier(Modifier::new().fill_max_size()),
-                |scope| {
-                    scope.child(move || {
-                        checkmark(
-                            &CheckmarkArgs::default()
-                                .color(icon_color)
-                                .stroke_width(checkmark_stroke_width)
-                                .progress(progress)
-                                .size(Dp(checkbox_size.0 * 0.8))
-                                .padding([0.0, 0.0]),
-                        )
-                    });
-                },
+                    .modifier(Modifier::new().fill_max_size())
+                    .children(|scope| {
+                        scope.child(move || {
+                            checkmark(
+                                &CheckmarkArgs::default()
+                                    .color(icon_color)
+                                    .stroke_width(checkmark_stroke_width)
+                                    .progress(progress)
+                                    .size(Dp(checkbox_size.0 * 0.8))
+                                    .padding([0.0, 0.0]),
+                            )
+                        });
+                    }),
             );
         }
     });
@@ -454,15 +453,15 @@ fn checkbox_node(args: &CheckboxArgs) {
         RenderSlot::new(move || {
             let render_checkbox_surface = render_checkbox_surface.clone();
             boxed(
-                BoxedArgs::default()
+                &BoxedArgs::default()
                     .alignment(Alignment::Center)
-                    .modifier(Modifier::new().fill_max_size()),
-                move |scope| {
-                    let render_checkbox_surface = render_checkbox_surface.clone();
-                    scope.child(move || {
-                        render_checkbox_surface.render();
-                    });
-                },
+                    .modifier(Modifier::new().fill_max_size())
+                    .children(move |scope| {
+                        let render_checkbox_surface = render_checkbox_surface.clone();
+                        scope.child(move || {
+                            render_checkbox_surface.render();
+                        });
+                    }),
             );
         })
     };
@@ -546,14 +545,14 @@ fn checkbox_node(args: &CheckboxArgs) {
         modifier = modifier.toggleable(toggle_args);
     }
     boxed(
-        BoxedArgs::default()
+        &BoxedArgs::default()
             .modifier(modifier)
-            .alignment(Alignment::Center),
-        move |scope| {
-            let render_state_layer = render_state_layer.clone();
-            scope.child(move || {
-                render_state_layer.render();
-            });
-        },
+            .alignment(Alignment::Center)
+            .children(move |scope| {
+                let render_state_layer = render_state_layer.clone();
+                scope.child(move || {
+                    render_state_layer.render();
+                });
+            }),
     );
 }
