@@ -248,6 +248,16 @@ pub struct FrameMeta {
     pub total_nodes_before_build: Option<u64>,
     /// Render duration for the frame.
     pub render_time_ns: Option<u128>,
+    /// Time spent acquiring the swapchain surface texture.
+    pub render_acquire_ns: Option<u128>,
+    /// Time spent building render passes for the frame.
+    pub render_build_passes_ns: Option<u128>,
+    /// Time spent encoding GPU commands for the frame.
+    pub render_encode_ns: Option<u128>,
+    /// Time spent submitting commands to the GPU queue.
+    pub render_submit_ns: Option<u128>,
+    /// Time spent presenting the rendered frame.
+    pub render_present_ns: Option<u128>,
     /// Component tree build duration for the frame (wall time).
     pub build_tree_time_ns: Option<u128>,
     /// Draw/compute duration for the frame (wall time).
@@ -284,7 +294,10 @@ pub struct RuntimeMeta {
 /// ```json
 /// {"type":"frame","frame":1,"build_mode":"root_recompose","redraw_reasons":["startup"],"render_time_ns":1000000,"frame_total_ns":2000000,"components":[{"id":"1","fn_name":"root","abs_pos":{"x":0,"y":0},"size":{"w":100,"h":50},"layout_cache_hit":true,"phases":{"build_ns":5000},"children":[]}]}
 /// ```
-
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Profiler messages are forwarded to a worker thread, and keeping payloads inline avoids an extra heap allocation per event."
+)]
 enum Message {
     Sample(Sample),
     FrameMeta(FrameMeta),
@@ -467,6 +480,10 @@ impl FrameHeader {
 /// Profiler output event stream record.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Profiler events are serialized immediately, and boxing the frame variant would only add allocation churn in profiling mode."
+)]
 enum TraceEvent {
     Frame(FrameEventRecord),
     Wake(WakeEventRecord),
@@ -493,6 +510,21 @@ pub struct FrameEventRecord {
     total_nodes_before_build: Option<u64>,
     /// Render duration for the frame.
     render_time_ns: Option<u128>,
+    /// Time spent acquiring the swapchain surface texture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_acquire_ns: Option<u128>,
+    /// Time spent building render passes for the frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_build_passes_ns: Option<u128>,
+    /// Time spent encoding GPU commands for the frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_encode_ns: Option<u128>,
+    /// Time spent submitting commands to the GPU queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_submit_ns: Option<u128>,
+    /// Time spent presenting the rendered frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_present_ns: Option<u128>,
     /// Component tree build duration for the frame (wall time).
     build_tree_time_ns: Option<u128>,
     /// Draw/compute duration for the frame (wall time).
@@ -738,6 +770,11 @@ fn build_frame_record(frame_meta: FrameMeta, samples: Vec<Sample>) -> Option<Fra
             partial_replay_nodes: frame_meta.partial_replay_nodes,
             total_nodes_before_build: frame_meta.total_nodes_before_build,
             render_time_ns: frame_meta.render_time_ns,
+            render_acquire_ns: frame_meta.render_acquire_ns,
+            render_build_passes_ns: frame_meta.render_build_passes_ns,
+            render_encode_ns: frame_meta.render_encode_ns,
+            render_submit_ns: frame_meta.render_submit_ns,
+            render_present_ns: frame_meta.render_present_ns,
             build_tree_time_ns: frame_meta.build_tree_time_ns,
             draw_time_ns: frame_meta.draw_time_ns,
             record_time_ns: frame_meta.record_time_ns,
@@ -801,6 +838,11 @@ fn build_frame_record(frame_meta: FrameMeta, samples: Vec<Sample>) -> Option<Fra
         partial_replay_nodes: frame_meta.partial_replay_nodes,
         total_nodes_before_build: frame_meta.total_nodes_before_build,
         render_time_ns: frame_meta.render_time_ns,
+        render_acquire_ns: frame_meta.render_acquire_ns,
+        render_build_passes_ns: frame_meta.render_build_passes_ns,
+        render_encode_ns: frame_meta.render_encode_ns,
+        render_submit_ns: frame_meta.render_submit_ns,
+        render_present_ns: frame_meta.render_present_ns,
         build_tree_time_ns: frame_meta.build_tree_time_ns,
         draw_time_ns: frame_meta.draw_time_ns,
         record_time_ns: frame_meta.record_time_ns,

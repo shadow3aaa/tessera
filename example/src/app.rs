@@ -78,6 +78,7 @@ use crate::example_components::{
 };
 
 const NAVIGATION_RAIL_BREAKPOINT: Dp = Dp(600.0);
+const NAVIGATION_BAR_HEIGHT: Dp = Dp(80.0);
 
 #[derive(Clone, Prop)]
 struct MeasureParentWidthArgs {
@@ -95,7 +96,7 @@ fn measure_parent_width(width_state: State<Dp>, child: impl Fn() + Send + Sync +
 
 #[tessera]
 fn measure_parent_width_node(args: &MeasureParentWidthArgs) {
-    input_handler({
+    pointer_input_handler({
         let width_state = args.width_state;
         move |input| {
             let width = Dp::from(input.computed_data.width);
@@ -162,9 +163,9 @@ fn app_inner() {
                                                         ).children(move |row_scope| {
                                                         row_scope.child(move || {
                                                             let home_icon_args =
-                                                                IconArgs::from(filled::home_icon());
+                                                                IconArgs::default().vector(filled::HOME_SVG);
                                                             let about_icon_args =
-                                                                IconArgs::from(filled::info_icon());
+                                                                IconArgs::default().vector(filled::INFO_SVG);
 
                                                             let home_action =
                                                                 Callback::new(move || {
@@ -203,11 +204,11 @@ fn app_inner() {
                                                                         let button_args =
                                                                             if is_expanded {
                                                                                 IconButtonArgs::new(
-                                                                                    filled::menu_open_icon(),
+                                                                                    filled::MENU_OPEN_SVG,
                                                                                 )
                                                                             } else {
                                                                                 IconButtonArgs::new(
-                                                                                    filled::menu_icon(),
+                                                                                    filled::MENU_SVG,
                                                                                 )
                                                                             };
                                                                         icon_button(
@@ -279,77 +280,73 @@ fn app_inner() {
                                                     );
                                                     }));
                                             } else {
-                                                column(&ColumnArgs::default().children(|scope| {
-                                                    scope.child_weighted(
-                                                    move || {
-                                                        let component_args =
-                                                            ScaffoldArgs::with_content(
-                                                                ScaffoldArgs::default()
-                                                                    .top_bar_height(
-                                                                        AppBarDefaults::TOP_APP_BAR_HEIGHT,
-                                                                    )
-                                                                    .top_bar(top_app_bar),
-                                                                move || {
-                                                                    router_view();
-                                                                },
-                                                            );
-                                                        scaffold(&component_args);
-                                                    },
-                                                    1.0,
-                                                );
-                                                    scope.child(move || {
-                                                        let home_icon_args =
-                                                            IconArgs::from(filled::home_icon());
-                                                        let about_icon_args =
-                                                            IconArgs::from(filled::info_icon());
+                                                let home_icon_args =
+                                                    IconArgs::default().vector(filled::HOME_SVG);
+                                                let about_icon_args =
+                                                    IconArgs::default().vector(filled::INFO_SVG);
 
-                                                        let home_action =
-                                                            Callback::new(move || {
-                                                                Router::reset(
-                                                                        HomeDestination {
-                                                                            bottom_sheet_controller,
-                                                                            side_sheet_controller,
-                                                                            dialog_controller,
-                                                                        },
-                                                                    );
-                                                            });
-                                                        let about_action = Callback::new(|| {
-                                                            Router::reset(
-                                                                    AboutDestination {},
-                                                                );
-                                                        });
+                                                let home_action = Callback::new(move || {
+                                                    Router::reset(HomeDestination {
+                                                        bottom_sheet_controller,
+                                                        side_sheet_controller,
+                                                        dialog_controller,
+                                                    });
+                                                });
+                                                let about_action = Callback::new(|| {
+                                                    Router::reset(AboutDestination {});
+                                                });
 
-                                                        navigation_bar(
-                                                            &NavigationBarArgs::default()
-                                                                .item(
-                                                                    NavigationBarItem::new("Home")
+                                                let component_args = ScaffoldArgs::with_content(
+                                                    ScaffoldArgs::default()
+                                                        .top_bar_height(
+                                                            AppBarDefaults::TOP_APP_BAR_HEIGHT,
+                                                        )
+                                                        .bottom_bar_height(NAVIGATION_BAR_HEIGHT)
+                                                        .top_bar(top_app_bar)
+                                                        .bottom_bar(move || {
+                                                            navigation_bar(
+                                                                &NavigationBarArgs::default()
+                                                                    .item(
+                                                                        NavigationBarItem::new(
+                                                                            "Home",
+                                                                        )
                                                                         .icon(closure!(
                                                                             clone home_icon_args,
                                                                             || {
-                                                                                icon(&home_icon_args.clone());
+                                                                                icon(
+                                                                                    &home_icon_args
+                                                                                        .clone(),
+                                                                                );
                                                                             }
                                                                         ))
                                                                         .on_click_shared(
                                                                             home_action.clone(),
                                                                         ),
-                                                                )
-                                                                .item(
-                                                                    NavigationBarItem::new(
-                                                                        "About",
                                                                     )
-                                                                    .icon(closure!(
-                                                                        clone about_icon_args,
-                                                                        || {
-                                                                            icon(&about_icon_args.clone());
-                                                                        }
-                                                                    ))
-                                                                    .on_click_shared(
-                                                                        about_action.clone(),
+                                                                    .item(
+                                                                        NavigationBarItem::new(
+                                                                            "About",
+                                                                        )
+                                                                        .icon(closure!(
+                                                                            clone about_icon_args,
+                                                                            || {
+                                                                                icon(
+                                                                                    &about_icon_args
+                                                                                        .clone(),
+                                                                                );
+                                                                            }
+                                                                        ))
+                                                                        .on_click_shared(
+                                                                            about_action.clone(),
+                                                                        ),
                                                                     ),
-                                                                ),
-                                                        );
-                                                    });
-                                                }));
+                                                            );
+                                                        }),
+                                                    move || {
+                                                        router_view();
+                                                    },
+                                                );
+                                                scaffold(&component_args);
                                             }
                                         },
                                     );
@@ -360,7 +357,7 @@ fn app_inner() {
                                 &BasicDialogArgs::new("This is a basic dialog component.")
                                     .headline("Basic Dialog")
                                     .icon(|| {
-                                        icon(&IconArgs::from(filled::info_icon()));
+                                        icon(&IconArgs::default().vector(filled::INFO_SVG));
                                     })
                                     .confirm_button(move || {
                                         button(&ButtonArgs::with_child(
@@ -759,7 +756,7 @@ fn home_node(args: &HomeArgs) {
                                 .placeholder("Search components")
                                 .controller(controller)
                                 .leading_icon(|| {
-                                    icon(&IconArgs::from(filled::search_icon()));
+                                    icon(&IconArgs::default().vector(filled::SEARCH_SVG));
                                 })
                                 .on_query_change(move |text| {
                                     search_query.set(text.clone());
@@ -908,7 +905,7 @@ fn window_controls() {
         .children(move |row_scope| {
             row_scope.child(move || {
                 window_control_button(
-                    IconArgs::from(filled::minimize_icon()),
+                    IconArgs::default().vector(filled::MINIMIZE_SVG),
                     WindowAction::Minimize,
                     neutral,
                 );
@@ -916,7 +913,7 @@ fn window_controls() {
             row_scope.child(|| spacer(&SpacerArgs::new(Modifier::new().width(Dp(4.0)))));
             row_scope.child(move || {
                 window_control_button(
-                    IconArgs::from(filled::fullscreen_icon()),
+                    IconArgs::default().vector(filled::FULLSCREEN_SVG),
                     WindowAction::ToggleMaximize,
                     neutral,
                 );
@@ -924,7 +921,7 @@ fn window_controls() {
             row_scope.child(|| spacer(&SpacerArgs::new(Modifier::new().width(Dp(4.0)))));
             row_scope.child(move || {
                 window_control_button(
-                    IconArgs::from(filled::close_icon()),
+                    IconArgs::default().vector(filled::CLOSE_SVG),
                     WindowAction::Close,
                     destructive,
                 );
@@ -945,7 +942,7 @@ fn top_app_bar() {
     app_bar(&app_bar_args.content_children(move |scope| {
         scope.child(move || {
             icon_button(
-                &IconButtonArgs::new(filled::arrow_back_icon())
+                &IconButtonArgs::new(filled::ARROW_BACK_SVG)
                     .enabled(can_go_back)
                     .color(Color::TRANSPARENT)
                     .on_click(|| {

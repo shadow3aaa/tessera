@@ -46,7 +46,10 @@ use crate::{
         remove_context_read_dependencies, remove_previous_component_context_snapshots,
         reset_component_context_tracking, reset_context_read_dependencies, with_context_snapshot,
     },
-    cursor::{CursorEvent, CursorEventContent, CursorState, GestureState, PressKeyEventType},
+    cursor::{
+        CursorEvent, CursorEventContent, CursorState, GestureState, MOUSE_POINTER_ID,
+        PressKeyEventType,
+    },
     dp::SCALE_FACTOR,
     keyboard_state::KeyboardState,
     pipeline_context::PipelineContext,
@@ -1305,7 +1308,7 @@ Fps: {:.2}
         let draw_timer = Instant::now();
         debug!("Computing draw commands...");
         let cursor_position = args.cursor_state.position();
-        let cursor_events = args.cursor_state.take_events();
+        let pointer_changes = args.cursor_state.take_events();
         let keyboard_events = args.keyboard_state.take_events();
         let ime_events = args.ime_state.take_events();
 
@@ -1319,7 +1322,7 @@ Fps: {:.2}
                 component_tree.compute(crate::component_tree::ComputeParams {
                     screen_size,
                     cursor_position,
-                    cursor_events,
+                    pointer_changes,
                     keyboard_events,
                     ime_events,
                     modifiers: args.keyboard_state.modifiers(),
@@ -1535,6 +1538,12 @@ Fps: {:.2}
         #[cfg(feature = "profiling")]
         {
             let render_duration_ns = Some(render_cost.as_nanos());
+            let render_acquire_ns = render_breakdown.map(|breakdown| breakdown.acquire.as_nanos());
+            let render_build_passes_ns =
+                render_breakdown.map(|breakdown| breakdown.build_passes.as_nanos());
+            let render_encode_ns = render_breakdown.map(|breakdown| breakdown.encode.as_nanos());
+            let render_submit_ns = render_breakdown.map(|breakdown| breakdown.submit.as_nanos());
+            let render_present_ns = render_breakdown.map(|breakdown| breakdown.present.as_nanos());
             let frame_total_ns = frame_timer.elapsed().as_nanos();
             let inter_frame_wait_ns = (frame_idx > 0).then(|| frame_delta().as_nanos());
             let nodes = TesseraRuntime::with(|rt| rt.component_tree.profiler_nodes());
@@ -1546,6 +1555,11 @@ Fps: {:.2}
                 partial_replay_nodes: build_tree_result.partial_replay_nodes,
                 total_nodes_before_build: build_tree_result.total_nodes_before_build,
                 render_time_ns: render_duration_ns,
+                render_acquire_ns,
+                render_build_passes_ns,
+                render_encode_ns,
+                render_submit_ns,
+                render_present_ns,
                 build_tree_time_ns: Some(build_tree_result.duration.as_nanos()),
                 draw_time_ns: Some(draw_cost.as_nanos()),
                 record_time_ns: Some(record_cost.as_nanos()),
@@ -1779,9 +1793,16 @@ impl<F: Fn()> Renderer<F> {
         if self.resize_in_progress {
             return;
         }
+        let px_position = PxPosition::from_f64_arr2([position.x, position.y]);
         // Update cursor position
-        self.cursor_state
-            .update_position(PxPosition::from_f64_arr2([position.x, position.y]));
+        self.cursor_state.update_position(px_position);
+        self.cursor_state.push_event(CursorEvent {
+            timestamp: Instant::now(),
+            pointer_id: MOUSE_POINTER_ID,
+            content: CursorEventContent::Moved(px_position),
+            gesture_state: GestureState::TapCandidate,
+            consumed: false,
+        });
         debug!("Cursor moved to: {}, {}", position.x, position.y);
     }
 
@@ -1864,8 +1885,10 @@ impl<F: Fn()> Renderer<F> {
         }
         let event = CursorEvent {
             timestamp: Instant::now(),
+            pointer_id: MOUSE_POINTER_ID,
             content: event_content,
             gesture_state: GestureState::TapCandidate,
+            consumed: false,
         };
         self.cursor_state.push_event(event);
         debug!("Mouse input: {state:?} button {button:?}");
@@ -1878,8 +1901,10 @@ impl<F: Fn()> Renderer<F> {
         let event_content = CursorEventContent::from_scroll_event(delta);
         let event = CursorEvent {
             timestamp: Instant::now(),
+            pointer_id: MOUSE_POINTER_ID,
             content: event_content,
             gesture_state: GestureState::Dragged,
+            consumed: false,
         };
         self.cursor_state.push_event(event);
         debug!("Mouse scroll: {delta:?}");
