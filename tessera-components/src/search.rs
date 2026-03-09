@@ -240,9 +240,9 @@ impl Default for SearchBarArgs {
             placeholder: None,
             leading_icon: None,
             trailing_icon: None,
-            on_query_change: CallbackWith::new(|text: String| text),
-            on_search: CallbackWith::new(|_: String| {}),
-            on_active_change: CallbackWith::new(|_: bool| {}),
+            on_query_change: CallbackWith::identity(),
+            on_search: CallbackWith::default_value(),
+            on_active_change: CallbackWith::default_value(),
             shape: SearchBarDefaults::input_shape(),
             colors: SearchBarDefaults::colors(),
             tonal_elevation: SearchBarDefaults::TONAL_ELEVATION,
@@ -353,7 +353,10 @@ enum SearchBarLayoutKind {
 #[tessera]
 pub fn search_bar(args: &SearchBarArgs) {
     let render_args = build_search_bar_render_args(args.clone(), SearchBarLayoutKind::FullScreen);
-    search_bar_render(render_args);
+    let modifier = render_args.modifier.clone();
+    modifier.run(move || {
+        search_bar_inner(&render_args);
+    });
 }
 
 /// # docked_search_bar
@@ -394,14 +397,17 @@ pub fn search_bar(args: &SearchBarArgs) {
 #[tessera]
 pub fn docked_search_bar(args: &SearchBarArgs) {
     let render_args = build_search_bar_render_args(args.clone(), SearchBarLayoutKind::Docked);
-    search_bar_render(render_args);
+    let modifier = render_args.modifier.clone();
+    modifier.run(move || {
+        search_bar_inner(&render_args);
+    });
 }
 
 fn build_search_bar_render_args(
     args: SearchBarArgs,
     kind: SearchBarLayoutKind,
 ) -> SearchBarRenderArgs {
-    let content = args.content.unwrap_or_else(|| RenderSlot::new(|| {}));
+    let content = args.content.unwrap_or_else(RenderSlot::empty);
     let controller = args
         .controller
         .unwrap_or_else(|| remember(|| SearchBarController::new(args.is_active)));
@@ -434,13 +440,6 @@ fn build_search_bar_render_args(
         controller,
         content,
     }
-}
-
-fn search_bar_render(args: SearchBarRenderArgs) {
-    let modifier = args.modifier.clone();
-    modifier.run(move || {
-        search_bar_inner(&args);
-    });
 }
 
 #[derive(Clone, Prop)]
@@ -493,7 +492,7 @@ fn search_bar_inner(args: &SearchBarRenderArgs) {
 
     sync_query(&controller, &input_controller, &synced_query);
 
-    let on_query_change = args.on_query_change.clone();
+    let on_query_change = args.on_query_change;
     field_args = field_args.on_change(move |text| {
         let next = on_query_change.call(text);
         controller.with_mut(|c| c.set_query(next.clone()));
@@ -537,12 +536,11 @@ fn search_bar_inner(args: &SearchBarRenderArgs) {
         });
     }
 
-    let on_active_change = args.on_active_change.clone();
-    let on_search = args.on_search.clone();
+    let on_active_change = args.on_active_change;
+    let on_search = args.on_search;
     let enabled = args.enabled;
     let tap_recognizer = remember(TapRecognizer::default);
     pointer_input_handler({
-        let on_active_change = on_active_change.clone();
         move |input| {
             if !enabled {
                 return;

@@ -141,7 +141,7 @@ impl Default for GlassSliderArgs {
         Self {
             value: 0.0,
             modifier: default_slider_modifier(),
-            on_change: CallbackWith::new(|_| {}),
+            on_change: CallbackWith::default_value(),
             track_height: Dp(12.0),
             track_tint_color: Color::new(0.3, 0.3, 0.3, 0.15),
             progress_tint_color: Color::new(0.5, 0.7, 1.0, 0.25),
@@ -258,32 +258,24 @@ fn process_pointer_gestures(
 /// ## Examples
 ///
 /// ```
-/// use std::sync::{Arc, Mutex};
 /// use tessera_components::glass_slider::{GlassSliderArgs, GlassSliderController, glass_slider};
 /// use tessera_ui::{remember, tessera};
 ///
 /// #[tessera]
 /// fn demo() {
-///     // In a real app, this would be part of your application's state.
-///     let slider_value = Arc::new(Mutex::new(0.5));
+///     let slider_value = remember(|| 0.5f32);
 ///     let slider_controller = remember(GlassSliderController::new);
 ///
-///     let on_change = {
-///         let slider_value = slider_value.clone();
-///         move |new_value| {
-///             *slider_value.lock().unwrap() = new_value;
-///         }
-///     };
-///
 ///     let args = GlassSliderArgs::default()
-///         .value(*slider_value.lock().unwrap())
-///         .on_change(on_change)
+///         .value(slider_value.get())
+///         .on_change(move |new_value| {
+///             slider_value.set(new_value);
+///         })
 ///         .controller(slider_controller);
 ///
 ///     glass_slider(&args);
 ///
-///     // For the doctest, we can simulate the callback.
-///     assert_eq!(*slider_value.lock().unwrap(), 0.5);
+///     assert_eq!(slider_value.get(), 0.5);
 /// }
 ///
 /// demo();
@@ -428,7 +420,7 @@ fn glass_slider_inner(args: &GlassSliderArgs) {
                 },
             ));
 
-            let on_change = args.on_change.clone();
+            let on_change = args.on_change;
             let handler_args = args.clone();
             let tap_recognizer = remember(TapRecognizer::default);
             let drag_recognizer = remember(DragRecognizer::default);

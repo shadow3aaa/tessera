@@ -117,7 +117,7 @@ fn apply_range_thumb_accessibility(input: &PointerInput, args: &RangeThumbAccess
     let min = args.min;
     let max = args.max;
     let steps = args.steps;
-    let on_change = args.on_change.clone();
+    let on_change = args.on_change;
     input.set_accessibility_action_handler(move |action| {
         let next = match action {
             Action::Increment => value + delta,
@@ -449,7 +449,7 @@ impl Default for SliderArgs {
         Self {
             modifier: Modifier::new(),
             value: 0.0,
-            on_change: CallbackWith::new(|_| {}),
+            on_change: CallbackWith::default_value(),
             size: SliderSize::default(),
             active_track_color: scheme.primary,
             inactive_track_color: scheme.secondary_container,
@@ -548,7 +548,7 @@ impl Default for RangeSliderArgs {
         Self {
             modifier: Modifier::new(),
             value: (0.0, 1.0),
-            on_change: CallbackWith::new(|_| {}),
+            on_change: CallbackWith::default_value(),
             size: SliderSize::default(),
             active_track_color: scheme.primary,
             inactive_track_color: scheme.secondary_container,
@@ -819,13 +819,9 @@ pub fn slider(args: &SliderArgs) {
     let controller = args
         .controller
         .unwrap_or_else(|| remember(SliderController::new));
-    slider_render(args, controller);
-}
-
-fn slider_render(slider_args: SliderArgs, controller: State<SliderController>) {
-    let modifier = slider_args.modifier.clone();
+    let modifier = args.modifier.clone();
     modifier.run(move || {
-        let mut inner_args = slider_args.clone();
+        let mut inner_args = args.clone();
         inner_args.controller = Some(controller);
         slider_inner(&inner_args);
     });
@@ -1120,20 +1116,16 @@ fn measure_centered_slider(
 /// # use tessera_ui::tessera;
 /// # #[tessera]
 /// # fn component() {
-/// use std::sync::{Arc, Mutex};
 /// use tessera_components::modifier::ModifierExt as _;
 /// use tessera_components::slider::{SliderArgs, centered_slider};
-/// use tessera_ui::{Dp, Modifier};
+/// use tessera_ui::{Dp, Modifier, remember};
 /// # use tessera_components::theme::{MaterialTheme, material_theme};
-/// let current_value = Arc::new(Mutex::new(0.5));
+///
+/// let current_value = remember(|| 0.5f32);
 ///
 /// // Simulate a value change
-/// {
-///     let mut value_guard = current_value.lock().unwrap();
-///     *value_guard = 0.75;
-///     assert_eq!(*value_guard, 0.75);
-/// }
-/// let current_value = current_value.clone();
+/// current_value.set(0.75);
+/// assert_eq!(current_value.get(), 0.75);
 ///
 /// # let args = tessera_components::theme::MaterialThemeProviderArgs::new(
 /// #     || MaterialTheme::default(),
@@ -1141,11 +1133,9 @@ fn measure_centered_slider(
 /// centered_slider(
 ///     &SliderArgs::default()
 ///         .modifier(Modifier::new().width(Dp(200.0)))
-///         .value(*current_value.lock().unwrap())
+///         .value(current_value.get())
 ///         .on_change(move |new_value| {
-///             // In a real app, you would update your state here.
-///             // For this example, we'll just check it after the simulated change.
-///             println!("Centered slider value changed to: {}", new_value);
+///             current_value.set(new_value);
 ///         }),
 /// );
 /// #     },
@@ -1153,11 +1143,8 @@ fn measure_centered_slider(
 /// # material_theme(&args);
 ///
 /// // Simulate another value change and check the state
-/// {
-///     let mut value_guard = current_value.lock().unwrap();
-///     *value_guard = 0.25;
-///     assert_eq!(*value_guard, 0.25);
-/// }
+/// current_value.set(0.25);
+/// assert_eq!(current_value.get(), 0.25);
 /// # }
 /// # component();
 /// ```
@@ -1454,12 +1441,11 @@ fn measure_range_slider(
 /// # use tessera_ui::tessera;
 /// # #[tessera]
 /// # fn component() {
-/// use std::sync::{Arc, Mutex};
 /// use tessera_components::modifier::ModifierExt as _;
 /// use tessera_components::slider::{RangeSliderArgs, range_slider};
-/// use tessera_ui::{Dp, Modifier};
+/// use tessera_ui::{Dp, Modifier, remember};
 /// # use tessera_components::theme::{MaterialTheme, material_theme};
-/// let range_value = Arc::new(Mutex::new((0.2, 0.8)));
+/// let range_value = remember(|| (0.2f32, 0.8f32));
 ///
 /// # let args = tessera_components::theme::MaterialThemeProviderArgs::new(
 /// #     || MaterialTheme::default(),
@@ -1467,14 +1453,15 @@ fn measure_range_slider(
 /// range_slider(
 ///     &RangeSliderArgs::default()
 ///         .modifier(Modifier::new().width(Dp(200.0)))
-///         .value(*range_value.lock().unwrap())
+///         .value(range_value.get())
 ///         .on_change(move |(start, end)| {
-///             println!("Range changed: {} - {}", start, end);
+///             range_value.set((start, end));
 ///         }),
 /// );
 /// #     },
 /// # );
 /// # material_theme(&args);
+/// assert_eq!(range_value.get(), (0.2, 0.8));
 /// # }
 /// # component();
 /// ```
@@ -1484,10 +1471,6 @@ pub fn range_slider(args: &RangeSliderArgs) {
     let state = args
         .controller
         .unwrap_or_else(|| remember(RangeSliderController::new));
-    range_slider_render(args, state);
-}
-
-fn range_slider_render(args: RangeSliderArgs, state: State<RangeSliderController>) {
     let modifier = args.modifier.clone();
     modifier.run(move || {
         let mut inner_args = args.clone();
@@ -1564,7 +1547,7 @@ fn range_slider_inner(args: &RangeSliderArgs) {
             min: 0.0,
             max: end,
             on_change: CallbackWith::new({
-                let on_change = args.on_change.clone();
+                let on_change = args.on_change;
                 move |new_start| on_change.call((new_start, end))
             }),
         },
@@ -1587,7 +1570,7 @@ fn range_slider_inner(args: &RangeSliderArgs) {
             min: start,
             max: 1.0,
             on_change: CallbackWith::new({
-                let on_change = args.on_change.clone();
+                let on_change = args.on_change;
                 move |new_end| on_change.call((start, new_end))
             }),
         },

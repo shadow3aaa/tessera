@@ -239,7 +239,7 @@ fn app_inner() {
                                                                             }
                                                                         ))
                                                                         .on_click_shared(
-                                                                            home_action.clone(),
+                                                                            home_action,
                                                                         ),
                                                                     )
                                                                     .item(
@@ -256,7 +256,7 @@ fn app_inner() {
                                                                             }
                                                                         ))
                                                                         .on_click_shared(
-                                                                            about_action.clone(),
+                                                                            about_action,
                                                                         ),
                                                                     ),
                                                             );
@@ -321,7 +321,7 @@ fn app_inner() {
                                                                             }
                                                                         ))
                                                                         .on_click_shared(
-                                                                            home_action.clone(),
+                                                                            home_action,
                                                                         ),
                                                                     )
                                                                     .item(
@@ -338,7 +338,7 @@ fn app_inner() {
                                                                             }
                                                                         ))
                                                                         .on_click_shared(
-                                                                            about_action.clone(),
+                                                                            about_action,
                                                                         ),
                                                                     ),
                                                             );
@@ -757,7 +757,6 @@ fn home_screen(args: &HomeArgs) {
                     .content(move |scope| {
                         let filtered = filtered.clone();
                         scope.sticky_header(move || {
-                            let search_query = search_query;
                             let controller = search_controller;
                             let args = SearchBarArgs::default()
                                 .modifier(Modifier::new().fill_max_width())
@@ -780,37 +779,35 @@ fn home_screen(args: &HomeArgs) {
                         });
 
                         scope.items_from_iter(filtered, move |_, example| {
-                            let on_click = example.on_click.clone();
+                            let on_click = example.on_click;
                             let title = example.title.clone();
                             let description = example.desription.clone();
-                            component_card(&title, &description, on_click);
+                            component_card(&ComponentCardArgs {
+                                title,
+                                description,
+                                on_click,
+                            });
                         });
                     }),
             );
         },
     ));
 }
+
 #[derive(Clone, Prop)]
 struct ComponentCardArgs {
+    #[prop(into)]
     title: String,
+    #[prop(into)]
     description: String,
     on_click: Callback,
 }
 
-fn component_card(title: &str, description: &str, on_click: impl Into<Callback>) {
-    let args = ComponentCardArgs {
-        title: title.to_string(),
-        description: description.to_string(),
-        on_click: on_click.into(),
-    };
-    component_card_tile(&args);
-}
-
 #[tessera]
-fn component_card_tile(args: &ComponentCardArgs) {
-    let on_click = args.on_click.clone();
+fn component_card(args: &ComponentCardArgs) {
     let title = args.title.clone();
     let description = args.description.clone();
+    let on_click = args.on_click;
 
     surface(&SurfaceArgs::with_child(
         SurfaceArgs::default()
@@ -833,7 +830,7 @@ fn component_card_tile(args: &ComponentCardArgs) {
                     modifier: Modifier::new().fill_max_width().padding_all(Dp(25.0)),
                     ..Default::default()
                 }
-                .children(|scope| {
+                .children(move |scope| {
                     scope.child(move || {
                         text(&TextArgs::default().text(title.clone()).size(Dp(20.0)));
                     });
@@ -866,29 +863,20 @@ struct WindowControlButtonArgs {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn window_control_button(icon_args: IconArgs, action: tessera_ui::WindowAction, tint: Color) {
-    let args = WindowControlButtonArgs {
-        icon_args,
-        action,
-        tint,
-    };
-    window_control_button_surface(&args);
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tessera]
-fn window_control_button_surface(args: &WindowControlButtonArgs) {
+fn window_control_button(args: &WindowControlButtonArgs) {
     let icon_args = args.icon_args.clone().size(Dp(18.0)).tint(args.tint);
+    let action = args.action;
+    let tint = args.tint;
     surface(&SurfaceArgs::with_child(
         SurfaceArgs::default()
             .modifier(
                 Modifier::new()
                     .size(Dp(40.0), Dp(32.0))
-                    .window_action(args.action),
+                    .window_action(action),
             )
             .style(Color::TRANSPARENT.into())
-            .content_color(args.tint)
+            .content_color(tint)
             .content_alignment(tessera_components::alignment::Alignment::Center),
         move || {
             icon(&icon_args);
@@ -912,27 +900,27 @@ fn window_controls() {
         .cross_axis_alignment(CrossAxisAlignment::Center)
         .children(move |row_scope| {
             row_scope.child(move || {
-                window_control_button(
-                    IconArgs::default().vector(filled::MINIMIZE_SVG),
-                    WindowAction::Minimize,
-                    neutral,
-                );
+                window_control_button(&WindowControlButtonArgs {
+                    icon_args: IconArgs::default().vector(filled::MINIMIZE_SVG),
+                    action: WindowAction::Minimize,
+                    tint: neutral,
+                });
             });
             row_scope.child(|| spacer(&SpacerArgs::new(Modifier::new().width(Dp(4.0)))));
             row_scope.child(move || {
-                window_control_button(
-                    IconArgs::default().vector(filled::FULLSCREEN_SVG),
-                    WindowAction::ToggleMaximize,
-                    neutral,
-                );
+                window_control_button(&WindowControlButtonArgs {
+                    icon_args: IconArgs::default().vector(filled::FULLSCREEN_SVG),
+                    action: WindowAction::ToggleMaximize,
+                    tint: neutral,
+                });
             });
             row_scope.child(|| spacer(&SpacerArgs::new(Modifier::new().width(Dp(4.0)))));
             row_scope.child(move || {
-                window_control_button(
-                    IconArgs::default().vector(filled::CLOSE_SVG),
-                    WindowAction::Close,
-                    destructive,
-                );
+                window_control_button(&WindowControlButtonArgs {
+                    icon_args: IconArgs::default().vector(filled::CLOSE_SVG),
+                    action: WindowAction::Close,
+                    tint: destructive,
+                });
             });
         }));
 }

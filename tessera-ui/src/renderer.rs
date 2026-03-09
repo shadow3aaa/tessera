@@ -66,9 +66,10 @@ use crate::{
         finalize_frame_layout_dirty_tracking, has_pending_build_invalidations,
         has_pending_frame_nanos_receivers, install_redraw_waker, previous_component_replay_nodes,
         remove_focus_read_dependencies, remove_frame_nanos_receivers,
-        remove_previous_component_replay_nodes, remove_state_read_dependencies,
-        reset_build_invalidations, reset_component_replay_tracking, reset_focus_read_dependencies,
-        reset_frame_clock, reset_layout_dirty_tracking, reset_state_read_dependencies,
+        remove_previous_component_replay_nodes, remove_render_slot_read_dependencies,
+        remove_state_read_dependencies, reset_build_invalidations, reset_component_replay_tracking,
+        reset_focus_read_dependencies, reset_frame_clock, reset_layout_dirty_tracking,
+        reset_render_slot_read_dependencies, reset_state_read_dependencies,
         retain_persistent_focus_handles, take_build_invalidations, take_layout_self_dirty_nodes,
         tick_frame_nanos_receivers, with_build_dirty_instance_keys, with_replay_scope,
     },
@@ -1036,11 +1037,6 @@ impl<F: Fn()> Renderer<F> {
         })
     }
 
-    #[cfg(feature = "profiling")]
-    fn component_tree_node_count() -> u64 {
-        TesseraRuntime::with(|runtime| runtime.component_tree.tree().count() as u64)
-    }
-
     /// Build the component tree only when invalidated.
     #[instrument(level = "debug", skip(entry_point))]
     fn build_component_tree(entry_point: &F) -> BuildTreeResult {
@@ -1055,6 +1051,7 @@ impl<F: Fn()> Renderer<F> {
                 clear_frame_nanos_receivers();
                 // Root recomposition rebuilds reader dependencies from scratch.
                 reset_focus_read_dependencies();
+                reset_render_slot_read_dependencies();
                 reset_state_read_dependencies();
                 reset_context_read_dependencies();
                 TesseraRuntime::with_mut(|runtime| runtime.component_tree.clear());
@@ -1132,7 +1129,8 @@ impl<F: Fn()> Renderer<F> {
                 #[cfg(feature = "profiling")]
                 let mut replayed_nodes = 0_u64;
                 #[cfg(feature = "profiling")]
-                let total_nodes_before_build = Self::component_tree_node_count();
+                let total_nodes_before_build =
+                    TesseraRuntime::with(|runtime| runtime.component_tree.tree().count() as u64);
 
                 for instance_key in &dirty_roots {
                     #[cfg(feature = "profiling")]
@@ -1217,6 +1215,7 @@ impl<F: Fn()> Renderer<F> {
                 remove_previous_component_replay_nodes(&stale_instance_keys);
                 remove_frame_nanos_receivers(&stale_instance_keys);
                 remove_focus_read_dependencies(&stale_instance_keys);
+                remove_render_slot_read_dependencies(&stale_instance_keys);
                 remove_state_read_dependencies(&stale_instance_keys);
                 crate::runtime::remove_build_invalidations(&stale_instance_keys);
                 remove_previous_component_context_snapshots(&stale_instance_keys);
@@ -2270,6 +2269,7 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
         reset_layout_dirty_tracking();
         reset_component_replay_tracking();
         reset_focus_read_dependencies();
+        reset_render_slot_read_dependencies();
         reset_state_read_dependencies();
         reset_component_context_tracking();
         reset_context_read_dependencies();
