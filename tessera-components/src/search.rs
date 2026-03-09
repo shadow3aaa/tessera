@@ -353,7 +353,7 @@ enum SearchBarLayoutKind {
 #[tessera]
 pub fn search_bar(args: &SearchBarArgs) {
     let render_args = build_search_bar_render_args(args.clone(), SearchBarLayoutKind::FullScreen);
-    search_bar_node(render_args);
+    search_bar_render(render_args);
 }
 
 /// # docked_search_bar
@@ -394,7 +394,7 @@ pub fn search_bar(args: &SearchBarArgs) {
 #[tessera]
 pub fn docked_search_bar(args: &SearchBarArgs) {
     let render_args = build_search_bar_render_args(args.clone(), SearchBarLayoutKind::Docked);
-    search_bar_node(render_args);
+    search_bar_render(render_args);
 }
 
 fn build_search_bar_render_args(
@@ -436,10 +436,10 @@ fn build_search_bar_render_args(
     }
 }
 
-fn search_bar_node(args: SearchBarRenderArgs) {
+fn search_bar_render(args: SearchBarRenderArgs) {
     let modifier = args.modifier.clone();
     modifier.run(move || {
-        search_bar_inner_node(&args);
+        search_bar_inner(&args);
     });
 }
 
@@ -479,7 +479,7 @@ struct SearchResultsSurfaceArgs {
 }
 
 #[tessera]
-fn search_bar_inner_node(args: &SearchBarRenderArgs) {
+fn search_bar_inner(args: &SearchBarRenderArgs) {
     let args = args.clone();
     let kind = args.kind;
     let controller = args.controller;
@@ -540,33 +540,34 @@ fn search_bar_inner_node(args: &SearchBarRenderArgs) {
     let on_active_change = args.on_active_change.clone();
     let on_search = args.on_search.clone();
     let enabled = args.enabled;
-    let on_active_change_for_pointer = on_active_change.clone();
     let tap_recognizer = remember(TapRecognizer::default);
-    pointer_input_handler(move |input| {
-        if !enabled {
-            return;
-        }
-        let is_active = controller.with(|c| c.is_active());
-        let cursor_pos = input.cursor_position_rel;
-        let within_bounds = cursor_pos
-            .map(|pos| is_position_inside_bounds(input.computed_data, pos))
-            .unwrap_or(false);
-        let tap_result = tap_recognizer.with_mut(|recognizer| {
-            recognizer.update(
-                input.pass,
-                input.pointer_changes.as_mut_slice(),
-                input.cursor_position_rel,
-                within_bounds,
-            )
-        });
+    pointer_input_handler({
+        let on_active_change = on_active_change.clone();
+        move |input| {
+            if !enabled {
+                return;
+            }
+            let is_active = controller.with(|c| c.is_active());
+            let cursor_pos = input.cursor_position_rel;
+            let within_bounds = cursor_pos
+                .map(|pos| is_position_inside_bounds(input.computed_data, pos))
+                .unwrap_or(false);
+            let tap_result = tap_recognizer.with_mut(|recognizer| {
+                recognizer.update(
+                    input.pass,
+                    input.pointer_changes.as_mut_slice(),
+                    input.cursor_position_rel,
+                    within_bounds,
+                )
+            });
 
-        if tap_result.pressed && within_bounds && !is_active {
-            controller.with_mut(|c| c.open());
-            on_active_change_for_pointer.call(true);
+            if tap_result.pressed && within_bounds && !is_active {
+                controller.with_mut(|c| c.open());
+                on_active_change.call(true);
+            }
         }
     });
 
-    let on_active_change_for_keyboard = on_active_change.clone();
     keyboard_input_handler(move |mut input| {
         if !enabled {
             return;
@@ -579,7 +580,7 @@ fn search_bar_inner_node(args: &SearchBarRenderArgs) {
                         winit::keyboard::KeyCode::Escape => {
                             if is_active {
                                 controller.with_mut(|c| c.close());
-                                on_active_change_for_keyboard.call(false);
+                                on_active_change.call(false);
                             }
                         }
                         winit::keyboard::KeyCode::Enter | winit::keyboard::KeyCode::NumpadEnter => {

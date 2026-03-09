@@ -6,11 +6,12 @@
 use std::time::Duration;
 
 use tessera_ui::{
-    Callback, Color, ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Modifier,
-    Prop, Px, PxPosition, PxSize, RenderSlot, State,
+    Callback, Color, ComputedData, Constraint, DimensionValue, Dp, FocusTraversalPolicy,
+    MeasurementError, Modifier, Prop, Px, PxPosition, PxSize, RenderSlot, State,
     accesskit::Role,
     current_frame_nanos,
     layout::{LayoutInput, LayoutOutput, LayoutSpec},
+    modifier::FocusModifierExt as _,
     provide_context, receive_frame_nanos, remember, tessera, use_context,
 };
 
@@ -90,7 +91,7 @@ fn interpolate_color(from: Color, to: Color, progress: f32) -> Color {
 }
 
 #[tessera]
-fn navigation_bar_item_content_node(args: &NavigationBarItemContentArgs) {
+fn navigation_bar_item_content(args: &NavigationBarItemContentArgs) {
     let item = args.item.clone();
     let is_selected = args.is_selected;
     let was_selected = args.was_selected;
@@ -375,7 +376,7 @@ impl LayoutSpec for NavigationBarItemLayout {
 }
 
 #[tessera]
-fn navigation_bar_item_node(args: &NavigationBarItemArgs) {
+fn navigation_bar_item(args: &NavigationBarItemArgs) {
     let controller = args.controller;
     let index = args.index;
     let item = args.item.clone();
@@ -390,13 +391,12 @@ fn navigation_bar_item_node(args: &NavigationBarItemArgs) {
     let was_selected = index == previous_index && selected_index != previous_index;
     let label = item.label.clone();
 
-    let ripple_state_for_press = ripple_state;
     let on_press = move |ctx: PointerEventContext| {
         let spec = RippleSpec {
             bounded: true,
             radius: None,
         };
-        ripple_state_for_press.with_mut(|state| {
+        ripple_state.with_mut(|state| {
             state.start_animation_with_spec(
                 ctx.normalized_pos,
                 PxSize::new(INDICATOR_WIDTH.to_px(), INDICATOR_HEIGHT.to_px()),
@@ -404,15 +404,13 @@ fn navigation_bar_item_node(args: &NavigationBarItemArgs) {
             );
         });
     };
-    let ripple_state_for_release = ripple_state;
     let on_release = move |_ctx: PointerEventContext| {
-        ripple_state_for_release.with_mut(|state| state.release());
+        ripple_state.with_mut(|state| state.release());
     };
 
     let on_click_item = item.on_click.clone();
-    let controller_for_click = controller;
     let on_click = move || {
-        controller_for_click.with_mut(|c| c.set_selected(index));
+        controller.with_mut(|c| c.set_selected(index));
         on_click_item.call();
     };
 
@@ -435,7 +433,7 @@ fn navigation_bar_item_node(args: &NavigationBarItemArgs) {
                 interaction_state,
                 ripple_state,
             };
-            navigation_bar_item_content_node(&content_args);
+            navigation_bar_item_content(&content_args);
         }
     });
 }
@@ -552,11 +550,11 @@ pub fn navigation_bar(args: &NavigationBarArgs) {
         controller,
         items: args.items,
     };
-    navigation_bar_render_node(&render_args);
+    navigation_bar_render(&render_args);
 }
 
 #[tessera]
-fn navigation_bar_render_node(args: &NavigationBarRenderArgs) {
+fn navigation_bar_render(args: &NavigationBarRenderArgs) {
     let controller = args.controller;
     let items = args.items.clone();
     let scheme = use_context::<MaterialTheme>()
@@ -569,10 +567,8 @@ fn navigation_bar_render_node(args: &NavigationBarRenderArgs) {
         .with(|c| c.animation_progress(frame_nanos))
         .unwrap_or(1.0);
     if controller.with(|c| c.is_animating(frame_nanos)) {
-        let controller_for_frame = controller;
         receive_frame_nanos(move |frame_nanos| {
-            let is_animating =
-                controller_for_frame.with(|controller| controller.is_animating(frame_nanos));
+            let is_animating = controller.with(|controller| controller.is_animating(frame_nanos));
             if is_animating {
                 tessera_ui::FrameNanosControl::Continue
             } else {
@@ -583,73 +579,90 @@ fn navigation_bar_render_node(args: &NavigationBarRenderArgs) {
     let selected_index = controller.with(|c| c.selected());
     let previous_index = controller.with(|c| c.previous_selected());
 
-    surface(&crate::surface::SurfaceArgs::with_child(
-        SurfaceArgs::default()
-            .modifier(Modifier::new().fill_max_width().height(CONTAINER_HEIGHT))
-            .style(scheme.surface_container.into())
-            .elevation(Dp(3.0))
-            .block_input(true),
-        move || {
+    Modifier::new()
+        .focus_group()
+        .focus_traversal_policy(FocusTraversalPolicy::horizontal().wrap(true))
+        .run({
             let items = items.clone();
-            let separator_color = scheme.outline_variant.with_alpha(0.12);
-            column(
-                &ColumnArgs::default()
-                    .modifier(Modifier::new().fill_max_size())
-                    .cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .children(move |column_scope| {
-                        column_scope.child(move || {
-                            surface(&crate::surface::SurfaceArgs::with_child(
-                                SurfaceArgs::default()
-                                    .modifier(
-                                        Modifier::new().fill_max_width().height(DIVIDER_HEIGHT),
-                                    )
-                                    .style(separator_color.into()),
-                                || {},
-                            ));
-                        });
+            move || {
+                let items = items.clone();
+                surface(&crate::surface::SurfaceArgs::with_child(
+                    SurfaceArgs::default()
+                        .modifier(Modifier::new().fill_max_width().height(CONTAINER_HEIGHT))
+                        .style(scheme.surface_container.into())
+                        .elevation(Dp(3.0))
+                        .block_input(true),
+                    move || {
+                        let items = items.clone();
+                        let separator_color = scheme.outline_variant.with_alpha(0.12);
+                        column(
+                            &ColumnArgs::default()
+                                .modifier(Modifier::new().fill_max_size())
+                                .cross_axis_alignment(CrossAxisAlignment::Stretch)
+                                .children(move |column_scope| {
+                                    column_scope.child(move || {
+                                        surface(&crate::surface::SurfaceArgs::with_child(
+                                            SurfaceArgs::default()
+                                                .modifier(
+                                                    Modifier::new()
+                                                        .fill_max_width()
+                                                        .height(DIVIDER_HEIGHT),
+                                                )
+                                                .style(separator_color.into()),
+                                            || {},
+                                        ));
+                                    });
 
-                        column_scope.child_weighted(
-                            move || {
-                                let items = items.clone();
-                                row(&RowArgs::default()
-                                    .modifier(Modifier::new().fill_max_size())
-                                    .main_axis_alignment(MainAxisAlignment::Start)
-                                    .cross_axis_alignment(CrossAxisAlignment::Center)
-                                    .children(move |row_scope| {
-                                        let last_index = items.len().saturating_sub(1);
-                                        for (index, item) in items.iter().cloned().enumerate() {
-                                            row_scope.child_weighted(
-                                                move || {
-                                                    let item_args = NavigationBarItemArgs {
-                                                        controller,
-                                                        index,
-                                                        item: item.clone(),
-                                                        selected_index,
-                                                        previous_index,
-                                                        animation_progress,
-                                                    };
-                                                    navigation_bar_item_node(&item_args);
-                                                },
-                                                1.0,
-                                            );
+                                    column_scope.child_weighted(
+                                        move || {
+                                            let items = items.clone();
+                                            row(&RowArgs::default()
+                                                .modifier(Modifier::new().fill_max_size())
+                                                .main_axis_alignment(MainAxisAlignment::Start)
+                                                .cross_axis_alignment(CrossAxisAlignment::Center)
+                                                .children(move |row_scope| {
+                                                    let last_index = items.len().saturating_sub(1);
+                                                    for (index, item) in
+                                                        items.iter().cloned().enumerate()
+                                                    {
+                                                        row_scope.child_weighted(
+                                                            move || {
+                                                                let item_args =
+                                                                    NavigationBarItemArgs {
+                                                                        controller,
+                                                                        index,
+                                                                        item: item.clone(),
+                                                                        selected_index,
+                                                                        previous_index,
+                                                                        animation_progress,
+                                                                    };
+                                                                navigation_bar_item(&item_args);
+                                                            },
+                                                            1.0,
+                                                        );
 
-                                            if index != last_index {
-                                                row_scope.child(|| {
-                                                    spacer(&crate::spacer::SpacerArgs::new(
-                                                        Modifier::new()
-                                                            .width(ITEM_HORIZONTAL_SPACING),
-                                                    ));
-                                                });
-                                            }
-                                        }
-                                    }));
-                            },
-                            1.0,
+                                                        if index != last_index {
+                                                            row_scope.child(|| {
+                                                                spacer(
+                                                                    &crate::spacer::SpacerArgs::new(
+                                                                        Modifier::new().width(
+                                                                            ITEM_HORIZONTAL_SPACING,
+                                                                        ),
+                                                                    ),
+                                                                );
+                                                            });
+                                                        }
+                                                    }
+                                                }));
+                                        },
+                                        1.0,
+                                    );
+                                }),
                         );
-                    }),
-            );
-        },
-    ));
+                    },
+                ));
+            }
+        });
 }
 
 /// Controller for the `navigation_bar` component.

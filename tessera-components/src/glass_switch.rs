@@ -243,15 +243,15 @@ pub fn glass_switch(args: &GlassSwitchArgs) {
         controller.with_mut(|c| c.set_checked(switch_args.checked));
     }
     switch_args.controller = Some(controller);
-    glass_switch_node(&switch_args);
+    glass_switch_inner(&switch_args);
 }
 
 #[tessera]
-fn glass_switch_node(args: &GlassSwitchArgs) {
+fn glass_switch_inner(args: &GlassSwitchArgs) {
     let args = args.clone();
     let controller = args
         .controller
-        .expect("glass_switch_node requires controller to be set");
+        .expect("glass_switch_inner requires controller to be set");
     let mut modifier = args.modifier;
 
     let on_toggle = args.on_toggle.clone();
@@ -290,9 +290,8 @@ fn glass_switch_node(args: &GlassSwitchArgs) {
 
     // Track tint color interpolation based on progress
     if controller.with(|c| c.is_animating()) {
-        let controller_for_frame = controller;
         receive_frame_nanos(move |frame_nanos| {
-            let is_animating = controller_for_frame.with_mut(|controller| {
+            let is_animating = controller.with_mut(|controller| {
                 controller.update_progress(frame_nanos);
                 controller.is_animating()
             });

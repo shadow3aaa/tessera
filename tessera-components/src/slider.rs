@@ -4,11 +4,11 @@
 //!
 //! Use to allow users to select a value from a continuous range.
 use tessera_ui::{
-    CallbackWith, Color, ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Modifier,
-    PointerInput, Prop, Px, PxPosition, State,
+    CallbackWith, Color, ComputedData, Constraint, DimensionValue, Dp, FocusProperties,
+    FocusRequester, MeasurementError, Modifier, PointerInput, Prop, Px, PxPosition, State,
     accesskit::{Action, Role},
-    focus_state::Focus,
     layout::{LayoutInput, LayoutOutput, LayoutSpec},
+    modifier::FocusModifierExt as _,
     remember, tessera, use_context,
 };
 
@@ -71,6 +71,7 @@ struct RangeSliderThumbArgs {
     thumb_layout: SliderLayout,
     handle_width: Px,
     colors: SliderColors,
+    focus: FocusRequester,
     accessibility: RangeThumbAccessibilityArgs,
 }
 
@@ -129,13 +130,43 @@ fn apply_range_thumb_accessibility(input: &PointerInput, args: &RangeThumbAccess
 }
 
 #[tessera]
-fn range_slider_thumb_node(args: &RangeSliderThumbArgs) {
-    render_handle(args.thumb_layout, args.handle_width, &args.colors);
-    let accessibility = args.accessibility.clone();
+fn range_slider_thumb(args: &RangeSliderThumbArgs) {
+    let args = args.clone();
+    Modifier::new()
+        .focus_requester(args.focus)
+        .focusable()
+        .focus_properties(
+            FocusProperties::new()
+                .can_focus(!args.accessibility.disabled)
+                .can_request_focus(!args.accessibility.disabled),
+        )
+        .run(move || {
+            render_handle(args.thumb_layout, args.handle_width, &args.colors);
+            let accessibility = args.accessibility.clone();
 
-    pointer_input_handler(move |input| {
-        apply_range_thumb_accessibility(&input, &accessibility);
-    });
+            pointer_input_handler(move |input| {
+                apply_range_thumb_accessibility(&input, &accessibility);
+            });
+        });
+}
+
+#[derive(Clone)]
+struct FocusTargetModifier {
+    requester: FocusRequester,
+    disabled: bool,
+}
+
+impl FocusTargetModifier {
+    fn build(self) -> Modifier {
+        Modifier::new()
+            .focus_requester(self.requester)
+            .focusable()
+            .focus_properties(
+                FocusProperties::new()
+                    .can_focus(!self.disabled)
+                    .can_request_focus(!self.disabled),
+            )
+    }
 }
 
 struct RangeSliderMeasureArgs {
@@ -272,7 +303,7 @@ impl LayoutSpec for RangeSliderLayoutSpec {
 /// Controller for the `slider` component.
 pub struct SliderController {
     is_dragging: bool,
-    focus: Focus,
+    focus: FocusRequester,
     is_hovered: bool,
 }
 
@@ -281,7 +312,7 @@ impl SliderController {
     pub fn new() -> Self {
         Self {
             is_dragging: false,
-            focus: Focus::new(),
+            focus: FocusRequester::new(),
             is_hovered: false,
         }
     }
@@ -788,116 +819,127 @@ pub fn slider(args: &SliderArgs) {
     let controller = args
         .controller
         .unwrap_or_else(|| remember(SliderController::new));
-    slider_node(args, controller);
+    slider_render(args, controller);
 }
 
-fn slider_node(slider_args: SliderArgs, controller: State<SliderController>) {
+fn slider_render(slider_args: SliderArgs, controller: State<SliderController>) {
     let modifier = slider_args.modifier.clone();
     modifier.run(move || {
         let mut inner_args = slider_args.clone();
         inner_args.controller = Some(controller);
-        slider_inner_node(&inner_args);
+        slider_inner(&inner_args);
     });
 }
 
 #[tessera]
-fn slider_inner_node(args: &SliderArgs) {
+fn slider_inner(args: &SliderArgs) {
     let args: SliderArgs = args.clone();
     let controller = args
         .controller
-        .expect("slider_inner_node requires controller to be set");
-    let initial_width = fallback_component_width(&args);
-    let clamped_value = args.value.clamp(0.0, 1.0);
-    let (is_dragging, is_focused) = controller.with(|c| (c.is_dragging(), c.is_focused()));
-    let base_handle_width = args.thumb_diameter.to_px();
-    let pressed_handle_width = Px((base_handle_width.0 / 2).max(1));
-    let handle_width = if is_dragging || is_focused {
-        pressed_handle_width
-    } else {
-        base_handle_width
-    };
-    let slider_layout = slider_layout_with_handle_width(&args, initial_width, handle_width);
-    let colors = slider_colors(&args);
-
-    render_active_segment(slider_layout, &colors);
-    render_inactive_segment(slider_layout, &colors);
-
-    if let Some(icon_size) = slider_layout.icon_size
-        && let Some(inset_icon) = args.inset_icon.as_ref()
-    {
-        let scheme = use_context::<MaterialTheme>()
-            .expect("MaterialTheme must be provided")
-            .get()
-            .color_scheme;
-        let tint = if args.disabled {
-            scheme
-                .on_surface
-                .with_alpha(MaterialAlpha::DISABLED_CONTENT)
-        } else {
-            scheme.on_primary
-        };
-
-        crate::icon::icon(
-            &inset_icon
-                .clone()
-                .tint(tint)
-                .tint_mode(VectorTintMode::Solid)
-                .size(icon_size),
-        );
+        .expect("slider_inner requires controller to be set");
+    FocusTargetModifier {
+        requester: controller.with(|c| c.focus),
+        disabled: args.disabled,
     }
-
-    if args.steps > 0 {
-        for fraction in tick_fractions(args.steps) {
-            let is_active = fraction <= clamped_value;
-            let color = if is_active {
-                colors.inactive_track
-            } else {
-                colors.active_track
-            };
-            render_tick(slider_layout.stop_indicator_diameter, color);
-        }
-    }
-    if slider_layout.show_stop_indicator {
-        render_stop_indicator(slider_layout, &colors);
-    }
-    render_handle(slider_layout, handle_width, &colors);
-
-    let cloned_args = args.clone();
-    let tap_recognizer = remember(TapRecognizer::default);
-    let drag_recognizer = remember(DragRecognizer::default);
-    pointer_input_handler(move |mut input| {
+    .build()
+    .run(move || {
+        let initial_width = fallback_component_width(&args);
+        let clamped_value = args.value.clamp(0.0, 1.0);
         let (is_dragging, is_focused) = controller.with(|c| (c.is_dragging(), c.is_focused()));
-        let base_handle_width = cloned_args.thumb_diameter.to_px();
+        let base_handle_width = args.thumb_diameter.to_px();
         let pressed_handle_width = Px((base_handle_width.0 / 2).max(1));
         let handle_width = if is_dragging || is_focused {
             pressed_handle_width
         } else {
             base_handle_width
         };
-        let resolved_layout =
-            slider_layout_with_handle_width(&cloned_args, input.computed_data.width, handle_width);
-        handle_slider_state(
-            &mut input,
-            tap_recognizer,
-            drag_recognizer,
-            controller,
-            &cloned_args,
-            &resolved_layout,
-        );
-        apply_slider_accessibility(
-            &mut input,
-            &cloned_args,
-            clamped_value,
-            &cloned_args.on_change,
-        );
-    });
+        let slider_layout = slider_layout_with_handle_width(&args, initial_width, handle_width);
+        let colors = slider_colors(&args);
 
-    let has_inset_icon = args.inset_icon.is_some();
-    layout(SliderLayoutSpec {
-        args,
-        clamped_value,
-        handle_width,
-        has_inset_icon,
+        render_active_segment(slider_layout, &colors);
+        render_inactive_segment(slider_layout, &colors);
+
+        if let Some(icon_size) = slider_layout.icon_size
+            && let Some(inset_icon) = args.inset_icon.as_ref()
+        {
+            let scheme = use_context::<MaterialTheme>()
+                .expect("MaterialTheme must be provided")
+                .get()
+                .color_scheme;
+            let tint = if args.disabled {
+                scheme
+                    .on_surface
+                    .with_alpha(MaterialAlpha::DISABLED_CONTENT)
+            } else {
+                scheme.on_primary
+            };
+
+            crate::icon::icon(
+                &inset_icon
+                    .clone()
+                    .tint(tint)
+                    .tint_mode(VectorTintMode::Solid)
+                    .size(icon_size),
+            );
+        }
+
+        if args.steps > 0 {
+            for fraction in tick_fractions(args.steps) {
+                let is_active = fraction <= clamped_value;
+                let color = if is_active {
+                    colors.inactive_track
+                } else {
+                    colors.active_track
+                };
+                render_tick(slider_layout.stop_indicator_diameter, color);
+            }
+        }
+        if slider_layout.show_stop_indicator {
+            render_stop_indicator(slider_layout, &colors);
+        }
+        render_handle(slider_layout, handle_width, &colors);
+
+        let cloned_args = args.clone();
+        let tap_recognizer = remember(TapRecognizer::default);
+        let drag_recognizer = remember(DragRecognizer::default);
+        pointer_input_handler(move |mut input| {
+            let (is_dragging, is_focused) = controller.with(|c| (c.is_dragging(), c.is_focused()));
+            let base_handle_width = cloned_args.thumb_diameter.to_px();
+            let pressed_handle_width = Px((base_handle_width.0 / 2).max(1));
+            let handle_width = if is_dragging || is_focused {
+                pressed_handle_width
+            } else {
+                base_handle_width
+            };
+            let resolved_layout = slider_layout_with_handle_width(
+                &cloned_args,
+                input.computed_data.width,
+                handle_width,
+            );
+            handle_slider_state(
+                &mut input,
+                tap_recognizer,
+                drag_recognizer,
+                controller,
+                &cloned_args,
+                &resolved_layout,
+            );
+            apply_slider_accessibility(
+                &mut input,
+                &cloned_args,
+                clamped_value,
+                &cloned_args.on_change,
+            );
+        });
+
+        let has_inset_icon = args.inset_icon.is_some();
+        let layout_args = args.clone();
+        layout(SliderLayoutSpec {
+            args: layout_args,
+            clamped_value,
+            handle_width,
+            has_inset_icon,
+        });
     });
 }
 
@@ -1091,7 +1133,7 @@ fn measure_centered_slider(
 ///     *value_guard = 0.75;
 ///     assert_eq!(*value_guard, 0.75);
 /// }
-/// let value_for_slider = current_value.clone();
+/// let current_value = current_value.clone();
 ///
 /// # let args = tessera_components::theme::MaterialThemeProviderArgs::new(
 /// #     || MaterialTheme::default(),
@@ -1099,7 +1141,7 @@ fn measure_centered_slider(
 /// centered_slider(
 ///     &SliderArgs::default()
 ///         .modifier(Modifier::new().width(Dp(200.0)))
-///         .value(*value_for_slider.lock().unwrap())
+///         .value(*current_value.lock().unwrap())
 ///         .on_change(move |new_value| {
 ///             // In a real app, you would update your state here.
 ///             // For this example, we'll just check it after the simulated change.
@@ -1126,88 +1168,96 @@ pub fn centered_slider(args: &SliderArgs) {
         .controller
         .unwrap_or_else(|| remember(SliderController::new));
     args.controller = Some(controller);
-    centered_slider_node(&args);
+    centered_slider_inner(&args);
 }
 
 #[tessera]
-fn centered_slider_node(args: &SliderArgs) {
+fn centered_slider_inner(args: &SliderArgs) {
     let args = args.clone();
     let controller = args
         .controller
-        .expect("centered_slider_node requires controller to be set");
-    let initial_width = fallback_component_width(&args);
-    let clamped_value = args.value.clamp(0.0, 1.0);
-    let (is_dragging, is_focused) = controller.with(|c| (c.is_dragging(), c.is_focused()));
-    let base_handle_width = args.thumb_diameter.to_px();
-    let pressed_handle_width = Px((base_handle_width.0 / 2).max(1));
-    let handle_width = if is_dragging || is_focused {
-        pressed_handle_width
-    } else {
-        base_handle_width
-    };
-    let centered_layout = CenteredSliderLayout {
-        base: slider_layout_with_handle_width(&args, initial_width, handle_width),
-    };
-    let colors = slider_colors(&args);
-
-    render_centered_tracks(centered_layout, &colors);
-    if args.steps > 0 {
-        let active_start = clamped_value.min(0.5);
-        let active_end = clamped_value.max(0.5);
-        for fraction in tick_fractions(args.steps) {
-            let is_active = fraction >= active_start && fraction <= active_end;
-            let color = if is_active {
-                colors.inactive_track
-            } else {
-                colors.active_track
-            };
-            render_tick(centered_layout.base.stop_indicator_diameter, color);
-        }
+        .expect("centered_slider_inner requires controller to be set");
+    FocusTargetModifier {
+        requester: controller.with(|c| c.focus),
+        disabled: args.disabled,
     }
-    if centered_layout.base.show_stop_indicator {
-        render_centered_stops(centered_layout, &colors);
-    }
-    render_handle(centered_layout.base, handle_width, &colors);
-
-    let cloned_args = args.clone();
-    let tap_recognizer = remember(TapRecognizer::default);
-    let drag_recognizer = remember(DragRecognizer::default);
-    pointer_input_handler(move |mut input| {
+    .build()
+    .run(move || {
+        let initial_width = fallback_component_width(&args);
+        let clamped_value = args.value.clamp(0.0, 1.0);
         let (is_dragging, is_focused) = controller.with(|c| (c.is_dragging(), c.is_focused()));
-        let base_handle_width = cloned_args.thumb_diameter.to_px();
+        let base_handle_width = args.thumb_diameter.to_px();
         let pressed_handle_width = Px((base_handle_width.0 / 2).max(1));
         let handle_width = if is_dragging || is_focused {
             pressed_handle_width
         } else {
             base_handle_width
         };
-        let resolved_layout = CenteredSliderLayout {
-            base: slider_layout_with_handle_width(
-                &cloned_args,
-                input.computed_data.width,
-                handle_width,
-            ),
+        let centered_layout = CenteredSliderLayout {
+            base: slider_layout_with_handle_width(&args, initial_width, handle_width),
         };
-        handle_slider_state(
-            &mut input,
-            tap_recognizer,
-            drag_recognizer,
-            controller,
-            &cloned_args,
-            &resolved_layout.base,
-        );
-        apply_slider_accessibility(
-            &mut input,
-            &cloned_args,
-            clamped_value,
-            &cloned_args.on_change,
-        );
-    });
+        let colors = slider_colors(&args);
 
-    layout(CenteredSliderLayoutSpec {
-        args,
-        clamped_value,
-        handle_width,
+        render_centered_tracks(centered_layout, &colors);
+        if args.steps > 0 {
+            let active_start = clamped_value.min(0.5);
+            let active_end = clamped_value.max(0.5);
+            for fraction in tick_fractions(args.steps) {
+                let is_active = fraction >= active_start && fraction <= active_end;
+                let color = if is_active {
+                    colors.inactive_track
+                } else {
+                    colors.active_track
+                };
+                render_tick(centered_layout.base.stop_indicator_diameter, color);
+            }
+        }
+        if centered_layout.base.show_stop_indicator {
+            render_centered_stops(centered_layout, &colors);
+        }
+        render_handle(centered_layout.base, handle_width, &colors);
+
+        let cloned_args = args.clone();
+        let tap_recognizer = remember(TapRecognizer::default);
+        let drag_recognizer = remember(DragRecognizer::default);
+        pointer_input_handler(move |mut input| {
+            let (is_dragging, is_focused) = controller.with(|c| (c.is_dragging(), c.is_focused()));
+            let base_handle_width = cloned_args.thumb_diameter.to_px();
+            let pressed_handle_width = Px((base_handle_width.0 / 2).max(1));
+            let handle_width = if is_dragging || is_focused {
+                pressed_handle_width
+            } else {
+                base_handle_width
+            };
+            let resolved_layout = CenteredSliderLayout {
+                base: slider_layout_with_handle_width(
+                    &cloned_args,
+                    input.computed_data.width,
+                    handle_width,
+                ),
+            };
+            handle_slider_state(
+                &mut input,
+                tap_recognizer,
+                drag_recognizer,
+                controller,
+                &cloned_args,
+                &resolved_layout.base,
+            );
+            apply_slider_accessibility(
+                &mut input,
+                &cloned_args,
+                clamped_value,
+                &cloned_args.on_change,
+            );
+        });
+
+        let layout_args = args.clone();
+        layout(CenteredSliderLayoutSpec {
+            args: layout_args,
+            clamped_value,
+            handle_width,
+        });
     });
 }
 
@@ -1434,29 +1484,29 @@ pub fn range_slider(args: &RangeSliderArgs) {
     let state = args
         .controller
         .unwrap_or_else(|| remember(RangeSliderController::new));
-    range_slider_node(args, state);
+    range_slider_render(args, state);
 }
 
-fn range_slider_node(args: RangeSliderArgs, state: State<RangeSliderController>) {
+fn range_slider_render(args: RangeSliderArgs, state: State<RangeSliderController>) {
     let modifier = args.modifier.clone();
     modifier.run(move || {
         let mut inner_args = args.clone();
         inner_args.controller = Some(state);
-        range_slider_inner_node(&inner_args);
+        range_slider_inner(&inner_args);
     });
 }
 
 #[tessera]
-fn range_slider_inner_node(args: &RangeSliderArgs) {
+fn range_slider_inner(args: &RangeSliderArgs) {
     let args: RangeSliderArgs = args.clone();
     let state = args
         .controller
-        .expect("range_slider_inner_node requires controller to be set");
+        .expect("range_slider_inner requires controller to be set");
     let dummy_slider_args = SliderArgs::default()
         .size(args.size)
         .show_stop_indicator(args.show_stop_indicator);
     let initial_width = fallback_component_width(&dummy_slider_args);
-    let dummy_for_measure = dummy_slider_args.clone();
+    let slider = dummy_slider_args.clone();
     let range_layout = range_slider_layout(&args, initial_width);
 
     let start = args.value.0.clamp(0.0, 1.0);
@@ -1502,6 +1552,7 @@ fn range_slider_inner_node(args: &RangeSliderArgs) {
         thumb_layout: range_layout.base,
         handle_width: start_handle_width,
         colors,
+        focus: state.with(|s| s.focus_start),
         accessibility: RangeThumbAccessibilityArgs {
             key: "range_slider_start_thumb",
             label: args.accessibility_label.clone(),
@@ -1518,12 +1569,13 @@ fn range_slider_inner_node(args: &RangeSliderArgs) {
             }),
         },
     };
-    range_slider_thumb_node(&start_thumb_args);
+    range_slider_thumb(&start_thumb_args);
 
     let end_thumb_args = RangeSliderThumbArgs {
         thumb_layout: range_layout.base,
         handle_width: end_handle_width,
         colors,
+        focus: state.with(|s| s.focus_end),
         accessibility: RangeThumbAccessibilityArgs {
             key: "range_slider_end_thumb",
             label: args.accessibility_label.clone(),
@@ -1540,7 +1592,7 @@ fn range_slider_inner_node(args: &RangeSliderArgs) {
             }),
         },
     };
-    range_slider_thumb_node(&end_thumb_args);
+    range_slider_thumb(&end_thumb_args);
 
     let cloned_args = args.clone();
     let start_val = start;
@@ -1591,7 +1643,7 @@ fn range_slider_inner_node(args: &RangeSliderArgs) {
 
     layout(RangeSliderLayoutSpec {
         args,
-        slider: dummy_for_measure,
+        slider,
         start,
         end,
         start_handle_width,

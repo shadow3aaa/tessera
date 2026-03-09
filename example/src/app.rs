@@ -49,6 +49,7 @@ use crate::example_components::{
     divider::DividerShowcaseDestination,
     floating_action_button::FloatingActionButtonShowcaseDestination,
     fluid_glass::FluidGlassShowcaseDestination,
+    focus_navigation::FocusNavigationShowcaseDestination,
     glass_button::GlassButtonShowcaseDestination,
     glass_progress::GlassProgressShowcaseDestination,
     glass_slider::GlassSliderShowcaseDestination,
@@ -91,11 +92,11 @@ fn measure_parent_width(width_state: State<Dp>, child: impl Fn() + Send + Sync +
         width_state,
         child: RenderSlot::new(child),
     };
-    measure_parent_width_node(&args);
+    measure_parent_width_probe(&args);
 }
 
 #[tessera]
-fn measure_parent_width_node(args: &MeasureParentWidthArgs) {
+fn measure_parent_width_probe(args: &MeasureParentWidthArgs) {
     pointer_input_handler({
         let width_state = args.width_state;
         move |input| {
@@ -443,11 +444,11 @@ fn home(
         side_sheet_controller,
         dialog_controller,
     };
-    home_node(&args);
+    home_screen(&args);
 }
 
 #[tessera]
-fn home_node(args: &HomeArgs) {
+fn home_screen(args: &HomeArgs) {
     let bottom_sheet_controller = args.bottom_sheet_controller;
     let side_sheet_controller = args.side_sheet_controller;
     let dialog_controller = args.dialog_controller;
@@ -455,6 +456,13 @@ fn home_node(args: &HomeArgs) {
     let search_query = remember(String::new);
     let search_controller = remember(SearchBarController::default);
     let examples = Arc::new(vec![
+        ComponentExampleDesc::new(
+            "Focus & Keyboard Navigation",
+            "A concentrated page for Tab traversal, roving focus, submenu navigation, modal trap, and scroll reveal.",
+            || {
+                Router::push(FocusNavigationShowcaseDestination {});
+            },
+        ),
         ComponentExampleDesc::new(
             "Text Input",
             "A basic component for multiline text input.",
@@ -795,11 +803,11 @@ fn component_card(title: &str, description: &str, on_click: impl Into<Callback>)
         description: description.to_string(),
         on_click: on_click.into(),
     };
-    component_card_node(&args);
+    component_card_tile(&args);
 }
 
 #[tessera]
-fn component_card_node(args: &ComponentCardArgs) {
+fn component_card_tile(args: &ComponentCardArgs) {
     let on_click = args.on_click.clone();
     let title = args.title.clone();
     let description = args.description.clone();
@@ -865,12 +873,12 @@ fn window_control_button(icon_args: IconArgs, action: tessera_ui::WindowAction, 
         action,
         tint,
     };
-    window_control_button_node(&args);
+    window_control_button_surface(&args);
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tessera]
-fn window_control_button_node(args: &WindowControlButtonArgs) {
+fn window_control_button_surface(args: &WindowControlButtonArgs) {
     let icon_args = args.icon_args.clone().size(Dp(18.0)).tint(args.tint);
     surface(&SurfaceArgs::with_child(
         SurfaceArgs::default()

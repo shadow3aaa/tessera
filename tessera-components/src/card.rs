@@ -5,8 +5,8 @@
 //! Group related content into a single, elevated or outlined container.
 
 use tessera_ui::{
-    Callback, Color, Dp, Modifier, Prop, RenderSlot, State, receive_frame_nanos, remember, tessera,
-    use_context,
+    Callback, Color, Dp, Modifier, Prop, RenderSlot, State, accesskit::Role, receive_frame_nanos,
+    remember, tessera, use_context,
 };
 
 use crate::{
@@ -567,9 +567,8 @@ pub fn card(args: &CardArgs) {
     let should_schedule_frame = elevation_spring.with(|spring| spring.is_animating());
 
     if should_schedule_frame {
-        let elevation_spring_for_frame = elevation_spring;
         receive_frame_nanos(move |frame_nanos| {
-            let is_animating = elevation_spring_for_frame.with_mut(|spring| {
+            let is_animating = elevation_spring.with_mut(|spring| {
                 spring.tick(frame_nanos);
                 spring.is_animating()
             });
@@ -615,7 +614,10 @@ pub fn card(args: &CardArgs) {
     }
 
     if let Some(on_click) = args.on_click.clone() {
-        surface_args = surface_args.on_click_shared(on_click);
+        surface_args = surface_args
+            .on_click_shared(on_click)
+            .accessibility_role(Role::Button)
+            .accessibility_focusable(true);
     }
 
     surface(&crate::surface::SurfaceArgs::with_child(
