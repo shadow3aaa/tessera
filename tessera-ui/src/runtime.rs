@@ -5,66 +5,30 @@ use std::{
     cell::RefCell,
     hash::{Hash, Hasher},
     marker::PhantomData,
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 
-use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
+use parking_lot::RwLock;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
 
 use crate::{
     NodeId,
+    accessibility::{AccessibilityActionHandler, AccessibilityNode},
     component_tree::ComponentTree,
+    execution_context::{OrderFrame, with_execution_context, with_execution_context_mut},
     focus::{
         FocusDirection, FocusGroupNode, FocusHandleId, FocusNode, FocusProperties,
         FocusRegistration, FocusRegistrationKind, FocusRequester, FocusRequesterId,
         FocusRevealRequest, FocusScopeNode, FocusState, FocusTraversalPolicy,
     },
-    layout::{LayoutSpec, LayoutSpecDyn},
+    layout::{LayoutPolicyDyn, RenderPolicyDyn},
+    modifier::Modifier,
     prop::{CallbackWith, ComponentReplayData, ErasedComponentRunner, Prop},
+    time::Instant,
 };
-
-thread_local! {
-    /// Stack of currently executing component node ids for the current thread.
-    static NODE_CONTEXT_STACK: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
-    /// Control-flow grouping path for the current thread.
-    static GROUP_PATH_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    /// Component-instance logic identifier stack (one per component invocation).
-    static INSTANCE_LOGIC_ID_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    /// Current execution phase stack for the thread.
-    static PHASE_STACK: RefCell<Vec<RuntimePhase>> = const { RefCell::new(Vec::new()) };
-    /// Execution-order frames scoped to the current component/group nesting.
-    static ORDER_FRAME_STACK: RefCell<Vec<OrderFrame>> = const { RefCell::new(Vec::new()) };
-
-    /// Instance key stack: overrides instance identity inside `key` blocks.
-    static INSTANCE_KEY_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-
-    /// Stack of currently executing component instance keys for the current thread.
-    ///
-    /// Unlike `current_instance_key()`, this remains stable for the whole
-    /// component body even when nested control-flow groups are entered.
-    static CURRENT_COMPONENT_INSTANCE_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-
-    /// One-shot instance-logic-id override used by subtree replay.
-    ///
-    /// When set, the next `push_current_node` call will consume this value as
-    /// the component instance logic id instead of deriving it from parent stacks.
-    static NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE: RefCell<Option<u64>> = const { RefCell::new(None) };
-
-    /// Active reactive-dirty instance-key set for the current build pass.
-    static BUILD_DIRTY_INSTANCE_KEYS_STACK: RefCell<Vec<Arc<HashSet<u64>>>> = const { RefCell::new(Vec::new()) };
-}
-
-#[derive(Clone, Copy, Default)]
-struct OrderFrame {
-    remember: u64,
-    functor: u64,
-    context: u64,
-    instance: u64,
-    frame_receiver: u64,
-}
 
 #[derive(Clone, Copy)]
 enum OrderCounterKind {
@@ -75,21 +39,22 @@ enum OrderCounterKind {
 }
 
 fn push_order_frame() {
-    ORDER_FRAME_STACK.with(|stack| stack.borrow_mut().push(OrderFrame::default()));
+    with_execution_context_mut(|context| {
+        context.order_frame_stack.push(OrderFrame::default());
+    });
 }
 
 fn pop_order_frame(underflow_message: &str) {
-    ORDER_FRAME_STACK.with(|stack| {
-        let popped = stack.borrow_mut().pop();
+    with_execution_context_mut(|context| {
+        let popped = context.order_frame_stack.pop();
         debug_assert!(popped.is_some(), "{underflow_message}");
     });
 }
 
 fn next_order_counter(kind: OrderCounterKind, empty_message: &str) -> u64 {
-    ORDER_FRAME_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        debug_assert!(!stack.is_empty(), "{empty_message}");
-        let frame = stack.last_mut().expect(empty_message);
+    with_execution_context_mut(|context| {
+        debug_assert!(!context.order_frame_stack.is_empty(), "{empty_message}");
+        let frame = context.order_frame_stack.last_mut().expect(empty_message);
         match kind {
             OrderCounterKind::Remember => {
                 let counter = frame.remember;
@@ -116,9 +81,8 @@ fn next_order_counter(kind: OrderCounterKind, empty_message: &str) -> u64 {
 }
 
 fn next_child_instance_call_index() -> u64 {
-    ORDER_FRAME_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let Some(frame) = stack.last_mut() else {
+    with_execution_context_mut(|context| {
+        let Some(frame) = context.order_frame_stack.last_mut() else {
             return 0;
         };
         let index = frame.instance;
@@ -400,10 +364,12 @@ impl PersistentFocusHandleStore {
     }
 }
 
-static SLOT_TABLE: OnceLock<RwLock<SlotTable>> = OnceLock::new();
+fn with_slot_table<R>(f: impl FnOnce(&SlotTable) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.slot_table.borrow()))
+}
 
-fn slot_table() -> &'static RwLock<SlotTable> {
-    SLOT_TABLE.get_or_init(|| RwLock::new(SlotTable::default()))
+fn with_slot_table_mut<R>(f: impl FnOnce(&mut SlotTable) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.slot_table.borrow_mut()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -478,33 +444,41 @@ impl RenderSlotCell {
     }
 }
 
-struct RenderSlotWithCell<T, R> {
-    current: RwLock<Arc<dyn Fn(T) -> R + Send + Sync>>,
+struct RenderSlotWithCell<T> {
+    current: RwLock<Arc<dyn Fn(T) + Send + Sync>>,
 }
 
-impl<T, R> RenderSlotWithCell<T, R> {
-    fn new(current: Arc<dyn Fn(T) -> R + Send + Sync>) -> Self {
+impl<T> RenderSlotWithCell<T> {
+    fn new(current: Arc<dyn Fn(T) + Send + Sync>) -> Self {
         Self {
             current: RwLock::new(current),
         }
     }
 
-    fn update(&self, next: Arc<dyn Fn(T) -> R + Send + Sync>) {
+    fn update(&self, next: Arc<dyn Fn(T) + Send + Sync>) {
         *self.current.write() = next;
     }
 
-    fn shared(&self) -> Arc<dyn Fn(T) -> R + Send + Sync> {
+    fn shared(&self) -> Arc<dyn Fn(T) + Send + Sync> {
         Arc::clone(&self.current.read())
     }
 }
 
 #[derive(Default)]
 struct LayoutDirtyTracker {
-    previous_layout_specs_by_node: HashMap<u64, Box<dyn LayoutSpecDyn>>,
-    frame_layout_specs_by_node: HashMap<u64, Box<dyn LayoutSpecDyn>>,
-    pending_self_dirty_nodes: HashSet<u64>,
-    ready_self_dirty_nodes: HashSet<u64>,
+    previous_layout_policies_by_node: HashMap<u64, Box<dyn LayoutPolicyDyn>>,
+    frame_layout_policies_by_node: HashMap<u64, Box<dyn LayoutPolicyDyn>>,
+    pending_measure_self_dirty_nodes: HashSet<u64>,
+    ready_measure_self_dirty_nodes: HashSet<u64>,
+    pending_placement_self_dirty_nodes: HashSet<u64>,
+    ready_placement_self_dirty_nodes: HashSet<u64>,
     previous_children_by_node: HashMap<u64, Vec<u64>>,
+}
+
+#[derive(Default)]
+pub(crate) struct LayoutDirtyNodes {
+    pub measure_self_nodes: HashSet<u64>,
+    pub placement_self_nodes: HashSet<u64>,
 }
 
 #[derive(Default)]
@@ -532,46 +506,53 @@ struct ComponentReplayTracker {
     current_nodes: HashMap<u64, ReplayNodeSnapshot>,
 }
 
-static COMPONENT_REPLAY_TRACKER: OnceLock<RwLock<ComponentReplayTracker>> = OnceLock::new();
+fn with_component_replay_tracker<R>(f: impl FnOnce(&ComponentReplayTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.component_replay_tracker.borrow()))
+}
 
-fn component_replay_tracker() -> &'static RwLock<ComponentReplayTracker> {
-    COMPONENT_REPLAY_TRACKER.get_or_init(|| RwLock::new(ComponentReplayTracker::default()))
+fn with_component_replay_tracker_mut<R>(f: impl FnOnce(&mut ComponentReplayTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.component_replay_tracker.borrow_mut()))
 }
 
 pub(crate) fn begin_frame_component_replay_tracking() {
-    component_replay_tracker().write().current_nodes.clear();
+    with_component_replay_tracker_mut(|tracker| tracker.current_nodes.clear());
 }
 
 pub(crate) fn finalize_frame_component_replay_tracking() {
-    let mut tracker = component_replay_tracker().write();
-    tracker.previous_nodes = std::mem::take(&mut tracker.current_nodes);
+    with_component_replay_tracker_mut(|tracker| {
+        tracker.previous_nodes = std::mem::take(&mut tracker.current_nodes);
+    });
 }
 
 pub(crate) fn finalize_frame_component_replay_tracking_partial() {
-    let mut tracker = component_replay_tracker().write();
-    let current = std::mem::take(&mut tracker.current_nodes);
-    tracker.previous_nodes.extend(current);
+    with_component_replay_tracker_mut(|tracker| {
+        let current = std::mem::take(&mut tracker.current_nodes);
+        tracker.previous_nodes.extend(current);
+    });
 }
 
 pub(crate) fn reset_component_replay_tracking() {
-    *component_replay_tracker().write() = ComponentReplayTracker::default();
+    with_component_replay_tracker_mut(|tracker| {
+        *tracker = ComponentReplayTracker::default();
+    });
 }
 
 pub(crate) fn previous_component_replay_nodes() -> HashMap<u64, ReplayNodeSnapshot> {
-    component_replay_tracker().read().previous_nodes.clone()
+    with_component_replay_tracker(|tracker| tracker.previous_nodes.clone())
 }
 
 pub(crate) fn remove_previous_component_replay_nodes(instance_keys: &HashSet<u64>) {
     if instance_keys.is_empty() {
         return;
     }
-    let mut tracker = component_replay_tracker().write();
-    tracker
-        .previous_nodes
-        .retain(|instance_key, _| !instance_keys.contains(instance_key));
-    tracker
-        .current_nodes
-        .retain(|instance_key, _| !instance_keys.contains(instance_key));
+    with_component_replay_tracker_mut(|tracker| {
+        tracker
+            .previous_nodes
+            .retain(|instance_key, _| !instance_keys.contains(instance_key));
+        tracker
+            .current_nodes
+            .retain(|instance_key, _| !instance_keys.contains(instance_key));
+    });
 }
 
 #[derive(Default)]
@@ -621,61 +602,83 @@ struct RenderSlotReadDependencyTracker {
     slots_by_reader: HashMap<u64, HashSet<FunctorHandle>>,
 }
 
-static BUILD_INVALIDATION_TRACKER: OnceLock<RwLock<BuildInvalidationTracker>> = OnceLock::new();
-static STATE_READ_DEPENDENCY_TRACKER: OnceLock<RwLock<StateReadDependencyTracker>> =
-    OnceLock::new();
-static FOCUS_READ_DEPENDENCY_TRACKER: OnceLock<RwLock<FocusReadDependencyTracker>> =
-    OnceLock::new();
-static RENDER_SLOT_READ_DEPENDENCY_TRACKER: OnceLock<RwLock<RenderSlotReadDependencyTracker>> =
-    OnceLock::new();
 type RedrawWaker = Arc<dyn Fn() + Send + Sync + 'static>;
-static REDRAW_WAKER: OnceLock<RwLock<Option<RedrawWaker>>> = OnceLock::new();
 
-fn build_invalidation_tracker() -> &'static RwLock<BuildInvalidationTracker> {
-    BUILD_INVALIDATION_TRACKER.get_or_init(|| RwLock::new(BuildInvalidationTracker::default()))
+fn with_build_invalidation_tracker<R>(f: impl FnOnce(&BuildInvalidationTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.build_invalidation_tracker.borrow()))
 }
 
-fn state_read_dependency_tracker() -> &'static RwLock<StateReadDependencyTracker> {
-    STATE_READ_DEPENDENCY_TRACKER.get_or_init(|| RwLock::new(StateReadDependencyTracker::default()))
+fn with_build_invalidation_tracker_mut<R>(f: impl FnOnce(&mut BuildInvalidationTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.build_invalidation_tracker.borrow_mut()))
 }
 
-fn focus_read_dependency_tracker() -> &'static RwLock<FocusReadDependencyTracker> {
-    FOCUS_READ_DEPENDENCY_TRACKER.get_or_init(|| RwLock::new(FocusReadDependencyTracker::default()))
+fn with_state_read_dependency_tracker<R>(f: impl FnOnce(&StateReadDependencyTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.state_read_dependency_tracker.borrow()))
 }
 
-fn render_slot_read_dependency_tracker() -> &'static RwLock<RenderSlotReadDependencyTracker> {
-    RENDER_SLOT_READ_DEPENDENCY_TRACKER
-        .get_or_init(|| RwLock::new(RenderSlotReadDependencyTracker::default()))
+fn with_state_read_dependency_tracker_mut<R>(
+    f: impl FnOnce(&mut StateReadDependencyTracker) -> R,
+) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.state_read_dependency_tracker.borrow_mut()))
 }
 
-fn redraw_waker() -> &'static RwLock<Option<RedrawWaker>> {
-    REDRAW_WAKER.get_or_init(|| RwLock::new(None))
+fn with_focus_read_dependency_tracker<R>(f: impl FnOnce(&FocusReadDependencyTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.focus_read_dependency_tracker.borrow()))
+}
+
+fn with_focus_read_dependency_tracker_mut<R>(
+    f: impl FnOnce(&mut FocusReadDependencyTracker) -> R,
+) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.focus_read_dependency_tracker.borrow_mut()))
+}
+
+fn with_render_slot_read_dependency_tracker<R>(
+    f: impl FnOnce(&RenderSlotReadDependencyTracker) -> R,
+) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.render_slot_read_dependency_tracker.borrow()))
+}
+
+fn with_render_slot_read_dependency_tracker_mut<R>(
+    f: impl FnOnce(&mut RenderSlotReadDependencyTracker) -> R,
+) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.render_slot_read_dependency_tracker.borrow_mut()))
+}
+
+fn with_redraw_waker<R>(f: impl FnOnce(&Option<RedrawWaker>) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.redraw_waker.borrow()))
+}
+
+fn with_redraw_waker_mut<R>(f: impl FnOnce(&mut Option<RedrawWaker>) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.redraw_waker.borrow_mut()))
 }
 
 fn schedule_runtime_redraw() {
-    let callback = redraw_waker().read().clone();
+    let callback = with_redraw_waker(Clone::clone);
     if let Some(callback) = callback {
         callback();
     }
 }
 
 pub(crate) fn install_redraw_waker(callback: RedrawWaker) {
-    *redraw_waker().write() = Some(callback);
+    with_redraw_waker_mut(|waker| *waker = Some(callback));
 }
 
 pub(crate) fn clear_redraw_waker() {
-    *redraw_waker().write() = None;
+    with_redraw_waker_mut(|waker| *waker = None);
 }
 
 pub(crate) fn current_component_instance_key_from_scope() -> Option<u64> {
-    CURRENT_COMPONENT_INSTANCE_STACK.with(|stack| stack.borrow().last().copied())
+    with_execution_context(|context| context.current_component_instance_stack.last().copied())
 }
 
-static PERSISTENT_FOCUS_HANDLE_STORE: OnceLock<RwLock<PersistentFocusHandleStore>> =
-    OnceLock::new();
+fn with_persistent_focus_handle_store<R>(f: impl FnOnce(&PersistentFocusHandleStore) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.persistent_focus_handle_store.borrow()))
+}
 
-fn persistent_focus_handle_store() -> &'static RwLock<PersistentFocusHandleStore> {
-    PERSISTENT_FOCUS_HANDLE_STORE.get_or_init(|| RwLock::new(PersistentFocusHandleStore::default()))
+fn with_persistent_focus_handle_store_mut<R>(
+    f: impl FnOnce(&mut PersistentFocusHandleStore) -> R,
+) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.persistent_focus_handle_store.borrow_mut()))
 }
 
 fn current_persistent_focus_handle_key<K: Hash>(slot_key: K) -> PersistentFocusHandleKey {
@@ -689,82 +692,58 @@ fn current_persistent_focus_handle_key<K: Hash>(slot_key: K) -> PersistentFocusH
     }
 }
 
-#[doc(hidden)]
-pub fn persistent_focus_target_for_current_instance<K: Hash>(slot_key: K) -> FocusNode {
+pub(crate) fn persistent_focus_target_for_current_instance<K: Hash>(slot_key: K) -> FocusNode {
     let key = current_persistent_focus_handle_key(slot_key);
-    let mut store = persistent_focus_handle_store().write();
-    match store.targets.entry(key) {
+    with_persistent_focus_handle_store_mut(|store| match store.targets.entry(key) {
         std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().mark_live(),
         std::collections::hash_map::Entry::Vacant(entry) => {
             let value = FocusNode::new();
             entry.insert(PersistentFocusHandleEntry::new(value));
             value
         }
-    }
+    })
 }
 
-#[doc(hidden)]
-pub fn persistent_focus_scope_for_current_instance<K: Hash>(slot_key: K) -> FocusScopeNode {
+pub(crate) fn persistent_focus_scope_for_current_instance<K: Hash>(slot_key: K) -> FocusScopeNode {
     let key = current_persistent_focus_handle_key(slot_key);
-    let mut store = persistent_focus_handle_store().write();
-    match store.scopes.entry(key) {
+    with_persistent_focus_handle_store_mut(|store| match store.scopes.entry(key) {
         std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().mark_live(),
         std::collections::hash_map::Entry::Vacant(entry) => {
             let value = FocusScopeNode::new();
             entry.insert(PersistentFocusHandleEntry::new(value));
             value
         }
-    }
+    })
 }
 
-#[doc(hidden)]
-pub fn persistent_focus_group_for_current_instance<K: Hash>(slot_key: K) -> FocusGroupNode {
+pub(crate) fn persistent_focus_group_for_current_instance<K: Hash>(slot_key: K) -> FocusGroupNode {
     let key = current_persistent_focus_handle_key(slot_key);
-    let mut store = persistent_focus_handle_store().write();
-    match store.groups.entry(key) {
+    with_persistent_focus_handle_store_mut(|store| match store.groups.entry(key) {
         std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().mark_live(),
         std::collections::hash_map::Entry::Vacant(entry) => {
             let value = FocusGroupNode::new();
             entry.insert(PersistentFocusHandleEntry::new(value));
             value
         }
-    }
-}
-
-#[doc(hidden)]
-pub fn persistent_focus_requester_for_current_instance<K: Hash>(slot_key: K) -> FocusRequester {
-    let key = current_persistent_focus_handle_key(slot_key);
-    let mut store = persistent_focus_handle_store().write();
-    match store.requesters.entry(key) {
-        std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().mark_live(),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            let value = FocusRequester::new();
-            entry.insert(PersistentFocusHandleEntry::new(value));
-            value
-        }
-    }
+    })
 }
 
 pub(crate) fn has_persistent_focus_handle(handle_id: FocusHandleId) -> bool {
-    persistent_focus_handle_store()
-        .read()
-        .contains_handle(handle_id)
+    with_persistent_focus_handle_store(|store| store.contains_handle(handle_id))
 }
 
 pub(crate) fn retain_persistent_focus_handles(
     live_instance_keys: &HashSet<u64>,
 ) -> RemovedPersistentFocusHandles {
-    persistent_focus_handle_store()
-        .write()
-        .retain_instance_keys(live_instance_keys)
+    with_persistent_focus_handle_store_mut(|store| store.retain_instance_keys(live_instance_keys))
 }
 
 pub(crate) fn clear_persistent_focus_handles() {
-    persistent_focus_handle_store().write().clear();
+    with_persistent_focus_handle_store_mut(PersistentFocusHandleStore::clear);
 }
 
 fn take_next_node_instance_logic_id_override() -> Option<u64> {
-    NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE.with(|slot| slot.borrow_mut().take())
+    with_execution_context_mut(|context| context.next_node_instance_logic_id_override.take())
 }
 
 /// Runs `f` inside a replay scope restored from a previously recorded component
@@ -789,37 +768,37 @@ pub(crate) fn with_replay_scope<R>(
     impl Drop for ReplayScopeGuard {
         fn drop(&mut self) {
             if let Some(previous_group_path) = self.previous_group_path.take() {
-                GROUP_PATH_STACK.with(|stack| {
-                    *stack.borrow_mut() = previous_group_path;
+                with_execution_context_mut(|context| {
+                    context.group_path_stack = previous_group_path;
                 });
             }
             if let Some(previous_instance_key_stack) = self.previous_instance_key_stack.take() {
-                INSTANCE_KEY_STACK.with(|stack| {
-                    *stack.borrow_mut() = previous_instance_key_stack;
+                with_execution_context_mut(|context| {
+                    context.instance_key_stack = previous_instance_key_stack;
                 });
             }
             if let Some(previous_instance_logic_id_override) =
                 self.previous_instance_logic_id_override.take()
             {
-                NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE.with(|slot| {
-                    *slot.borrow_mut() = previous_instance_logic_id_override;
+                with_execution_context_mut(|context| {
+                    context.next_node_instance_logic_id_override =
+                        previous_instance_logic_id_override;
                 });
             }
         }
     }
 
-    let previous_group_path = GROUP_PATH_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        std::mem::replace(&mut *stack, group_path.to_vec())
+    let previous_group_path = with_execution_context_mut(|context| {
+        std::mem::replace(&mut context.group_path_stack, group_path.to_vec())
     });
-    let previous_instance_key_stack = INSTANCE_KEY_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
+    let previous_instance_key_stack = with_execution_context_mut(|context| {
         let next_stack = instance_key_override.into_iter().collect::<Vec<_>>();
-        std::mem::replace(&mut *stack, next_stack)
+        std::mem::replace(&mut context.instance_key_stack, next_stack)
     });
-    let previous_instance_logic_id_override = NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        (*slot).replace(instance_logic_id)
+    let previous_instance_logic_id_override = with_execution_context_mut(|context| {
+        context
+            .next_node_instance_logic_id_override
+            .replace(instance_logic_id)
     });
     let _guard = ReplayScopeGuard {
         previous_group_path: Some(previous_group_path),
@@ -843,9 +822,8 @@ pub(crate) fn with_build_dirty_instance_keys<R>(
             if self.popped {
                 return;
             }
-            BUILD_DIRTY_INSTANCE_KEYS_STACK.with(|stack| {
-                let mut stack = stack.borrow_mut();
-                let popped = stack.pop();
+            with_execution_context_mut(|context| {
+                let popped = context.build_dirty_instance_keys_stack.pop();
                 debug_assert!(
                     popped.is_some(),
                     "BUILD_DIRTY_INSTANCE_KEYS_STACK underflow: attempted to pop from empty stack"
@@ -855,9 +833,9 @@ pub(crate) fn with_build_dirty_instance_keys<R>(
         }
     }
 
-    BUILD_DIRTY_INSTANCE_KEYS_STACK.with(|stack| {
-        stack
-            .borrow_mut()
+    with_execution_context_mut(|context| {
+        context
+            .build_dirty_instance_keys_stack
             .push(Arc::new(dirty_instance_keys.clone()));
     });
     let _guard = BuildDirtyScopeGuard { popped: false };
@@ -865,26 +843,22 @@ pub(crate) fn with_build_dirty_instance_keys<R>(
 }
 
 pub(crate) fn is_instance_key_build_dirty(instance_key: u64) -> bool {
-    BUILD_DIRTY_INSTANCE_KEYS_STACK.with(|stack| {
-        stack
-            .borrow()
+    with_execution_context(|context| {
+        context
+            .build_dirty_instance_keys_stack
             .last()
             .is_some_and(|dirty_instance_keys| dirty_instance_keys.contains(&instance_key))
     })
 }
 
 fn consume_pending_build_invalidation(instance_key: u64) -> bool {
-    build_invalidation_tracker()
-        .write()
-        .dirty_instance_keys
-        .remove(&instance_key)
+    with_build_invalidation_tracker_mut(|tracker| tracker.dirty_instance_keys.remove(&instance_key))
 }
 
 pub(crate) fn record_component_invalidation_for_instance_key(instance_key: u64) {
-    let inserted = build_invalidation_tracker()
-        .write()
-        .dirty_instance_keys
-        .insert(instance_key);
+    let inserted = with_build_invalidation_tracker_mut(|tracker| {
+        tracker.dirty_instance_keys.insert(instance_key)
+    });
     if inserted {
         schedule_runtime_redraw();
     }
@@ -899,35 +873,36 @@ fn track_state_read_dependency(slot: SlotHandle, generation: u64) {
     };
 
     let key = StateReadDependencyKey { slot, generation };
-    let tracker = state_read_dependency_tracker().upgradable_read();
-    if tracker
-        .readers_by_state
-        .get(&key)
-        .is_some_and(|readers| readers.contains(&reader_instance_key))
-    {
-        return;
-    }
-    let mut tracker = RwLockUpgradableReadGuard::upgrade(tracker);
-    tracker
-        .readers_by_state
-        .entry(key)
-        .or_default()
-        .insert(reader_instance_key);
-    tracker
-        .states_by_reader
-        .entry(reader_instance_key)
-        .or_default()
-        .insert(key);
+    with_state_read_dependency_tracker_mut(|tracker| {
+        if tracker
+            .readers_by_state
+            .get(&key)
+            .is_some_and(|readers| readers.contains(&reader_instance_key))
+        {
+            return;
+        }
+        tracker
+            .readers_by_state
+            .entry(key)
+            .or_default()
+            .insert(reader_instance_key);
+        tracker
+            .states_by_reader
+            .entry(reader_instance_key)
+            .or_default()
+            .insert(key);
+    });
 }
 
 fn state_read_subscribers(slot: SlotHandle, generation: u64) -> Vec<u64> {
     let key = StateReadDependencyKey { slot, generation };
-    state_read_dependency_tracker()
-        .read()
-        .readers_by_state
-        .get(&key)
-        .map(|readers| readers.iter().copied().collect())
-        .unwrap_or_default()
+    with_state_read_dependency_tracker(|tracker| {
+        tracker
+            .readers_by_state
+            .get(&key)
+            .map(|readers| readers.iter().copied().collect())
+            .unwrap_or_default()
+    })
 }
 
 fn track_focus_dependency(kind: FocusReadDependencyKind) {
@@ -939,35 +914,36 @@ fn track_focus_dependency(kind: FocusReadDependencyKind) {
     };
 
     let key = FocusReadDependencyKey { kind };
-    let tracker = focus_read_dependency_tracker().upgradable_read();
-    if tracker
-        .readers_by_focus
-        .get(&key)
-        .is_some_and(|readers| readers.contains(&reader_instance_key))
-    {
-        return;
-    }
-    let mut tracker = RwLockUpgradableReadGuard::upgrade(tracker);
-    tracker
-        .readers_by_focus
-        .entry(key)
-        .or_default()
-        .insert(reader_instance_key);
-    tracker
-        .focus_by_reader
-        .entry(reader_instance_key)
-        .or_default()
-        .insert(key);
+    with_focus_read_dependency_tracker_mut(|tracker| {
+        if tracker
+            .readers_by_focus
+            .get(&key)
+            .is_some_and(|readers| readers.contains(&reader_instance_key))
+        {
+            return;
+        }
+        tracker
+            .readers_by_focus
+            .entry(key)
+            .or_default()
+            .insert(reader_instance_key);
+        tracker
+            .focus_by_reader
+            .entry(reader_instance_key)
+            .or_default()
+            .insert(key);
+    });
 }
 
 fn focus_read_subscribers_by_kind(kind: FocusReadDependencyKind) -> Vec<u64> {
     let key = FocusReadDependencyKey { kind };
-    focus_read_dependency_tracker()
-        .read()
-        .readers_by_focus
-        .get(&key)
-        .map(|readers| readers.iter().copied().collect())
-        .unwrap_or_default()
+    with_focus_read_dependency_tracker(|tracker| {
+        tracker
+            .readers_by_focus
+            .get(&key)
+            .map(|readers| readers.iter().copied().collect())
+            .unwrap_or_default()
+    })
 }
 
 pub(crate) fn track_focus_read_dependency(handle_id: FocusHandleId) {
@@ -994,140 +970,149 @@ pub(crate) fn track_render_slot_read_dependency(handle: FunctorHandle) {
         return;
     };
 
-    let tracker = render_slot_read_dependency_tracker().upgradable_read();
-    if tracker
-        .readers_by_slot
-        .get(&handle)
-        .is_some_and(|readers| readers.contains(&reader_instance_key))
-    {
-        return;
-    }
-    let mut tracker = RwLockUpgradableReadGuard::upgrade(tracker);
-    tracker
-        .readers_by_slot
-        .entry(handle)
-        .or_default()
-        .insert(reader_instance_key);
-    tracker
-        .slots_by_reader
-        .entry(reader_instance_key)
-        .or_default()
-        .insert(handle);
+    with_render_slot_read_dependency_tracker_mut(|tracker| {
+        if tracker
+            .readers_by_slot
+            .get(&handle)
+            .is_some_and(|readers| readers.contains(&reader_instance_key))
+        {
+            return;
+        }
+        tracker
+            .readers_by_slot
+            .entry(handle)
+            .or_default()
+            .insert(reader_instance_key);
+        tracker
+            .slots_by_reader
+            .entry(reader_instance_key)
+            .or_default()
+            .insert(handle);
+    });
 }
 
 fn render_slot_read_subscribers(handle: FunctorHandle) -> Vec<u64> {
-    render_slot_read_dependency_tracker()
-        .read()
-        .readers_by_slot
-        .get(&handle)
-        .map(|readers| readers.iter().copied().collect())
-        .unwrap_or_default()
+    with_render_slot_read_dependency_tracker(|tracker| {
+        tracker
+            .readers_by_slot
+            .get(&handle)
+            .map(|readers| readers.iter().copied().collect())
+            .unwrap_or_default()
+    })
 }
 
 pub(crate) fn remove_state_read_dependencies(instance_keys: &HashSet<u64>) {
     if instance_keys.is_empty() {
         return;
     }
-    let mut tracker = state_read_dependency_tracker().write();
-    for instance_key in instance_keys {
-        let Some(state_keys) = tracker.states_by_reader.remove(instance_key) else {
-            continue;
-        };
-        for state_key in state_keys {
-            let mut remove_entry = false;
-            if let Some(readers) = tracker.readers_by_state.get_mut(&state_key) {
-                readers.remove(instance_key);
-                remove_entry = readers.is_empty();
-            }
-            if remove_entry {
-                tracker.readers_by_state.remove(&state_key);
+    with_state_read_dependency_tracker_mut(|tracker| {
+        for instance_key in instance_keys {
+            let Some(state_keys) = tracker.states_by_reader.remove(instance_key) else {
+                continue;
+            };
+            for state_key in state_keys {
+                let mut remove_entry = false;
+                if let Some(readers) = tracker.readers_by_state.get_mut(&state_key) {
+                    readers.remove(instance_key);
+                    remove_entry = readers.is_empty();
+                }
+                if remove_entry {
+                    tracker.readers_by_state.remove(&state_key);
+                }
             }
         }
-    }
+    });
 }
 
 pub(crate) fn remove_focus_read_dependencies(instance_keys: &HashSet<u64>) {
     if instance_keys.is_empty() {
         return;
     }
-    let mut tracker = focus_read_dependency_tracker().write();
-    for instance_key in instance_keys {
-        let Some(focus_keys) = tracker.focus_by_reader.remove(instance_key) else {
-            continue;
-        };
-        for focus_key in focus_keys {
-            let mut remove_entry = false;
-            if let Some(readers) = tracker.readers_by_focus.get_mut(&focus_key) {
-                readers.remove(instance_key);
-                remove_entry = readers.is_empty();
-            }
-            if remove_entry {
-                tracker.readers_by_focus.remove(&focus_key);
+    with_focus_read_dependency_tracker_mut(|tracker| {
+        for instance_key in instance_keys {
+            let Some(focus_keys) = tracker.focus_by_reader.remove(instance_key) else {
+                continue;
+            };
+            for focus_key in focus_keys {
+                let mut remove_entry = false;
+                if let Some(readers) = tracker.readers_by_focus.get_mut(&focus_key) {
+                    readers.remove(instance_key);
+                    remove_entry = readers.is_empty();
+                }
+                if remove_entry {
+                    tracker.readers_by_focus.remove(&focus_key);
+                }
             }
         }
-    }
+    });
 }
 
 pub(crate) fn remove_render_slot_read_dependencies(instance_keys: &HashSet<u64>) {
     if instance_keys.is_empty() {
         return;
     }
-    let mut tracker = render_slot_read_dependency_tracker().write();
-    for instance_key in instance_keys {
-        let Some(slot_keys) = tracker.slots_by_reader.remove(instance_key) else {
-            continue;
-        };
-        for slot_key in slot_keys {
-            let mut remove_entry = false;
-            if let Some(readers) = tracker.readers_by_slot.get_mut(&slot_key) {
-                readers.remove(instance_key);
-                remove_entry = readers.is_empty();
-            }
-            if remove_entry {
-                tracker.readers_by_slot.remove(&slot_key);
+    with_render_slot_read_dependency_tracker_mut(|tracker| {
+        for instance_key in instance_keys {
+            let Some(slot_keys) = tracker.slots_by_reader.remove(instance_key) else {
+                continue;
+            };
+            for slot_key in slot_keys {
+                let mut remove_entry = false;
+                if let Some(readers) = tracker.readers_by_slot.get_mut(&slot_key) {
+                    readers.remove(instance_key);
+                    remove_entry = readers.is_empty();
+                }
+                if remove_entry {
+                    tracker.readers_by_slot.remove(&slot_key);
+                }
             }
         }
-    }
+    });
 }
 
 pub(crate) fn reset_state_read_dependencies() {
-    *state_read_dependency_tracker().write() = StateReadDependencyTracker::default();
+    with_state_read_dependency_tracker_mut(|tracker| {
+        *tracker = StateReadDependencyTracker::default();
+    });
 }
 
 pub(crate) fn reset_focus_read_dependencies() {
-    *focus_read_dependency_tracker().write() = FocusReadDependencyTracker::default();
+    with_focus_read_dependency_tracker_mut(|tracker| {
+        *tracker = FocusReadDependencyTracker::default();
+    });
 }
 
 pub(crate) fn reset_render_slot_read_dependencies() {
-    *render_slot_read_dependency_tracker().write() = RenderSlotReadDependencyTracker::default();
+    with_render_slot_read_dependency_tracker_mut(|tracker| {
+        *tracker = RenderSlotReadDependencyTracker::default();
+    });
 }
 
 pub(crate) fn take_build_invalidations() -> BuildInvalidationSet {
-    let mut tracker = build_invalidation_tracker().write();
-    BuildInvalidationSet {
+    with_build_invalidation_tracker_mut(|tracker| BuildInvalidationSet {
         dirty_instance_keys: std::mem::take(&mut tracker.dirty_instance_keys),
-    }
+    })
 }
 
 pub(crate) fn reset_build_invalidations() {
-    *build_invalidation_tracker().write() = BuildInvalidationTracker::default();
+    with_build_invalidation_tracker_mut(|tracker| {
+        *tracker = BuildInvalidationTracker::default();
+    });
 }
 
 pub(crate) fn remove_build_invalidations(instance_keys: &HashSet<u64>) {
     if instance_keys.is_empty() {
         return;
     }
-    build_invalidation_tracker()
-        .write()
-        .dirty_instance_keys
-        .retain(|instance_key| !instance_keys.contains(instance_key));
+    with_build_invalidation_tracker_mut(|tracker| {
+        tracker
+            .dirty_instance_keys
+            .retain(|instance_key| !instance_keys.contains(instance_key));
+    });
 }
 
 pub(crate) fn has_pending_build_invalidations() -> bool {
-    !build_invalidation_tracker()
-        .read()
-        .dirty_instance_keys
-        .is_empty()
+    with_build_invalidation_tracker(|tracker| !tracker.dirty_instance_keys.is_empty())
 }
 
 #[derive(Default)]
@@ -1162,43 +1147,47 @@ struct FrameNanosReceiver {
     callback: FrameNanosReceiverCallback,
 }
 
-static FRAME_CLOCK_TRACKER: OnceLock<Mutex<FrameClockTracker>> = OnceLock::new();
+fn with_frame_clock_tracker<R>(f: impl FnOnce(&FrameClockTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&globals.frame_clock_tracker.borrow()))
+}
 
-fn frame_clock_tracker() -> &'static Mutex<FrameClockTracker> {
-    FRAME_CLOCK_TRACKER.get_or_init(|| Mutex::new(FrameClockTracker::default()))
+fn with_frame_clock_tracker_mut<R>(f: impl FnOnce(&mut FrameClockTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.frame_clock_tracker.borrow_mut()))
 }
 
 pub(crate) fn begin_frame_clock(now: Instant) {
-    let mut tracker = frame_clock_tracker().lock();
-    let frame_origin = *tracker.frame_origin.get_or_insert(now);
-    tracker.previous_frame_time = tracker.current_frame_time;
-    tracker.current_frame_time = Some(now);
-    tracker.current_frame_nanos = now
-        .saturating_duration_since(frame_origin)
-        .as_nanos()
-        .min(u64::MAX as u128) as u64;
-    tracker.frame_delta = tracker
-        .previous_frame_time
-        .map(|previous| now.saturating_duration_since(previous))
-        .unwrap_or_default();
+    with_frame_clock_tracker_mut(|tracker| {
+        let frame_origin = *tracker.frame_origin.get_or_insert(now);
+        tracker.previous_frame_time = tracker.current_frame_time;
+        tracker.current_frame_time = Some(now);
+        tracker.current_frame_nanos = now
+            .saturating_duration_since(frame_origin)
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        tracker.frame_delta = tracker
+            .previous_frame_time
+            .map(|previous| now.saturating_duration_since(previous))
+            .unwrap_or_default();
+    });
 }
 
 pub(crate) fn reset_frame_clock() {
-    *frame_clock_tracker().lock() = FrameClockTracker::default();
+    with_frame_clock_tracker_mut(|tracker| *tracker = FrameClockTracker::default());
 }
 
 pub(crate) fn has_pending_frame_nanos_receivers() -> bool {
-    !frame_clock_tracker().lock().receivers.is_empty()
+    with_frame_clock_tracker(|tracker| !tracker.receivers.is_empty())
 }
 
 pub(crate) fn tick_frame_nanos_receivers() {
-    let frame_nanos = frame_clock_tracker().lock().current_frame_nanos;
-    let mut tracker = frame_clock_tracker().lock();
-    tracker.receivers.retain(|_, receiver| {
-        matches!(
-            (receiver.callback)(frame_nanos),
-            FrameNanosControl::Continue
-        )
+    with_frame_clock_tracker_mut(|tracker| {
+        let frame_nanos = tracker.current_frame_nanos;
+        tracker.receivers.retain(|_, receiver| {
+            matches!(
+                (receiver.callback)(frame_nanos),
+                FrameNanosControl::Continue
+            )
+        });
     });
 }
 
@@ -1206,31 +1195,32 @@ pub(crate) fn remove_frame_nanos_receivers(instance_keys: &HashSet<u64>) {
     if instance_keys.is_empty() {
         return;
     }
-    frame_clock_tracker()
-        .lock()
-        .receivers
-        .retain(|_, receiver| !instance_keys.contains(&receiver.owner_instance_key));
+    with_frame_clock_tracker_mut(|tracker| {
+        tracker
+            .receivers
+            .retain(|_, receiver| !instance_keys.contains(&receiver.owner_instance_key));
+    });
 }
 
 pub(crate) fn clear_frame_nanos_receivers() {
-    frame_clock_tracker().lock().receivers.clear();
+    with_frame_clock_tracker_mut(|tracker| tracker.receivers.clear());
 }
 
 /// Returns the timestamp of the current frame, if available.
 ///
 /// The value is set by the renderer at frame begin.
 pub fn current_frame_time() -> Option<Instant> {
-    frame_clock_tracker().lock().current_frame_time
+    with_frame_clock_tracker(|tracker| tracker.current_frame_time)
 }
 
 /// Returns the current frame timestamp in nanoseconds from runtime origin.
 pub fn current_frame_nanos() -> u64 {
-    frame_clock_tracker().lock().current_frame_nanos
+    with_frame_clock_tracker(|tracker| tracker.current_frame_nanos)
 }
 
 /// Returns the elapsed time since the previous frame.
 pub fn frame_delta() -> Duration {
-    frame_clock_tracker().lock().frame_delta
+    with_frame_clock_tracker(|tracker| tracker.frame_delta)
 }
 
 fn ensure_frame_receive_phase() {
@@ -1279,19 +1269,20 @@ where
         .unwrap_or_else(|| panic!("receive_frame_nanos requires an active component node context"));
     let key = compute_frame_nanos_receiver_key();
 
-    let mut tracker = frame_clock_tracker().lock();
-    tracker.receivers.entry(key).or_insert_with(|| {
-        let mut callback = callback;
-        FrameNanosReceiver {
-            owner_instance_key,
-            callback: Box::new(move |frame_nanos| {
-                if !frame_nanos_state.is_alive() {
-                    return FrameNanosControl::Stop;
-                }
-                frame_nanos_state.set(frame_nanos);
-                callback(frame_nanos)
-            }),
-        }
+    with_frame_clock_tracker_mut(|tracker| {
+        tracker.receivers.entry(key).or_insert_with(|| {
+            let mut callback = callback;
+            FrameNanosReceiver {
+                owner_instance_key,
+                callback: Box::new(move |frame_nanos| {
+                    if !frame_nanos_state.is_alive() {
+                        return FrameNanosControl::Stop;
+                    }
+                    frame_nanos_state.set(frame_nanos);
+                    callback(frame_nanos)
+                }),
+            }
+        });
     });
 }
 
@@ -1300,75 +1291,98 @@ pub(crate) fn drop_slots_for_instance_logic_ids(instance_logic_ids: &HashSet<u64
         return;
     }
 
-    let mut table = slot_table().write();
-    let mut freed: Vec<(SlotHandle, SlotKey)> = Vec::new();
-    for (slot, entry) in table.entries.iter() {
-        if !instance_logic_ids.contains(&entry.key.instance_logic_id) {
-            continue;
+    with_slot_table_mut(|table| {
+        let mut freed: Vec<(SlotHandle, SlotKey)> = Vec::new();
+        for (slot, entry) in table.entries.iter() {
+            if !instance_logic_ids.contains(&entry.key.instance_logic_id) {
+                continue;
+            }
+            if entry.retained {
+                continue;
+            }
+            freed.push((slot, entry.key));
         }
-        // `retain` state must survive subtree removal and route switches.
-        if entry.retained {
-            continue;
+        for (slot, key) in freed {
+            table.entries.remove(slot);
+            table.key_to_slot.remove(&key);
         }
-        freed.push((slot, entry.key));
-    }
-    for (slot, key) in freed {
-        table.entries.remove(slot);
-        table.key_to_slot.remove(&key);
-    }
-    for instance_logic_id in instance_logic_ids {
-        table.cursors_by_instance_logic_id.remove(instance_logic_id);
-    }
+        for instance_logic_id in instance_logic_ids {
+            table.cursors_by_instance_logic_id.remove(instance_logic_id);
+        }
+    });
 }
 
-static LAYOUT_DIRTY_TRACKER: OnceLock<RwLock<LayoutDirtyTracker>> = OnceLock::new();
-
-fn layout_dirty_tracker() -> &'static RwLock<LayoutDirtyTracker> {
-    LAYOUT_DIRTY_TRACKER.get_or_init(|| RwLock::new(LayoutDirtyTracker::default()))
+fn with_layout_dirty_tracker_mut<R>(f: impl FnOnce(&mut LayoutDirtyTracker) -> R) -> R {
+    RUNTIME_GLOBALS.with(|globals| f(&mut globals.layout_dirty_tracker.borrow_mut()))
 }
 
-fn record_layout_spec_dirty(instance_key: u64, layout_spec: &dyn LayoutSpecDyn) {
+fn record_layout_policy_dirty(instance_key: u64, layout_policy: &dyn LayoutPolicyDyn) {
     if current_phase() != Some(RuntimePhase::Build) {
         return;
     }
-    let mut tracker = layout_dirty_tracker().write();
-    let (changed, next_layout_spec) =
-        match tracker.previous_layout_specs_by_node.remove(&instance_key) {
+    with_layout_dirty_tracker_mut(|tracker| {
+        let (measure_changed, placement_changed, next_layout_policy) = match tracker
+            .previous_layout_policies_by_node
+            .remove(&instance_key)
+        {
             Some(previous) => {
-                if previous.dyn_eq(layout_spec) {
-                    (false, previous)
+                let measure_changed = !previous.dyn_measure_eq(layout_policy);
+                let placement_changed = !previous.dyn_placement_eq(layout_policy);
+                if !measure_changed && !placement_changed {
+                    (false, false, previous)
                 } else {
-                    (true, layout_spec.clone_box())
+                    (
+                        measure_changed,
+                        placement_changed,
+                        layout_policy.clone_box(),
+                    )
                 }
             }
-            None => (true, layout_spec.clone_box()),
+            None => (true, true, layout_policy.clone_box()),
         };
-    if changed {
-        tracker.pending_self_dirty_nodes.insert(instance_key);
-    }
-    tracker
-        .frame_layout_specs_by_node
-        .insert(instance_key, next_layout_spec);
+        if measure_changed {
+            tracker
+                .pending_measure_self_dirty_nodes
+                .insert(instance_key);
+        } else if placement_changed {
+            tracker
+                .pending_placement_self_dirty_nodes
+                .insert(instance_key);
+        }
+        tracker
+            .frame_layout_policies_by_node
+            .insert(instance_key, next_layout_policy);
+    });
 }
 
 pub(crate) fn begin_frame_layout_dirty_tracking() {
-    let mut tracker = layout_dirty_tracker().write();
-    tracker.frame_layout_specs_by_node.clear();
-    tracker.pending_self_dirty_nodes.clear();
+    with_layout_dirty_tracker_mut(|tracker| {
+        tracker.frame_layout_policies_by_node.clear();
+        tracker.pending_measure_self_dirty_nodes.clear();
+        tracker.pending_placement_self_dirty_nodes.clear();
+    });
 }
 
 pub(crate) fn finalize_frame_layout_dirty_tracking() {
-    let mut tracker = layout_dirty_tracker().write();
-    tracker.ready_self_dirty_nodes = std::mem::take(&mut tracker.pending_self_dirty_nodes);
-    tracker.previous_layout_specs_by_node = std::mem::take(&mut tracker.frame_layout_specs_by_node);
+    with_layout_dirty_tracker_mut(|tracker| {
+        tracker.ready_measure_self_dirty_nodes =
+            std::mem::take(&mut tracker.pending_measure_self_dirty_nodes);
+        tracker.ready_placement_self_dirty_nodes =
+            std::mem::take(&mut tracker.pending_placement_self_dirty_nodes);
+        tracker.previous_layout_policies_by_node =
+            std::mem::take(&mut tracker.frame_layout_policies_by_node);
+    });
 }
 
-pub(crate) fn take_layout_self_dirty_nodes() -> HashSet<u64> {
-    std::mem::take(&mut layout_dirty_tracker().write().ready_self_dirty_nodes)
+pub(crate) fn take_layout_dirty_nodes() -> LayoutDirtyNodes {
+    with_layout_dirty_tracker_mut(|tracker| LayoutDirtyNodes {
+        measure_self_nodes: std::mem::take(&mut tracker.ready_measure_self_dirty_nodes),
+        placement_self_nodes: std::mem::take(&mut tracker.ready_placement_self_dirty_nodes),
+    })
 }
 
 pub(crate) fn reset_layout_dirty_tracking() {
-    *layout_dirty_tracker().write() = LayoutDirtyTracker::default();
+    with_layout_dirty_tracker_mut(|tracker| *tracker = LayoutDirtyTracker::default());
 }
 
 fn record_component_replay_snapshot(runtime: &TesseraRuntime, node_id: NodeId) {
@@ -1395,42 +1409,44 @@ fn record_component_replay_snapshot(runtime: &TesseraRuntime, node_id: NodeId) {
         fn_name: node.fn_name.clone(),
         replay,
     };
-    component_replay_tracker()
-        .write()
-        .current_nodes
-        .insert(snapshot.instance_key, snapshot);
+    with_component_replay_tracker_mut(|tracker| {
+        tracker
+            .current_nodes
+            .insert(snapshot.instance_key, snapshot);
+    });
 }
 
 pub(crate) fn reconcile_layout_structure(
     current_children_by_node: &HashMap<u64, Vec<u64>>,
 ) -> StructureReconcileResult {
-    let mut tracker = layout_dirty_tracker().write();
-    let previous_children_by_node = &tracker.previous_children_by_node;
+    with_layout_dirty_tracker_mut(|tracker| {
+        let previous_children_by_node = &tracker.previous_children_by_node;
 
-    let mut changed_nodes = HashSet::default();
-    let mut removed_nodes = HashSet::default();
+        let mut changed_nodes = HashSet::default();
+        let mut removed_nodes = HashSet::default();
 
-    for (node, current_children) in current_children_by_node {
-        match previous_children_by_node.get(node) {
-            Some(previous_children) if previous_children == current_children => {}
-            _ => {
-                changed_nodes.insert(*node);
+        for (node, current_children) in current_children_by_node {
+            match previous_children_by_node.get(node) {
+                Some(previous_children) if previous_children == current_children => {}
+                _ => {
+                    changed_nodes.insert(*node);
+                }
             }
         }
-    }
 
-    for node in previous_children_by_node.keys().copied() {
-        if !current_children_by_node.contains_key(&node) {
-            changed_nodes.insert(node);
-            removed_nodes.insert(node);
+        for node in previous_children_by_node.keys().copied() {
+            if !current_children_by_node.contains_key(&node) {
+                changed_nodes.insert(node);
+                removed_nodes.insert(node);
+            }
         }
-    }
 
-    tracker.previous_children_by_node = current_children_by_node.clone();
-    StructureReconcileResult {
-        changed_nodes,
-        removed_nodes,
-    }
+        tracker.previous_children_by_node = current_children_by_node.clone();
+        StructureReconcileResult {
+            changed_nodes,
+            removed_nodes,
+        }
+    })
 }
 
 /// Handle to memoized state created by [`remember`] and [`remember_with_key`].
@@ -1498,44 +1514,46 @@ where
     T: Send + Sync + 'static,
 {
     fn is_alive(&self) -> bool {
-        let table = slot_table().read();
-        let Some(entry) = table.entries.get(self.slot) else {
-            return false;
-        };
+        with_slot_table(|table| {
+            let Some(entry) = table.entries.get(self.slot) else {
+                return false;
+            };
 
-        entry.generation == self.generation
-            && entry.key.type_id == TypeId::of::<T>()
-            && entry.value.is_some()
+            entry.generation == self.generation
+                && entry.key.type_id == TypeId::of::<T>()
+                && entry.value.is_some()
+        })
     }
 
     fn load_entry(&self) -> Arc<dyn Any + Send + Sync> {
-        let table = slot_table().read();
-        let entry = table
-            .entries
-            .get(self.slot)
-            .unwrap_or_else(|| panic!("State points to freed slot: {:?}", self.slot));
+        with_slot_table(|table| {
+            let entry = table
+                .entries
+                .get(self.slot)
+                .unwrap_or_else(|| panic!("State points to freed slot: {:?}", self.slot));
 
-        if entry.generation != self.generation {
-            panic!(
-                "State is stale (slot {:?}, generation {}, current generation {})",
-                self.slot, self.generation, entry.generation
-            );
-        }
+            if entry.generation != self.generation {
+                panic!(
+                    "State is stale (slot {:?}, generation {}, current generation {})",
+                    self.slot, self.generation, entry.generation
+                );
+            }
 
-        if entry.key.type_id != TypeId::of::<T>() {
-            panic!(
-                "State type mismatch for slot {:?}: expected {}, stored {:?}",
-                self.slot,
-                std::any::type_name::<T>(),
-                entry.key.type_id
-            );
-        }
+            if entry.key.type_id != TypeId::of::<T>() {
+                panic!(
+                    "State type mismatch for slot {:?}: expected {}, stored {:?}",
+                    self.slot,
+                    std::any::type_name::<T>(),
+                    entry.key.type_id
+                );
+            }
 
-        entry
-            .value
-            .as_ref()
-            .unwrap_or_else(|| panic!("State slot {:?} has been cleared", self.slot))
-            .clone()
+            entry
+                .value
+                .as_ref()
+                .unwrap_or_else(|| panic!("State slot {:?} has been cleared", self.slot))
+                .clone()
+        })
     }
 
     fn load_lock(&self) -> Arc<RwLock<T>> {
@@ -1584,8 +1602,43 @@ where
     }
 }
 
-/// Global singleton instance of the [`TesseraRuntime`].
-static TESSERA_RUNTIME: OnceLock<RwLock<TesseraRuntime>> = OnceLock::new();
+struct RuntimeGlobals {
+    slot_table: RefCell<SlotTable>,
+    component_replay_tracker: RefCell<ComponentReplayTracker>,
+    build_invalidation_tracker: RefCell<BuildInvalidationTracker>,
+    state_read_dependency_tracker: RefCell<StateReadDependencyTracker>,
+    focus_read_dependency_tracker: RefCell<FocusReadDependencyTracker>,
+    render_slot_read_dependency_tracker: RefCell<RenderSlotReadDependencyTracker>,
+    redraw_waker: RefCell<Option<RedrawWaker>>,
+    persistent_focus_handle_store: RefCell<PersistentFocusHandleStore>,
+    frame_clock_tracker: RefCell<FrameClockTracker>,
+    layout_dirty_tracker: RefCell<LayoutDirtyTracker>,
+    runtime: RefCell<TesseraRuntime>,
+}
+
+impl RuntimeGlobals {
+    fn new() -> Self {
+        Self {
+            slot_table: RefCell::new(SlotTable::default()),
+            component_replay_tracker: RefCell::new(ComponentReplayTracker::default()),
+            build_invalidation_tracker: RefCell::new(BuildInvalidationTracker::default()),
+            state_read_dependency_tracker: RefCell::new(StateReadDependencyTracker::default()),
+            focus_read_dependency_tracker: RefCell::new(FocusReadDependencyTracker::default()),
+            render_slot_read_dependency_tracker: RefCell::new(
+                RenderSlotReadDependencyTracker::default(),
+            ),
+            redraw_waker: RefCell::new(None),
+            persistent_focus_handle_store: RefCell::new(PersistentFocusHandleStore::default()),
+            frame_clock_tracker: RefCell::new(FrameClockTracker::default()),
+            layout_dirty_tracker: RefCell::new(LayoutDirtyTracker::default()),
+            runtime: RefCell::new(TesseraRuntime::default()),
+        }
+    }
+}
+
+thread_local! {
+    static RUNTIME_GLOBALS: RuntimeGlobals = RuntimeGlobals::new();
+}
 
 /// Runtime state container.
 #[derive(Default)]
@@ -1606,9 +1659,7 @@ impl TesseraRuntime {
     where
         F: FnOnce(&Self) -> R,
     {
-        f(&TESSERA_RUNTIME
-            .get_or_init(|| RwLock::new(Self::default()))
-            .read())
+        RUNTIME_GLOBALS.with(|globals| f(&globals.runtime.borrow()))
     }
 
     /// Executes a closure with an exclusive, mutable reference to the runtime.
@@ -1616,9 +1667,7 @@ impl TesseraRuntime {
     where
         F: FnOnce(&mut Self) -> R,
     {
-        f(&mut TESSERA_RUNTIME
-            .get_or_init(|| RwLock::new(Self::default()))
-            .write())
+        RUNTIME_GLOBALS.with(|globals| f(&mut globals.runtime.borrow_mut()))
     }
 
     /// Get the current window size in physical pixels.
@@ -1627,8 +1676,7 @@ impl TesseraRuntime {
     }
 
     /// Sets identity fields for the current component node.
-    #[doc(hidden)]
-    pub fn set_current_node_identity(&mut self, instance_key: u64, instance_logic_id: u64) {
+    pub(crate) fn set_current_node_identity(&mut self, instance_key: u64, instance_logic_id: u64) {
         if let Some(node) = self.component_tree.current_node_mut() {
             node.instance_key = instance_key;
             node.instance_logic_id = instance_logic_id;
@@ -1641,8 +1689,7 @@ impl TesseraRuntime {
     }
 
     /// Stores replay metadata for the current component node.
-    #[doc(hidden)]
-    pub fn set_current_component_replay<P>(
+    pub(crate) fn set_current_component_replay<P>(
         &mut self,
         runner: Arc<dyn ErasedComponentRunner>,
         props: &P,
@@ -1655,16 +1702,17 @@ impl TesseraRuntime {
             .current_node()
             .map(|node| (node.instance_key, node.instance_logic_id));
         let previous_replay = current_node_info.and_then(|(instance_key, instance_logic_id)| {
-            let tracker = component_replay_tracker().read();
-            let previous = tracker.previous_nodes.get(&instance_key)?;
-            if previous.instance_logic_id != instance_logic_id {
-                return None;
-            }
-            if previous.replay.props.equals(props) {
-                Some(previous.replay.clone())
-            } else {
-                None
-            }
+            with_component_replay_tracker(|tracker| {
+                let previous = tracker.previous_nodes.get(&instance_key)?;
+                if previous.instance_logic_id != instance_logic_id {
+                    return None;
+                }
+                if previous.replay.props.equals(props) {
+                    Some(previous.replay.clone())
+                } else {
+                    None
+                }
+            })
         });
 
         let pending_dirty = current_node_info
@@ -1707,25 +1755,72 @@ impl TesseraRuntime {
         false
     }
 
-    /// Sets the layout spec for the current component node.
-    #[doc(hidden)]
-    pub fn set_current_layout_spec<S>(&mut self, spec: S)
-    where
-        S: LayoutSpec,
-    {
+    /// Sets the layout policy for the current component node.
+    pub(crate) fn set_current_layout_policy_boxed(&mut self, policy: Box<dyn LayoutPolicyDyn>) {
         if let Some(node) = self.component_tree.current_node_mut() {
-            node.layout_spec = Box::new(spec) as Box<dyn LayoutSpecDyn>;
+            node.layout_policy = policy;
         } else {
             debug_assert!(
                 false,
-                "set_current_layout_spec must be called inside a component build"
+                "set_current_layout_policy_boxed must be called inside a component build"
             );
         }
     }
 
-    /// Binds a focus requester to the current component node.
-    #[doc(hidden)]
-    pub fn bind_current_focus_requester(&mut self, requester: FocusRequester) {
+    /// Sets the render policy for the current component node.
+    pub(crate) fn set_current_render_policy_boxed(&mut self, policy: Box<dyn RenderPolicyDyn>) {
+        if let Some(node) = self.component_tree.current_node_mut() {
+            node.render_policy = policy;
+        } else {
+            debug_assert!(
+                false,
+                "set_current_render_policy_boxed must be called inside a component build"
+            );
+        }
+    }
+
+    /// Appends a modifier chain to the current component node.
+    pub(crate) fn append_current_modifier(&mut self, modifier: Modifier) {
+        if let Some(node) = self.component_tree.current_node_mut() {
+            node.modifier = node.modifier.clone().then(modifier);
+        } else {
+            debug_assert!(
+                false,
+                "append_current_modifier must be called inside a component build"
+            );
+        }
+    }
+
+    pub(crate) fn set_current_accessibility(&mut self, accessibility: Option<AccessibilityNode>) {
+        if let Some(node_id) = current_node_id()
+            && let Some(mut metadata) = self.component_tree.metadatas().get_mut(&node_id)
+        {
+            metadata.accessibility = accessibility;
+        } else {
+            debug_assert!(
+                false,
+                "set_current_accessibility must be called inside a component build"
+            );
+        }
+    }
+
+    pub(crate) fn set_current_accessibility_action_handler(
+        &mut self,
+        handler: Option<AccessibilityActionHandler>,
+    ) {
+        if let Some(node_id) = current_node_id()
+            && let Some(mut metadata) = self.component_tree.metadatas().get_mut(&node_id)
+        {
+            metadata.accessibility_action_handler = handler;
+        } else {
+            debug_assert!(
+                false,
+                "set_current_accessibility_action_handler must be called inside a component build"
+            );
+        }
+    }
+
+    pub(crate) fn bind_current_focus_requester(&mut self, requester: FocusRequester) {
         if let Some(current) = self.component_tree.current_node_mut() {
             current.focus_requester_binding = Some(requester);
         } else {
@@ -1736,22 +1831,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers the current component node as a focus target.
-    #[doc(hidden)]
-    pub fn register_current_focus_target(&mut self, node: FocusNode) {
-        if let Some(current) = self.component_tree.current_node_mut() {
-            current.focus_registration = Some(FocusRegistration::target(node));
-        } else {
-            debug_assert!(
-                false,
-                "register_current_focus_target must be called inside a component build"
-            );
-        }
-    }
-
-    /// Ensures the current component node has a focus target registration.
-    #[doc(hidden)]
-    pub fn ensure_current_focus_target(&mut self, node: FocusNode) {
+    pub(crate) fn ensure_current_focus_target(&mut self, node: FocusNode) {
         if let Some(current) = self.component_tree.current_node_mut() {
             if current.focus_registration.is_none() {
                 current.focus_registration = Some(FocusRegistration::target(node));
@@ -1764,22 +1844,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers the current component node as a focus scope.
-    #[doc(hidden)]
-    pub fn register_current_focus_scope(&mut self, scope: FocusScopeNode) {
-        if let Some(current) = self.component_tree.current_node_mut() {
-            current.focus_registration = Some(FocusRegistration::scope(scope));
-        } else {
-            debug_assert!(
-                false,
-                "register_current_focus_scope must be called inside a component build"
-            );
-        }
-    }
-
-    /// Ensures the current component node has a focus scope registration.
-    #[doc(hidden)]
-    pub fn ensure_current_focus_scope(&mut self, scope: FocusScopeNode) {
+    pub(crate) fn ensure_current_focus_scope(&mut self, scope: FocusScopeNode) {
         if let Some(current) = self.component_tree.current_node_mut() {
             if current.focus_registration.is_none() {
                 current.focus_registration = Some(FocusRegistration::scope(scope));
@@ -1792,23 +1857,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers the current component node as a focus traversal group.
-    #[doc(hidden)]
-    pub fn register_current_focus_group(&mut self, group: FocusGroupNode) {
-        if let Some(current) = self.component_tree.current_node_mut() {
-            current.focus_registration = Some(FocusRegistration::group(group));
-        } else {
-            debug_assert!(
-                false,
-                "register_current_focus_group must be called inside a component build"
-            );
-        }
-    }
-
-    /// Ensures the current component node has a focus traversal group
-    /// registration.
-    #[doc(hidden)]
-    pub fn ensure_current_focus_group(&mut self, group: FocusGroupNode) {
+    pub(crate) fn ensure_current_focus_group(&mut self, group: FocusGroupNode) {
         if let Some(current) = self.component_tree.current_node_mut() {
             if current.focus_registration.is_none() {
                 current.focus_registration = Some(FocusRegistration::group(group));
@@ -1821,33 +1870,25 @@ impl TesseraRuntime {
         }
     }
 
-    /// Returns the current component node's registered focus target, if any.
-    #[doc(hidden)]
-    pub fn current_focus_target_handle(&self) -> Option<FocusNode> {
+    pub(crate) fn current_focus_target_handle(&self) -> Option<FocusNode> {
         let registration = self.component_tree.current_node()?.focus_registration?;
         (registration.kind == FocusRegistrationKind::Target)
             .then(|| FocusNode::from_handle_id(registration.id))
     }
 
-    /// Returns the current component node's registered focus scope, if any.
-    #[doc(hidden)]
-    pub fn current_focus_scope_handle(&self) -> Option<FocusScopeNode> {
+    pub(crate) fn current_focus_scope_handle(&self) -> Option<FocusScopeNode> {
         let registration = self.component_tree.current_node()?.focus_registration?;
         (registration.kind == FocusRegistrationKind::Scope)
             .then(|| FocusScopeNode::from_handle_id(registration.id))
     }
 
-    /// Returns the current component node's registered focus group, if any.
-    #[doc(hidden)]
-    pub fn current_focus_group_handle(&self) -> Option<FocusGroupNode> {
+    pub(crate) fn current_focus_group_handle(&self) -> Option<FocusGroupNode> {
         let registration = self.component_tree.current_node()?.focus_registration?;
         (registration.kind == FocusRegistrationKind::Group)
             .then(|| FocusGroupNode::from_handle_id(registration.id))
     }
 
-    /// Updates focus properties for the current component node registration.
-    #[doc(hidden)]
-    pub fn set_current_focus_properties(&mut self, properties: FocusProperties) {
+    pub(crate) fn set_current_focus_properties(&mut self, properties: FocusProperties) {
         if let Some(current) = self.component_tree.current_node_mut() {
             if let Some(registration) = current.focus_registration.as_mut() {
                 registration.properties = properties;
@@ -1865,9 +1906,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Updates the traversal policy for the current focus scope or group.
-    #[doc(hidden)]
-    pub fn set_current_focus_traversal_policy(&mut self, policy: FocusTraversalPolicy) {
+    pub(crate) fn set_current_focus_traversal_policy(&mut self, policy: FocusTraversalPolicy) {
         if let Some(current) = self.component_tree.current_node_mut() {
             if current.focus_registration.is_some_and(|registration| {
                 matches!(
@@ -1890,9 +1929,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers a focus-changed callback on the current component node.
-    #[doc(hidden)]
-    pub fn set_current_focus_changed_handler(&mut self, handler: CallbackWith<FocusState>) {
+    pub(crate) fn set_current_focus_changed_handler(&mut self, handler: CallbackWith<FocusState>) {
         if let Some(current) = self.component_tree.current_node_mut() {
             current.focus_changed_handler = Some(handler);
         } else {
@@ -1903,9 +1940,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers a focus-event callback on the current component node.
-    #[doc(hidden)]
-    pub fn set_current_focus_event_handler(&mut self, handler: CallbackWith<FocusState>) {
+    pub(crate) fn set_current_focus_event_handler(&mut self, handler: CallbackWith<FocusState>) {
         if let Some(current) = self.component_tree.current_node_mut() {
             current.focus_event_handler = Some(handler);
         } else {
@@ -1916,9 +1951,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers a beyond-bounds focus callback on the current component node.
-    #[doc(hidden)]
-    pub fn set_current_focus_beyond_bounds_handler(
+    pub(crate) fn set_current_focus_beyond_bounds_handler(
         &mut self,
         handler: CallbackWith<FocusDirection, bool>,
     ) {
@@ -1932,9 +1965,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers a focus reveal callback on the current component node.
-    #[doc(hidden)]
-    pub fn set_current_focus_reveal_handler(
+    pub(crate) fn set_current_focus_reveal_handler(
         &mut self,
         handler: CallbackWith<FocusRevealRequest, bool>,
     ) {
@@ -1948,9 +1979,7 @@ impl TesseraRuntime {
         }
     }
 
-    /// Registers a restorer fallback on the current focus scope node.
-    #[doc(hidden)]
-    pub fn set_current_focus_restorer_fallback(&mut self, fallback: FocusRequester) {
+    pub(crate) fn set_current_focus_restorer_fallback(&mut self, fallback: FocusRequester) {
         if let Some(current) = self.component_tree.current_node_mut() {
             if current
                 .focus_registration
@@ -1971,15 +2000,13 @@ impl TesseraRuntime {
         }
     }
 
-    /// Records the final layout spec snapshot for the current node.
-    #[doc(hidden)]
-    pub fn finalize_current_layout_spec_dirty(&mut self) {
+    pub(crate) fn finalize_current_layout_policy_dirty(&mut self) {
         if let Some(node) = self.component_tree.current_node() {
-            record_layout_spec_dirty(node.instance_key, node.layout_spec.as_ref());
+            record_layout_policy_dirty(node.instance_key, node.layout_policy.as_ref());
         } else {
             debug_assert!(
                 false,
-                "finalize_current_layout_spec_dirty must be called inside a component build"
+                "finalize_current_layout_policy_dirty must be called inside a component build"
             );
         }
     }
@@ -1994,6 +2021,7 @@ pub struct NodeContextGuard {
     profiling_guard: Option<crate::profiler::ScopeGuard>,
 }
 
+/// Guard that keeps the current component instance key on the execution stack.
 pub struct CurrentComponentInstanceGuard {
     popped: bool,
 }
@@ -2093,10 +2121,9 @@ pub fn push_current_node(
     #[cfg(not(feature = "profiling"))]
     let _ = fn_name;
     #[allow(unused_variables)]
-    let parent_node_id = NODE_CONTEXT_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let parent = stack.last().copied();
-        stack.push(node_id);
+    let parent_node_id = with_execution_context_mut(|context| {
+        let parent = context.node_context_stack.last().copied();
+        context.node_context_stack.push(node_id);
         parent
     });
 
@@ -2104,11 +2131,12 @@ pub fn push_current_node(
     // This distinguishes multiple calls to the same component (e.g., foo(1);
     // foo(2);)
     let parent_call_index = next_child_instance_call_index();
-    let parent_instance_logic_id =
-        INSTANCE_LOGIC_ID_STACK.with(|s| s.borrow().last().copied().unwrap_or(0));
+    let parent_instance_logic_id = with_execution_context(|context| {
+        context.instance_logic_id_stack.last().copied().unwrap_or(0)
+    });
 
     let group_path_hash = current_group_path_hash();
-    let has_group_path = GROUP_PATH_STACK.with(|stack| !stack.borrow().is_empty());
+    let has_group_path = with_execution_context(|context| !context.group_path_stack.is_empty());
 
     // Combine component_type_id with parent_instance_logic_id, the current
     // control-flow group path, and the call index local to that group. This
@@ -2143,7 +2171,9 @@ pub fn push_current_node(
             ])
         };
 
-    INSTANCE_LOGIC_ID_STACK.with(|stack| stack.borrow_mut().push(instance_logic_id));
+    with_execution_context_mut(|context| {
+        context.instance_logic_id_stack.push(instance_logic_id);
+    });
 
     push_order_frame();
 
@@ -2176,16 +2206,17 @@ pub fn push_current_node_with_instance_logic_id(
     #[cfg(not(feature = "profiling"))]
     let _ = fn_name;
     #[allow(unused_variables)]
-    let parent_node_id = NODE_CONTEXT_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let parent = stack.last().copied();
-        stack.push(node_id);
+    let parent_node_id = with_execution_context_mut(|context| {
+        let parent = context.node_context_stack.last().copied();
+        context.node_context_stack.push(node_id);
         parent
     });
 
     let _ = next_child_instance_call_index();
 
-    INSTANCE_LOGIC_ID_STACK.with(|stack| stack.borrow_mut().push(instance_logic_id));
+    with_execution_context_mut(|context| {
+        context.instance_logic_id_stack.push(instance_logic_id);
+    });
     push_order_frame();
 
     #[cfg(feature = "profiling")]
@@ -2206,13 +2237,15 @@ pub fn push_current_node_with_instance_logic_id(
 
 /// Push the current component instance key for the active execution scope.
 pub fn push_current_component_instance_key(instance_key: u64) -> CurrentComponentInstanceGuard {
-    CURRENT_COMPONENT_INSTANCE_STACK.with(|stack| stack.borrow_mut().push(instance_key));
+    with_execution_context_mut(|context| {
+        context.current_component_instance_stack.push(instance_key);
+    });
     CurrentComponentInstanceGuard { popped: false }
 }
 
 fn pop_current_component_instance_key() {
-    CURRENT_COMPONENT_INSTANCE_STACK.with(|stack| {
-        let popped = stack.borrow_mut().pop();
+    with_execution_context_mut(|context| {
+        let popped = context.current_component_instance_stack.pop();
         debug_assert!(
             popped.is_some(),
             "Attempted to pop current component instance key from an empty stack"
@@ -2221,9 +2254,8 @@ fn pop_current_component_instance_key() {
 }
 
 fn pop_current_node() {
-    NODE_CONTEXT_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let popped = stack.pop();
+    with_execution_context_mut(|context| {
+        let popped = context.node_context_stack.pop();
         debug_assert!(
             popped.is_some(),
             "Attempted to pop current node from an empty stack"
@@ -2234,23 +2266,21 @@ fn pop_current_node() {
 
 /// Get the node id at the top of the thread-local component stack.
 pub fn current_node_id() -> Option<NodeId> {
-    NODE_CONTEXT_STACK.with(|stack| stack.borrow().last().copied())
+    with_execution_context(|context| context.node_context_stack.last().copied())
 }
 
 fn current_instance_logic_id_opt() -> Option<u64> {
-    INSTANCE_LOGIC_ID_STACK.with(|stack| stack.borrow().last().copied())
+    with_execution_context(|context| context.instance_logic_id_stack.last().copied())
 }
 
 /// Returns the current component instance logic id.
-#[doc(hidden)]
-pub fn current_instance_logic_id() -> u64 {
+pub(crate) fn current_instance_logic_id() -> u64 {
     current_instance_logic_id_opt()
         .expect("current_instance_logic_id must be called inside a component")
 }
 
 /// Returns the instance key for the current component call site.
-#[doc(hidden)]
-pub fn current_instance_key() -> u64 {
+pub(crate) fn current_instance_key() -> u64 {
     let instance_logic_id = current_instance_logic_id_opt()
         .expect("current_instance_key must be called inside a component");
     let group_path_hash = current_group_path_hash();
@@ -2258,22 +2288,22 @@ pub fn current_instance_key() -> u64 {
 }
 
 fn pop_instance_logic_id() {
-    INSTANCE_LOGIC_ID_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let _ = stack.pop();
+    with_execution_context_mut(|context| {
+        let _ = context.instance_logic_id_stack.pop();
     });
 }
 
 /// Push an execution phase for the current thread.
 pub fn push_phase(phase: RuntimePhase) -> PhaseGuard {
-    PHASE_STACK.with(|stack| stack.borrow_mut().push(phase));
+    with_execution_context_mut(|context| {
+        context.phase_stack.push(phase);
+    });
     PhaseGuard { popped: false }
 }
 
 fn pop_phase() {
-    PHASE_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let popped = stack.pop();
+    with_execution_context_mut(|context| {
+        let popped = context.phase_stack.pop();
         debug_assert!(
             popped.is_some(),
             "Attempted to pop execution phase from an empty stack"
@@ -2282,19 +2312,20 @@ fn pop_phase() {
 }
 
 pub(crate) fn current_phase() -> Option<RuntimePhase> {
-    PHASE_STACK.with(|stack| stack.borrow().last().copied())
+    with_execution_context(|context| context.phase_stack.last().copied())
 }
 
 /// Push a group id onto the thread-local control-flow stack.
 pub(crate) fn push_group_id(group_id: u64) {
-    GROUP_PATH_STACK.with(|stack| stack.borrow_mut().push(group_id));
+    with_execution_context_mut(|context| {
+        context.group_path_stack.push(group_id);
+    });
 }
 
 /// Pop a group id from the thread-local control-flow stack.
 pub(crate) fn pop_group_id(expected_group_id: u64) {
-    GROUP_PATH_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        if let Some(popped) = stack.pop() {
+    with_execution_context_mut(|context| {
+        if let Some(popped) = context.group_path_stack.pop() {
             debug_assert_eq!(
                 popped, expected_group_id,
                 "Unbalanced GroupGuard stack: expected {}, got {}",
@@ -2308,18 +2339,15 @@ pub(crate) fn pop_group_id(expected_group_id: u64) {
 
 /// Get a clone of the current control-flow path.
 fn current_group_path() -> Vec<u64> {
-    GROUP_PATH_STACK.with(|stack| stack.borrow().clone())
+    with_execution_context(|context| context.group_path_stack.clone())
 }
 
 fn current_group_path_hash() -> u64 {
-    GROUP_PATH_STACK.with(|stack| {
-        let stack = stack.borrow();
-        hash_components(&[&stack[..]])
-    })
+    with_execution_context(|context| hash_components(&[&context.group_path_stack[..]]))
 }
 
 fn current_instance_key_override() -> Option<u64> {
-    INSTANCE_KEY_STACK.with(|stack| stack.borrow().last().copied())
+    with_execution_context(|context| context.instance_key_stack.last().copied())
 }
 
 /// RAII guard that tracks control-flow grouping for the current component node.
@@ -2379,16 +2407,17 @@ pub struct InstanceKeyGuard {
 impl InstanceKeyGuard {
     /// Push a key hash for instance identity.
     pub fn new(key_hash: u64) -> Self {
-        INSTANCE_KEY_STACK.with(|stack| stack.borrow_mut().push(key_hash));
+        with_execution_context_mut(|context| {
+            context.instance_key_stack.push(key_hash);
+        });
         Self { key_hash }
     }
 }
 
 impl Drop for InstanceKeyGuard {
     fn drop(&mut self) {
-        INSTANCE_KEY_STACK.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            let popped = stack.pop();
+        with_execution_context_mut(|context| {
+            let popped = context.instance_key_stack.pop();
             debug_assert_eq!(
                 popped,
                 Some(self.key_hash),
@@ -2469,156 +2498,158 @@ where
         type_id: TypeId::of::<T>(),
     };
 
-    let mut table = slot_table().write();
-    let mut init_opt = Some(init);
-    if let Some(slot) = table.try_fast_slot_lookup(slot_key) {
-        let epoch = table.epoch;
-        let (generation, value) = {
-            let entry = table
-                .entries
-                .get_mut(slot)
-                .expect("functor slot entry should exist");
+    with_slot_table_mut(|table| {
+        let mut init_opt = Some(init);
+        if let Some(slot) = table.try_fast_slot_lookup(slot_key) {
+            let epoch = table.epoch;
+            let (generation, value): (u64, Arc<dyn Any + Send + Sync>) = {
+                let entry = table
+                    .entries
+                    .get_mut(slot)
+                    .expect("functor slot entry should exist");
 
-            if entry.key.type_id != slot_key.type_id {
-                panic!(
-                    "callback slot type mismatch: expected {}, found {:?}",
-                    std::any::type_name::<T>(),
-                    entry.key.type_id
-                );
-            }
+                if entry.key.type_id != slot_key.type_id {
+                    panic!(
+                        "callback slot type mismatch: expected {}, found {:?}",
+                        std::any::type_name::<T>(),
+                        entry.key.type_id
+                    );
+                }
 
-            entry.last_alive_epoch = epoch;
-            if entry.value.is_none() {
-                let init_fn = init_opt
-                    .take()
-                    .expect("callback slot init called more than once");
-                entry.value = Some(Arc::new(init_fn()));
-                entry.generation = entry.generation.wrapping_add(1);
-            }
+                entry.last_alive_epoch = epoch;
+                if entry.value.is_none() {
+                    let init_fn = init_opt
+                        .take()
+                        .expect("callback slot init called more than once");
+                    entry.value = Some(Arc::new(init_fn()));
+                    entry.generation = entry.generation.wrapping_add(1);
+                }
 
-            (
-                entry.generation,
-                entry
-                    .value
-                    .as_ref()
-                    .expect("callback slot must contain a value")
-                    .clone(),
-            )
-        };
-
-        (
-            value
-                .downcast::<T>()
-                .unwrap_or_else(|_| panic!("callback slot {:?} downcast failed", slot)),
-            FunctorHandle::new(slot, generation),
-        )
-    } else if let Some(slot) = table.key_to_slot.get(&slot_key).copied() {
-        table.record_slot_usage_slow(instance_logic_id, slot);
-        let epoch = table.epoch;
-        let (generation, value) = {
-            let entry = table
-                .entries
-                .get_mut(slot)
-                .expect("functor slot entry should exist");
-
-            if entry.key.type_id != slot_key.type_id {
-                panic!(
-                    "callback slot type mismatch: expected {}, found {:?}",
-                    std::any::type_name::<T>(),
-                    entry.key.type_id
-                );
-            }
-
-            entry.last_alive_epoch = epoch;
-            if entry.value.is_none() {
-                let init_fn = init_opt
-                    .take()
-                    .expect("callback slot init called more than once");
-                entry.value = Some(Arc::new(init_fn()));
-                entry.generation = entry.generation.wrapping_add(1);
-            }
+                (
+                    entry.generation,
+                    entry
+                        .value
+                        .as_ref()
+                        .expect("callback slot must contain a value")
+                        .clone(),
+                )
+            };
 
             (
-                entry.generation,
-                entry
-                    .value
-                    .as_ref()
-                    .expect("callback slot must contain a value")
-                    .clone(),
+                value
+                    .downcast::<T>()
+                    .unwrap_or_else(|_| panic!("callback slot {:?} downcast failed", slot)),
+                FunctorHandle::new(slot, generation),
             )
-        };
+        } else if let Some(slot) = table.key_to_slot.get(&slot_key).copied() {
+            table.record_slot_usage_slow(instance_logic_id, slot);
+            let epoch = table.epoch;
+            let (generation, value): (u64, Arc<dyn Any + Send + Sync>) = {
+                let entry = table
+                    .entries
+                    .get_mut(slot)
+                    .expect("functor slot entry should exist");
 
-        (
-            value
+                if entry.key.type_id != slot_key.type_id {
+                    panic!(
+                        "callback slot type mismatch: expected {}, found {:?}",
+                        std::any::type_name::<T>(),
+                        entry.key.type_id
+                    );
+                }
+
+                entry.last_alive_epoch = epoch;
+                if entry.value.is_none() {
+                    let init_fn = init_opt
+                        .take()
+                        .expect("callback slot init called more than once");
+                    entry.value = Some(Arc::new(init_fn()));
+                    entry.generation = entry.generation.wrapping_add(1);
+                }
+
+                (
+                    entry.generation,
+                    entry
+                        .value
+                        .as_ref()
+                        .expect("callback slot must contain a value")
+                        .clone(),
+                )
+            };
+
+            (
+                value
+                    .downcast::<T>()
+                    .unwrap_or_else(|_| panic!("callback slot {:?} downcast failed", slot)),
+                FunctorHandle::new(slot, generation),
+            )
+        } else {
+            let epoch = table.epoch;
+            let init_fn = init_opt
+                .take()
+                .expect("callback slot init called more than once");
+            let generation = 1u64;
+            let slot = table.entries.insert(SlotEntry {
+                key: slot_key,
+                generation,
+                value: Some(Arc::new(init_fn())),
+                last_alive_epoch: epoch,
+                retained: false,
+            });
+
+            table.key_to_slot.insert(slot_key, slot);
+            table.record_slot_usage_slow(instance_logic_id, slot);
+
+            let value = table
+                .entries
+                .get(slot)
+                .expect("functor slot entry should exist")
+                .value
+                .as_ref()
+                .expect("callback slot must contain a value")
+                .clone()
                 .downcast::<T>()
-                .unwrap_or_else(|_| panic!("callback slot {:?} downcast failed", slot)),
-            FunctorHandle::new(slot, generation),
-        )
-    } else {
-        let epoch = table.epoch;
-        let init_fn = init_opt
-            .take()
-            .expect("callback slot init called more than once");
-        let generation = 1u64;
-        let slot = table.entries.insert(SlotEntry {
-            key: slot_key,
-            generation,
-            value: Some(Arc::new(init_fn())),
-            last_alive_epoch: epoch,
-            retained: false,
-        });
+                .unwrap_or_else(|_| panic!("callback slot {:?} downcast failed", slot));
 
-        table.key_to_slot.insert(slot_key, slot);
-        table.record_slot_usage_slow(instance_logic_id, slot);
-
-        let value = table
-            .entries
-            .get(slot)
-            .expect("functor slot entry should exist")
-            .value
-            .as_ref()
-            .expect("callback slot must contain a value")
-            .clone()
-            .downcast::<T>()
-            .unwrap_or_else(|_| panic!("callback slot {:?} downcast failed", slot));
-
-        (value, FunctorHandle::new(slot, generation))
-    }
+            (value, FunctorHandle::new(slot, generation))
+        }
+    })
 }
 
 fn load_functor_cell<T>(handle: FunctorHandle) -> Arc<T>
 where
     T: Send + Sync + 'static,
 {
-    let table = slot_table().read();
-    let entry = table
-        .entries
-        .get(handle.slot)
-        .unwrap_or_else(|| panic!("Callback points to freed slot: {:?}", handle.slot));
+    with_slot_table(|table| {
+        let entry = table
+            .entries
+            .get(handle.slot)
+            .unwrap_or_else(|| panic!("Callback points to freed slot: {:?}", handle.slot));
 
-    if entry.generation != handle.generation {
-        panic!(
-            "Callback is stale (slot {:?}, generation {}, current generation {})",
-            handle.slot, handle.generation, entry.generation
-        );
-    }
+        if entry.generation != handle.generation {
+            panic!(
+                "Callback is stale (slot {:?}, generation {}, current generation {})",
+                handle.slot, handle.generation, entry.generation
+            );
+        }
 
-    if entry.key.type_id != TypeId::of::<T>() {
-        panic!(
-            "Callback type mismatch for slot {:?}: expected {}, stored {:?}",
-            handle.slot,
-            std::any::type_name::<T>(),
-            entry.key.type_id
-        );
-    }
+        if entry.key.type_id != TypeId::of::<T>() {
+            panic!(
+                "Callback type mismatch for slot {:?}: expected {}, stored {:?}",
+                handle.slot,
+                std::any::type_name::<T>(),
+                entry.key.type_id
+            );
+        }
 
-    entry
-        .value
-        .as_ref()
-        .unwrap_or_else(|| panic!("Callback slot {:?} has been cleared", handle.slot))
-        .clone()
-        .downcast::<T>()
-        .unwrap_or_else(|_| panic!("Callback slot {:?} downcast failed", handle.slot))
+        entry
+            .value
+            .as_ref()
+            .unwrap_or_else(|| panic!("Callback slot {:?} has been cleared", handle.slot))
+            .clone()
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("Callback slot {:?} downcast failed", handle.slot))
+    })
 }
 
 pub(crate) fn remember_callback_handle<F>(handler: F) -> FunctorHandle
@@ -2664,13 +2695,12 @@ pub(crate) fn invoke_render_slot_handle(handle: FunctorHandle) {
     render();
 }
 
-pub(crate) fn remember_render_slot_with_handle<T, R, F>(render: F) -> FunctorHandle
+pub(crate) fn remember_render_slot_with_handle<T, F>(render: F) -> FunctorHandle
 where
     T: 'static,
-    R: 'static,
-    F: Fn(T) -> R + Send + Sync + 'static,
+    F: Fn(T) + Send + Sync + 'static,
 {
-    let render = Arc::new(render) as Arc<dyn Fn(T) -> R + Send + Sync>;
+    let render = Arc::new(render) as Arc<dyn Fn(T) + Send + Sync>;
     let creator_instance_key = current_component_instance_key_from_scope().unwrap_or_else(|| {
         panic!("RenderSlotWith handles must be created during a component build")
     });
@@ -2687,12 +2717,11 @@ where
     handle
 }
 
-pub(crate) fn invoke_render_slot_with_handle<T, R>(handle: FunctorHandle, value: T) -> R
+pub(crate) fn invoke_render_slot_with_handle<T>(handle: FunctorHandle, value: T)
 where
     T: 'static,
-    R: 'static,
 {
-    let render = load_functor_cell::<RenderSlotWithCell<T, R>>(handle).shared();
+    let render = load_functor_cell::<RenderSlotWithCell<T>>(handle).shared();
     render(value)
 }
 
@@ -2722,12 +2751,12 @@ where
 
 /// Start a new state-slot epoch for the current recomposition pass.
 pub fn begin_recompose_slot_epoch() {
-    slot_table().write().begin_epoch();
+    with_slot_table_mut(SlotTable::begin_epoch);
 }
 
 /// Reset all slot buffers (used on suspension).
 pub fn reset_slots() {
-    slot_table().write().reset();
+    with_slot_table_mut(SlotTable::reset);
 }
 
 pub(crate) fn recycle_recomposed_slots_for_instance_logic_ids(instance_logic_ids: &HashSet<u64>) {
@@ -2735,34 +2764,35 @@ pub(crate) fn recycle_recomposed_slots_for_instance_logic_ids(instance_logic_ids
         return;
     }
 
-    let mut table = slot_table().write();
-    let epoch = table.epoch;
-    let mut freed: Vec<(SlotHandle, SlotKey)> = Vec::new();
+    with_slot_table_mut(|table| {
+        let epoch = table.epoch;
+        let mut freed: Vec<(SlotHandle, SlotKey)> = Vec::new();
 
-    for (slot, entry) in table.entries.iter() {
-        if !instance_logic_ids.contains(&entry.key.instance_logic_id) {
-            continue;
+        for (slot, entry) in table.entries.iter() {
+            if !instance_logic_ids.contains(&entry.key.instance_logic_id) {
+                continue;
+            }
+            if entry.last_alive_epoch == epoch || entry.retained {
+                continue;
+            }
+            freed.push((slot, entry.key));
         }
-        // Skip if touched in this recomposition pass or marked as retained.
-        if entry.last_alive_epoch == epoch || entry.retained {
-            continue;
-        }
-        freed.push((slot, entry.key));
-    }
 
-    for (slot, key) in freed {
-        table.entries.remove(slot);
-        table.key_to_slot.remove(&key);
-    }
+        for (slot, key) in freed {
+            table.entries.remove(slot);
+            table.key_to_slot.remove(&key);
+        }
+    });
 }
 
 pub(crate) fn live_slot_instance_logic_ids() -> HashSet<u64> {
-    let table = slot_table().read();
-    table
-        .entries
-        .iter()
-        .map(|(_, entry)| entry.key.instance_logic_id)
-        .collect()
+    with_slot_table(|table| {
+        table
+            .entries
+            .iter()
+            .map(|(_, entry)| entry.key.instance_logic_id)
+            .collect()
+    })
 }
 
 /// Remember a value across frames with an explicit key.
@@ -2807,83 +2837,84 @@ where
         type_id,
     };
 
-    let mut table = slot_table().write();
-    let mut init_opt = Some(init);
-    if let Some(slot) = table.try_fast_slot_lookup(slot_key) {
-        let epoch = table.epoch;
-        let generation = {
-            let entry = table
-                .entries
-                .get_mut(slot)
-                .expect("slot entry should exist");
+    with_slot_table_mut(|table| {
+        let mut init_opt = Some(init);
+        if let Some(slot) = table.try_fast_slot_lookup(slot_key) {
+            let epoch = table.epoch;
+            let generation = {
+                let entry = table
+                    .entries
+                    .get_mut(slot)
+                    .expect("slot entry should exist");
 
-            if entry.key.type_id != slot_key.type_id {
-                panic!(
-                    "remember_with_key type mismatch: expected {}, found {:?}",
-                    std::any::type_name::<T>(),
-                    entry.key.type_id
-                );
-            }
+                if entry.key.type_id != slot_key.type_id {
+                    panic!(
+                        "remember_with_key type mismatch: expected {}, found {:?}",
+                        std::any::type_name::<T>(),
+                        entry.key.type_id
+                    );
+                }
 
-            entry.last_alive_epoch = epoch;
-            if entry.value.is_none() {
-                let init_fn = init_opt
-                    .take()
-                    .expect("remember_with_key init called more than once");
-                entry.value = Some(Arc::new(RwLock::new(init_fn())));
-                entry.generation = entry.generation.wrapping_add(1);
-            }
-            entry.generation
-        };
+                entry.last_alive_epoch = epoch;
+                if entry.value.is_none() {
+                    let init_fn = init_opt
+                        .take()
+                        .expect("remember_with_key init called more than once");
+                    entry.value = Some(Arc::new(RwLock::new(init_fn())));
+                    entry.generation = entry.generation.wrapping_add(1);
+                }
+                entry.generation
+            };
 
-        State::new(slot, generation)
-    } else if let Some(slot) = table.key_to_slot.get(&slot_key).copied() {
-        table.record_slot_usage_slow(instance_logic_id, slot);
-        let epoch = table.epoch;
-        let generation = {
-            let entry = table
-                .entries
-                .get_mut(slot)
-                .expect("slot entry should exist");
+            State::new(slot, generation)
+        } else if let Some(slot) = table.key_to_slot.get(&slot_key).copied() {
+            table.record_slot_usage_slow(instance_logic_id, slot);
+            let epoch = table.epoch;
+            let generation = {
+                let entry = table
+                    .entries
+                    .get_mut(slot)
+                    .expect("slot entry should exist");
 
-            if entry.key.type_id != slot_key.type_id {
-                panic!(
-                    "remember_with_key type mismatch: expected {}, found {:?}",
-                    std::any::type_name::<T>(),
-                    entry.key.type_id
-                );
-            }
+                if entry.key.type_id != slot_key.type_id {
+                    panic!(
+                        "remember_with_key type mismatch: expected {}, found {:?}",
+                        std::any::type_name::<T>(),
+                        entry.key.type_id
+                    );
+                }
 
-            entry.last_alive_epoch = epoch;
-            if entry.value.is_none() {
-                let init_fn = init_opt
-                    .take()
-                    .expect("remember_with_key init called more than once");
-                entry.value = Some(Arc::new(RwLock::new(init_fn())));
-                entry.generation = entry.generation.wrapping_add(1);
-            }
-            entry.generation
-        };
+                entry.last_alive_epoch = epoch;
+                if entry.value.is_none() {
+                    let init_fn = init_opt
+                        .take()
+                        .expect("remember_with_key init called more than once");
+                    entry.value = Some(Arc::new(RwLock::new(init_fn())));
+                    entry.generation = entry.generation.wrapping_add(1);
+                }
+                entry.generation
+            };
 
-        State::new(slot, generation)
-    } else {
-        let epoch = table.epoch;
-        let init_fn = init_opt
-            .take()
-            .expect("remember_with_key init called more than once");
-        let generation = 1u64;
-        let slot = table.entries.insert(SlotEntry {
-            key: slot_key,
-            generation,
-            value: Some(Arc::new(RwLock::new(init_fn()))),
-            last_alive_epoch: epoch,
-            retained: false,
-        });
+            State::new(slot, generation)
+        } else {
+            let epoch = table.epoch;
+            let init_fn = init_opt
+                .take()
+                .expect("remember_with_key init called more than once");
+            let generation = 1u64;
+            let slot = table.entries.insert(SlotEntry {
+                key: slot_key,
+                generation,
+                value: Some(Arc::new(RwLock::new(init_fn()))),
+                last_alive_epoch: epoch,
+                retained: false,
+            });
 
-        table.key_to_slot.insert(slot_key, slot);
-        table.record_slot_usage_slow(instance_logic_id, slot);
-        State::new(slot, generation)
-    }
+            table.key_to_slot.insert(slot_key, slot);
+            table.record_slot_usage_slow(instance_logic_id, slot);
+            State::new(slot, generation)
+        }
+    })
 }
 
 /// Remember a value across recomposition (build) passes.
@@ -2971,87 +3002,88 @@ where
         type_id,
     };
 
-    let mut table = slot_table().write();
-    let mut init_opt = Some(init);
-    if let Some(slot) = table.try_fast_slot_lookup(slot_key) {
-        let epoch = table.epoch;
-        let generation = {
-            let entry = table
-                .entries
-                .get_mut(slot)
-                .expect("slot entry should exist");
+    with_slot_table_mut(|table| {
+        let mut init_opt = Some(init);
+        if let Some(slot) = table.try_fast_slot_lookup(slot_key) {
+            let epoch = table.epoch;
+            let generation = {
+                let entry = table
+                    .entries
+                    .get_mut(slot)
+                    .expect("slot entry should exist");
 
-            if entry.key.type_id != slot_key.type_id {
-                panic!(
-                    "retain_with_key type mismatch: expected {}, found {:?}",
-                    std::any::type_name::<T>(),
-                    entry.key.type_id
-                );
-            }
+                if entry.key.type_id != slot_key.type_id {
+                    panic!(
+                        "retain_with_key type mismatch: expected {}, found {:?}",
+                        std::any::type_name::<T>(),
+                        entry.key.type_id
+                    );
+                }
 
-            entry.last_alive_epoch = epoch;
-            entry.retained = true;
-            if entry.value.is_none() {
-                let init_fn = init_opt
-                    .take()
-                    .expect("retain_with_key init called more than once");
-                entry.value = Some(Arc::new(RwLock::new(init_fn())));
-                entry.generation = entry.generation.wrapping_add(1);
-            }
+                entry.last_alive_epoch = epoch;
+                entry.retained = true;
+                if entry.value.is_none() {
+                    let init_fn = init_opt
+                        .take()
+                        .expect("retain_with_key init called more than once");
+                    entry.value = Some(Arc::new(RwLock::new(init_fn())));
+                    entry.generation = entry.generation.wrapping_add(1);
+                }
 
-            entry.generation
-        };
+                entry.generation
+            };
 
-        State::new(slot, generation)
-    } else if let Some(slot) = table.key_to_slot.get(&slot_key).copied() {
-        table.record_slot_usage_slow(instance_logic_id, slot);
-        let epoch = table.epoch;
-        let generation = {
-            let entry = table
-                .entries
-                .get_mut(slot)
-                .expect("slot entry should exist");
+            State::new(slot, generation)
+        } else if let Some(slot) = table.key_to_slot.get(&slot_key).copied() {
+            table.record_slot_usage_slow(instance_logic_id, slot);
+            let epoch = table.epoch;
+            let generation = {
+                let entry = table
+                    .entries
+                    .get_mut(slot)
+                    .expect("slot entry should exist");
 
-            if entry.key.type_id != slot_key.type_id {
-                panic!(
-                    "retain_with_key type mismatch: expected {}, found {:?}",
-                    std::any::type_name::<T>(),
-                    entry.key.type_id
-                );
-            }
+                if entry.key.type_id != slot_key.type_id {
+                    panic!(
+                        "retain_with_key type mismatch: expected {}, found {:?}",
+                        std::any::type_name::<T>(),
+                        entry.key.type_id
+                    );
+                }
 
-            entry.last_alive_epoch = epoch;
-            entry.retained = true;
-            if entry.value.is_none() {
-                let init_fn = init_opt
-                    .take()
-                    .expect("retain_with_key init called more than once");
-                entry.value = Some(Arc::new(RwLock::new(init_fn())));
-                entry.generation = entry.generation.wrapping_add(1);
-            }
+                entry.last_alive_epoch = epoch;
+                entry.retained = true;
+                if entry.value.is_none() {
+                    let init_fn = init_opt
+                        .take()
+                        .expect("retain_with_key init called more than once");
+                    entry.value = Some(Arc::new(RwLock::new(init_fn())));
+                    entry.generation = entry.generation.wrapping_add(1);
+                }
 
-            entry.generation
-        };
+                entry.generation
+            };
 
-        State::new(slot, generation)
-    } else {
-        let epoch = table.epoch;
-        let init_fn = init_opt
-            .take()
-            .expect("retain_with_key init called more than once");
-        let generation = 1u64;
-        let slot = table.entries.insert(SlotEntry {
-            key: slot_key,
-            generation,
-            value: Some(Arc::new(RwLock::new(init_fn()))),
-            last_alive_epoch: epoch,
-            retained: true,
-        });
+            State::new(slot, generation)
+        } else {
+            let epoch = table.epoch;
+            let init_fn = init_opt
+                .take()
+                .expect("retain_with_key init called more than once");
+            let generation = 1u64;
+            let slot = table.entries.insert(SlotEntry {
+                key: slot_key,
+                generation,
+                value: Some(Arc::new(RwLock::new(init_fn()))),
+                last_alive_epoch: epoch,
+                retained: true,
+            });
 
-        table.key_to_slot.insert(slot_key, slot);
-        table.record_slot_usage_slow(instance_logic_id, slot);
-        State::new(slot, generation)
-    }
+            table.key_to_slot.insert(slot_key, slot);
+            table.record_slot_usage_slow(instance_logic_id, slot);
+            State::new(slot, generation)
+        }
+    })
 }
 
 /// Retain a value across recomposition (build) passes, even if unused.
@@ -3105,16 +3137,11 @@ where
 /// # Examples
 ///
 /// ```
-/// use tessera_ui::{Prop, key, remember, tessera};
-///
-/// #[derive(Clone, Prop)]
-/// struct MyListArgs {
-///     items: Vec<String>,
-/// }
+/// use tessera_ui::{key, remember, tessera};
 ///
 /// #[tessera]
-/// fn my_list(args: &MyListArgs) {
-///     for item in args.items.iter() {
+/// fn my_list(items: Vec<String>) {
+///     for item in items.iter() {
 ///         key(item.clone(), || {
 ///             let state = remember(|| 0);
 ///         });
@@ -3140,9 +3167,14 @@ mod tests {
     };
 
     use super::*;
+    use crate::execution_context::{
+        reset_execution_context, with_execution_context, with_execution_context_mut,
+    };
+    use crate::layout::{LayoutInput, LayoutOutput, LayoutPolicy};
     use crate::prop::{Callback, RenderSlot};
 
     fn with_test_component_scope<R>(component_type_id: u64, f: impl FnOnce() -> R) -> R {
+        reset_execution_context();
         let mut arena = crate::Arena::<()>::new();
         let node_id = arena.new_node(());
         let _phase_guard = push_phase(RuntimePhase::Build);
@@ -3182,19 +3214,23 @@ mod tests {
         reset_frame_clock();
         begin_frame_clock(Instant::now());
 
-        frame_clock_tracker().lock().receivers.insert(
-            FrameNanosReceiverKey {
-                instance_logic_id: 1,
-                receiver_hash: 1,
-            },
-            FrameNanosReceiver {
-                owner_instance_key: 123,
-                callback: Box::new(|_| FrameNanosControl::Stop),
-            },
-        );
+        with_frame_clock_tracker_mut(|tracker| {
+            tracker.receivers.insert(
+                FrameNanosReceiverKey {
+                    instance_logic_id: 1,
+                    receiver_hash: 1,
+                },
+                FrameNanosReceiver {
+                    owner_instance_key: 123,
+                    callback: Box::new(|_| FrameNanosControl::Stop),
+                },
+            );
+        });
 
         tick_frame_nanos_receivers();
-        assert!(frame_clock_tracker().lock().receivers.is_empty());
+        assert!(with_frame_clock_tracker(|tracker| tracker
+            .receivers
+            .is_empty()));
     }
 
     #[test]
@@ -3235,16 +3271,93 @@ mod tests {
         assert!(!is_instance_key_build_dirty(11));
     }
 
+    #[derive(Clone, PartialEq)]
+    struct DirtySplitPolicy {
+        measure_key: u32,
+        placement_key: u32,
+    }
+
+    impl LayoutPolicy for DirtySplitPolicy {
+        fn measure(
+            &self,
+            _input: &LayoutInput<'_>,
+            _output: &mut LayoutOutput<'_>,
+        ) -> Result<crate::ComputedData, crate::MeasurementError> {
+            Ok(crate::ComputedData::ZERO)
+        }
+
+        fn measure_eq(&self, other: &Self) -> bool {
+            self.measure_key == other.measure_key
+        }
+
+        fn placement_eq(&self, other: &Self) -> bool {
+            self.placement_key == other.placement_key
+        }
+    }
+
+    #[test]
+    fn layout_dirty_tracking_separates_measure_and_placement_changes() {
+        reset_layout_dirty_tracking();
+
+        begin_frame_layout_dirty_tracking();
+        {
+            let _phase_guard = push_phase(RuntimePhase::Build);
+            record_layout_policy_dirty(
+                1,
+                &DirtySplitPolicy {
+                    measure_key: 0,
+                    placement_key: 0,
+                },
+            );
+        }
+        finalize_frame_layout_dirty_tracking();
+        let dirty = take_layout_dirty_nodes();
+        assert!(dirty.measure_self_nodes.contains(&1));
+        assert!(dirty.placement_self_nodes.is_empty());
+
+        begin_frame_layout_dirty_tracking();
+        {
+            let _phase_guard = push_phase(RuntimePhase::Build);
+            record_layout_policy_dirty(
+                1,
+                &DirtySplitPolicy {
+                    measure_key: 0,
+                    placement_key: 1,
+                },
+            );
+        }
+        finalize_frame_layout_dirty_tracking();
+        let dirty = take_layout_dirty_nodes();
+        assert!(!dirty.measure_self_nodes.contains(&1));
+        assert!(dirty.placement_self_nodes.contains(&1));
+
+        begin_frame_layout_dirty_tracking();
+        {
+            let _phase_guard = push_phase(RuntimePhase::Build);
+            record_layout_policy_dirty(
+                1,
+                &DirtySplitPolicy {
+                    measure_key: 1,
+                    placement_key: 1,
+                },
+            );
+        }
+        finalize_frame_layout_dirty_tracking();
+        let dirty = take_layout_dirty_nodes();
+        assert!(dirty.measure_self_nodes.contains(&1));
+        assert!(!dirty.placement_self_nodes.contains(&1));
+    }
+
     #[test]
     fn with_replay_scope_restores_group_path_and_override() {
-        GROUP_PATH_STACK.with(|stack| {
-            *stack.borrow_mut() = vec![1, 2, 3];
+        with_execution_context_mut(|context| {
+            context.group_path_stack = vec![1, 2, 3];
         });
-        INSTANCE_KEY_STACK.with(|stack| {
-            *stack.borrow_mut() = vec![5];
+        with_execution_context_mut(|context| {
+            context.instance_key_stack = vec![5];
         });
-        NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE.with(|slot| {
-            *slot.borrow_mut() = Some(9);
+        with_execution_context_mut(|context| {
+            context.next_node_instance_logic_id_override = Some(9);
         });
 
         with_replay_scope(42, &[7, 8], Some(11), || {
@@ -3256,20 +3369,21 @@ mod tests {
 
         assert_eq!(current_group_path(), vec![1, 2, 3]);
         assert_eq!(current_instance_key_override(), Some(5));
-        let restored_override = NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE.with(|slot| *slot.borrow());
+        let restored_override =
+            with_execution_context(|context| context.next_node_instance_logic_id_override);
         assert_eq!(restored_override, Some(9));
     }
 
     #[test]
     fn with_replay_scope_restores_on_panic() {
-        GROUP_PATH_STACK.with(|stack| {
-            *stack.borrow_mut() = vec![5];
+        with_execution_context_mut(|context| {
+            context.group_path_stack = vec![5];
         });
-        INSTANCE_KEY_STACK.with(|stack| {
-            *stack.borrow_mut() = vec![13];
+        with_execution_context_mut(|context| {
+            context.instance_key_stack = vec![13];
         });
-        NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE.with(|slot| {
-            *slot.borrow_mut() = None;
+        with_execution_context_mut(|context| {
+            context.next_node_instance_logic_id_override = None;
         });
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3283,7 +3397,8 @@ mod tests {
 
         assert_eq!(current_group_path(), vec![5]);
         assert_eq!(current_instance_key_override(), Some(13));
-        let restored_override = NEXT_NODE_INSTANCE_LOGIC_ID_OVERRIDE.with(|slot| *slot.borrow());
+        let restored_override =
+            with_execution_context(|context| context.next_node_instance_logic_id_override);
         assert_eq!(restored_override, None);
     }
 
@@ -3502,16 +3617,17 @@ mod tests {
         });
         table.key_to_slot.insert(keep_key, keep_slot);
         table.key_to_slot.insert(drop_key, drop_slot);
-        *slot_table().write() = table;
+        with_slot_table_mut(|slot_table| *slot_table = table);
 
         let mut stale = HashSet::default();
         stale.insert(7_u64);
         drop_slots_for_instance_logic_ids(&stale);
 
-        let table = slot_table().read();
-        assert!(table.entries.get(keep_slot).is_some());
-        assert!(table.key_to_slot.contains_key(&keep_key));
-        assert!(table.entries.get(drop_slot).is_none());
-        assert!(!table.key_to_slot.contains_key(&drop_key));
+        with_slot_table(|table| {
+            assert!(table.entries.get(keep_slot).is_some());
+            assert!(table.key_to_slot.contains_key(&keep_key));
+            assert!(table.entries.get(drop_slot).is_none());
+            assert!(!table.key_to_slot.contains_key(&drop_key));
+        });
     }
 }

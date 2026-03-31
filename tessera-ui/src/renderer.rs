@@ -8,13 +8,9 @@ pub mod core;
 pub mod drawer;
 pub mod external;
 
-use std::{
-    cell::RefCell,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::{Duration, Instant},
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 pub use core::{RenderCore, RenderResources};
@@ -22,8 +18,6 @@ pub use core::{RenderCore, RenderResources};
 use accesskit::{self, TreeUpdate};
 use accesskit_winit::{Adapter as AccessKitAdapter, Event as AccessKitEvent};
 use parking_lot::RwLock;
-use rustc_hash::FxHashSet as HashSet;
-use tessera_macros::tessera;
 use tracing::{debug, error, instrument, warn};
 use winit::{
     application::ApplicationHandler,
@@ -34,18 +28,12 @@ use winit::{
 };
 
 use crate::{
-    ImeState, PxPosition,
+    ImeRequest, ImeState, PxPosition,
+    build_tree::build_component_tree,
     component_tree::{
-        LayoutFrameDiagnostics, ReplayReplaceError, WindowAction, WindowRequests,
-        clear_layout_snapshots,
+        LayoutFrameDiagnostics, WindowAction, WindowRequests, clear_layout_snapshots,
     },
-    context::{
-        begin_frame_component_context_tracking, begin_recompose_context_slot_epoch,
-        drop_context_slots_for_instance_logic_ids, finalize_frame_component_context_tracking,
-        finalize_frame_component_context_tracking_partial, previous_component_context_snapshots,
-        remove_context_read_dependencies, remove_previous_component_context_snapshots,
-        reset_component_context_tracking, reset_context_read_dependencies, with_context_snapshot,
-    },
+    context::{reset_component_context_tracking, reset_context_read_dependencies},
     cursor::{
         CursorEvent, CursorEventContent, CursorState, GestureState, MOUSE_POINTER_ID,
         PressKeyEventType,
@@ -59,21 +47,15 @@ use crate::{
     render_graph::{RenderGraph, RenderGraphExecution},
     render_module::RenderModule,
     runtime::{
-        TesseraRuntime, begin_frame_clock, begin_frame_component_replay_tracking,
-        begin_frame_layout_dirty_tracking, begin_recompose_slot_epoch, clear_frame_nanos_receivers,
-        clear_persistent_focus_handles, clear_redraw_waker, drop_slots_for_instance_logic_ids,
-        finalize_frame_component_replay_tracking, finalize_frame_component_replay_tracking_partial,
-        finalize_frame_layout_dirty_tracking, has_pending_build_invalidations,
-        has_pending_frame_nanos_receivers, install_redraw_waker, previous_component_replay_nodes,
-        remove_focus_read_dependencies, remove_frame_nanos_receivers,
-        remove_previous_component_replay_nodes, remove_render_slot_read_dependencies,
-        remove_state_read_dependencies, reset_build_invalidations, reset_component_replay_tracking,
-        reset_focus_read_dependencies, reset_frame_clock, reset_layout_dirty_tracking,
-        reset_render_slot_read_dependencies, reset_state_read_dependencies,
-        retain_persistent_focus_handles, take_build_invalidations, take_layout_self_dirty_nodes,
-        tick_frame_nanos_receivers, with_build_dirty_instance_keys, with_replay_scope,
+        TesseraRuntime, begin_frame_clock, clear_persistent_focus_handles, clear_redraw_waker,
+        has_pending_build_invalidations, has_pending_frame_nanos_receivers, install_redraw_waker,
+        reset_build_invalidations, reset_component_replay_tracking, reset_focus_read_dependencies,
+        reset_frame_clock, reset_layout_dirty_tracking, reset_render_slot_read_dependencies,
+        reset_state_read_dependencies, retain_persistent_focus_handles, take_layout_dirty_nodes,
+        tick_frame_nanos_receivers,
     },
     thread_utils,
+    time::Instant,
 };
 
 pub use crate::render_scene::{Command, DrawRegion, PaddingRect, SampleRegion};
@@ -88,10 +70,12 @@ pub use external::{ExternalTextureHandle, ExternalTextureRegistry};
 
 #[cfg(feature = "debug-dirty-overlay")]
 use crate::PxRect;
+#[cfg(feature = "debug-dirty-overlay")]
+use crate::build_tree::{BuildTreeMode, BuildTreeResult};
 
 #[cfg(feature = "profiling")]
 use crate::profiler::{
-    BuildMode, FrameMeta, Phase as ProfilerPhase, RedrawReason, RuntimeEventKind, RuntimeMeta,
+    FrameMeta, Phase as ProfilerPhase, RedrawReason, RuntimeEventKind, RuntimeMeta,
     ScopeGuard as ProfilerScopeGuard, WakeMeta, WakeSource, begin_frame as profiler_begin_frame,
     end_frame as profiler_end_frame, submit_frame_meta, submit_runtime_meta, submit_wake_meta,
 };
@@ -102,6 +86,17 @@ use std::collections::BTreeSet;
 #[cfg(feature = "profiling")]
 use std::path::PathBuf;
 
+#[cfg(target_family = "wasm")]
+use std::{cell::RefCell, rc::Rc};
+#[cfg(target_family = "wasm")]
+use wasm_bindgen_futures::spawn_local;
+#[cfg(target_family = "wasm")]
+use web_sys::HtmlCanvasElement;
+#[cfg(target_family = "wasm")]
+use web_sys::wasm_bindgen::JsCast;
+#[cfg(target_family = "wasm")]
+use winit::platform::web::EventLoopExtWebSys;
+
 #[cfg(target_os = "android")]
 use winit::platform::android::{
     ActiveEventLoopExtAndroid, EventLoopBuilderExtAndroid, activity::AndroidApp,
@@ -111,6 +106,8 @@ use winit::platform::android::{
 enum RendererUserEvent {
     AccessKit(AccessKitEvent),
     RuntimeRedrawWake,
+    #[cfg(target_family = "wasm")]
+    WebInitReady(u64),
 }
 
 impl From<AccessKitEvent> for RendererUserEvent {
@@ -128,111 +125,6 @@ type RenderComputationOutput = (
     Option<FocusDirection>,
     bool,
 );
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BuildTreeMode {
-    RootRecompose,
-    PartialReplay,
-    SkipNoInvalidation,
-}
-
-#[derive(Clone, Debug)]
-struct BuildTreeResult {
-    duration: Duration,
-    mode: BuildTreeMode,
-    #[cfg(feature = "profiling")]
-    partial_replay_nodes: Option<u64>,
-    #[cfg(feature = "profiling")]
-    total_nodes_before_build: Option<u64>,
-    #[cfg(feature = "debug-dirty-overlay")]
-    had_invalidations: bool,
-    #[cfg(feature = "debug-dirty-overlay")]
-    dirty_replay_roots: Vec<u64>,
-}
-
-impl BuildTreeResult {
-    fn root_recompose(duration: Duration) -> Self {
-        Self {
-            duration,
-            mode: BuildTreeMode::RootRecompose,
-            #[cfg(feature = "profiling")]
-            partial_replay_nodes: None,
-            #[cfg(feature = "profiling")]
-            total_nodes_before_build: None,
-            #[cfg(feature = "debug-dirty-overlay")]
-            had_invalidations: false,
-            #[cfg(feature = "debug-dirty-overlay")]
-            dirty_replay_roots: Vec::new(),
-        }
-    }
-
-    #[cfg(not(feature = "profiling"))]
-    fn partial_replay(duration: Duration) -> Self {
-        Self {
-            duration,
-            mode: BuildTreeMode::PartialReplay,
-            #[cfg(feature = "debug-dirty-overlay")]
-            had_invalidations: false,
-            #[cfg(feature = "debug-dirty-overlay")]
-            dirty_replay_roots: Vec::new(),
-        }
-    }
-
-    #[cfg(feature = "profiling")]
-    fn partial_replay(
-        duration: Duration,
-        partial_replay_nodes: u64,
-        total_nodes_before_build: u64,
-    ) -> Self {
-        Self {
-            duration,
-            mode: BuildTreeMode::PartialReplay,
-            partial_replay_nodes: Some(partial_replay_nodes),
-            total_nodes_before_build: Some(total_nodes_before_build),
-            #[cfg(feature = "debug-dirty-overlay")]
-            had_invalidations: false,
-            #[cfg(feature = "debug-dirty-overlay")]
-            dirty_replay_roots: Vec::new(),
-        }
-    }
-
-    fn skip_no_invalidation() -> Self {
-        Self {
-            duration: Duration::ZERO,
-            mode: BuildTreeMode::SkipNoInvalidation,
-            #[cfg(feature = "profiling")]
-            partial_replay_nodes: None,
-            #[cfg(feature = "profiling")]
-            total_nodes_before_build: None,
-            #[cfg(feature = "debug-dirty-overlay")]
-            had_invalidations: false,
-            #[cfg(feature = "debug-dirty-overlay")]
-            dirty_replay_roots: Vec::new(),
-        }
-    }
-
-    #[cfg(feature = "debug-dirty-overlay")]
-    fn with_dirty_replay_info(
-        mut self,
-        had_invalidations: bool,
-        dirty_replay_roots: Vec<u64>,
-    ) -> Self {
-        self.had_invalidations = had_invalidations;
-        self.dirty_replay_roots = dirty_replay_roots;
-        self
-    }
-}
-
-#[cfg(feature = "profiling")]
-impl BuildTreeResult {
-    fn profiler_build_mode(&self) -> BuildMode {
-        match self.mode {
-            BuildTreeMode::RootRecompose => BuildMode::RootRecompose,
-            BuildTreeMode::PartialReplay => BuildMode::PartialReplay,
-            BuildTreeMode::SkipNoInvalidation => BuildMode::SkipNoInvalidation,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct RuntimePendingWork {
@@ -294,6 +186,22 @@ impl Default for WindowConfig {
     }
 }
 
+/// Web host configuration for browser platforms.
+#[derive(Debug, Clone, Default)]
+pub struct WebConfig {
+    /// An optional canvas element id to mount into before falling back to the
+    /// default body append behavior.
+    pub canvas_id: Option<String>,
+}
+
+impl WebConfig {
+    /// Returns a config that looks up the canvas with the provided id.
+    pub fn with_canvas_id(mut self, canvas_id: impl Into<String>) -> Self {
+        self.canvas_id = Some(canvas_id.into());
+        self
+    }
+}
+
 /// Configuration for the Tessera runtime and renderer.
 ///
 /// This struct allows you to customize various aspects of the renderer's
@@ -344,6 +252,8 @@ pub struct TesseraConfig {
     pub window_title: String,
     /// Window configuration (desktop only).
     pub window: WindowConfig,
+    /// Web host configuration for browser platforms.
+    pub web: WebConfig,
     /// Path to write profiler output when `profiling` is enabled.
     #[cfg(feature = "profiling")]
     pub profiler_output_path: PathBuf,
@@ -357,6 +267,7 @@ impl Default for TesseraConfig {
             sample_count: 1,
             window_title: "Tessera".to_string(),
             window: WindowConfig::default(),
+            web: WebConfig::default(),
             #[cfg(feature = "profiling")]
             profiler_output_path: PathBuf::from("tessera-profiler.jsonl"),
         }
@@ -472,6 +383,8 @@ pub struct Renderer<F: Fn()> {
     keyboard_state: KeyboardState,
     /// Tracks Input Method Editor (IME) state for international text input
     ime_state: ImeState,
+    /// Tracks the renderer-side IME bridge snapshot and platform lifecycle.
+    ime_bridge_state: RendererImeBridgeState,
     /// Render modules providing pipelines.
     modules: Vec<Box<dyn RenderModule>>,
     /// Lifecycle hooks for registered plugins.
@@ -493,6 +406,18 @@ pub struct Renderer<F: Fn()> {
     /// While active, cursor input is withheld from the component tree to avoid
     /// accidental UI interaction during system resize.
     resize_in_progress: bool,
+    #[cfg(target_family = "wasm")]
+    /// Render cores that completed asynchronous initialization on the web
+    /// event loop thread and are waiting to be installed into the renderer.
+    pending_web_inits: Rc<RefCell<Vec<(u64, RenderCore)>>>,
+    #[cfg(target_family = "wasm")]
+    /// Monotonic token used to discard stale async initialization completions
+    /// after suspend/resume cycles.
+    web_init_epoch: u64,
+    #[cfg(target_family = "wasm")]
+    /// Whether a web-side render core initialization task is currently
+    /// running.
+    web_init_in_progress: bool,
     #[cfg(feature = "profiling")]
     /// Aggregated redraw reasons that will be attached to the next rendered
     /// frame.
@@ -504,6 +429,15 @@ pub struct Renderer<F: Fn()> {
 }
 
 impl<F: Fn()> Renderer<F> {
+    #[cfg(target_family = "wasm")]
+    fn resolve_web_canvas(config: &TesseraConfig) -> Option<HtmlCanvasElement> {
+        let canvas_id = config.web.canvas_id.as_deref()?;
+        let window = web_sys::window()?;
+        let document = window.document()?;
+        let element = document.get_element_by_id(canvas_id)?;
+        element.dyn_into::<HtmlCanvasElement>().ok()
+    }
+
     /// Runs the Tessera application with default configuration on desktop
     /// platforms.
     ///
@@ -545,7 +479,7 @@ impl<F: Fn()> Renderer<F> {
     ///     Ok(())
     /// }
     /// ```
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(not(target_os = "android"), not(target_family = "wasm")))]
     #[tracing::instrument(level = "info", skip(entry_point, modules))]
     pub fn run(entry_point: F, modules: Vec<Box<dyn RenderModule>>) -> Result<(), EventLoopError> {
         Self::run_with_config(entry_point, modules, Default::default())
@@ -592,7 +526,7 @@ impl<F: Fn()> Renderer<F> {
     /// # }
     /// ```
     #[tracing::instrument(level = "info", skip(entry_point, modules))]
-    #[cfg(not(any(target_os = "android")))]
+    #[cfg(all(not(target_os = "android"), not(target_family = "wasm")))]
     pub fn run_with_config(
         entry_point: F,
         modules: Vec<Box<dyn RenderModule>>,
@@ -604,6 +538,7 @@ impl<F: Fn()> Renderer<F> {
         let cursor_state = CursorState::default();
         let keyboard_state = KeyboardState::default();
         let ime_state = ImeState::default();
+        let ime_bridge_state = RendererImeBridgeState::default();
         #[cfg(feature = "profiling")]
         crate::profiler::set_output_path(resolve_profiler_output_path(&config));
         let mut renderer = Self {
@@ -614,6 +549,7 @@ impl<F: Fn()> Renderer<F> {
             modules,
             plugins: PluginHost::new(),
             ime_state,
+            ime_bridge_state,
             config,
             accessibility_adapter: None,
             event_loop_proxy: Some(event_loop_proxy),
@@ -621,11 +557,76 @@ impl<F: Fn()> Renderer<F> {
             redraw_request_pending: Arc::new(AtomicBool::new(false)),
             pending_close_requested: false,
             resize_in_progress: false,
+            #[cfg(target_family = "wasm")]
+            pending_web_inits: Rc::new(RefCell::new(Vec::new())),
+            #[cfg(target_family = "wasm")]
+            web_init_epoch: 0,
+            #[cfg(target_family = "wasm")]
+            web_init_in_progress: false,
             #[cfg(feature = "profiling")]
             pending_redraw_reasons: BTreeSet::new(),
         };
         thread_utils::set_thread_name("TesseraMain");
         event_loop.run_app(&mut renderer)
+    }
+
+    /// Runs the Tessera application with default configuration on web
+    /// platforms.
+    #[cfg(target_family = "wasm")]
+    #[tracing::instrument(level = "info", skip(entry_point, modules))]
+    pub fn run(entry_point: F, modules: Vec<Box<dyn RenderModule>>) -> Result<(), EventLoopError>
+    where
+        F: 'static,
+    {
+        Self::run_web_with_config(entry_point, modules, Default::default())
+    }
+
+    /// Runs the Tessera application with custom configuration on web
+    /// platforms.
+    #[cfg(target_family = "wasm")]
+    #[tracing::instrument(level = "info", skip(entry_point, modules))]
+    pub fn run_web_with_config(
+        entry_point: F,
+        modules: Vec<Box<dyn RenderModule>>,
+        config: TesseraConfig,
+    ) -> Result<(), EventLoopError>
+    where
+        F: 'static,
+    {
+        let event_loop = EventLoop::<RendererUserEvent>::with_user_event().build()?;
+        let event_loop_proxy = event_loop.create_proxy();
+        let app = None;
+        let cursor_state = CursorState::default();
+        let keyboard_state = KeyboardState::default();
+        let ime_state = ImeState::default();
+        let ime_bridge_state = RendererImeBridgeState::default();
+        #[cfg(feature = "profiling")]
+        crate::profiler::set_output_path(resolve_profiler_output_path(&config));
+        let renderer = Self {
+            app,
+            entry_point,
+            cursor_state,
+            keyboard_state,
+            modules,
+            plugins: PluginHost::new(),
+            ime_state,
+            ime_bridge_state,
+            config,
+            accessibility_adapter: None,
+            event_loop_proxy: Some(event_loop_proxy),
+            frame_index: 0,
+            redraw_request_pending: Arc::new(AtomicBool::new(false)),
+            pending_close_requested: false,
+            resize_in_progress: false,
+            pending_web_inits: Rc::new(RefCell::new(Vec::new())),
+            web_init_epoch: 0,
+            web_init_in_progress: false,
+            #[cfg(feature = "profiling")]
+            pending_redraw_reasons: BTreeSet::new(),
+        };
+        thread_utils::set_thread_name("TesseraMain");
+        event_loop.spawn_app(renderer);
+        Ok(())
     }
 
     /// Runs the Tessera application with default configuration on Android.
@@ -733,6 +734,7 @@ impl<F: Fn()> Renderer<F> {
         let cursor_state = CursorState::default();
         let keyboard_state = KeyboardState::default();
         let ime_state = ImeState::default();
+        let ime_bridge_state = RendererImeBridgeState::default();
         #[cfg(feature = "profiling")]
         crate::profiler::set_output_path(resolve_profiler_output_path(&config));
         let mut renderer = Self {
@@ -743,6 +745,7 @@ impl<F: Fn()> Renderer<F> {
             modules,
             plugins: PluginHost::new(),
             ime_state,
+            ime_bridge_state,
             android_ime_opened: false,
             config,
             accessibility_adapter: None,
@@ -765,6 +768,7 @@ struct RenderFrameArgs<'a> {
     pub cursor_state: &'a mut CursorState,
     pub keyboard_state: &'a mut KeyboardState,
     pub ime_state: &'a mut ImeState,
+    pub ime_bridge_state: &'a mut RendererImeBridgeState,
     #[cfg(target_os = "android")]
     pub android_ime_opened: &'a mut bool,
     pub app: &'a mut RenderCore,
@@ -789,6 +793,57 @@ struct RenderFrameOutcome {
     runtime_pending_work: RuntimePendingWork,
     #[cfg(feature = "debug-dirty-overlay")]
     overlay_clear_pending: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RendererImeBridgeState {
+    current_request: Option<ImeRequest>,
+    ime_allowed: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RendererImeBridgeUpdate {
+    allowed: Option<bool>,
+    cursor_area: Option<(PxPosition, PxSize)>,
+    request: Option<ImeRequest>,
+    snapshot_changed: bool,
+}
+
+impl RendererImeBridgeState {
+    #[cfg(test)]
+    fn request(&self) -> Option<&ImeRequest> {
+        self.current_request.as_ref()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn update_request(&mut self, request: Option<ImeRequest>) -> RendererImeBridgeUpdate {
+        let snapshot_changed = self.current_request != request;
+        let allowed = (self.ime_allowed != request.is_some()).then_some(request.is_some());
+        let cursor_area = request.as_ref().and_then(|next_request| {
+            let previous_area = self.current_request.as_ref().and_then(|previous_request| {
+                previous_request
+                    .position
+                    .map(|position| (position, previous_request.size))
+            });
+            let next_area = next_request
+                .position
+                .map(|position| (position, next_request.size));
+            (previous_area != next_area).then_some(next_area).flatten()
+        });
+
+        self.ime_allowed = request.is_some();
+        self.current_request = request.clone();
+
+        RendererImeBridgeUpdate {
+            allowed,
+            cursor_area,
+            request,
+            snapshot_changed,
+        }
+    }
 }
 
 impl<F: Fn()> Renderer<F> {
@@ -961,299 +1016,6 @@ impl<F: Fn()> Renderer<F> {
     ///
     /// This method runs on the main thread but coordinates with other threads
     /// for component tree processing and resource management.
-    fn collect_dirty_replay_roots(dirty_instance_keys: &HashSet<u64>) -> Vec<u64> {
-        TesseraRuntime::with(|runtime| {
-            let mut roots = Vec::new();
-            let tree = runtime.component_tree.tree();
-            for instance_key in dirty_instance_keys {
-                let node_id = runtime
-                    .component_tree
-                    .find_node_id_by_instance_key(*instance_key)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "missing node for dirty instance key {instance_key}; this violates replay invariants"
-                        )
-                    });
-
-                let mut has_dirty_ancestor = false;
-                let mut parent_id = tree.get(node_id).and_then(|node| node.parent());
-                while let Some(pid) = parent_id {
-                    let Some(parent_node) = tree.get(pid) else {
-                        break;
-                    };
-                    if dirty_instance_keys.contains(&parent_node.get().instance_key) {
-                        has_dirty_ancestor = true;
-                        break;
-                    }
-                    parent_id = parent_node.parent();
-                }
-
-                if !has_dirty_ancestor {
-                    roots.push(*instance_key);
-                }
-            }
-            roots
-        })
-    }
-
-    fn dirty_roots_include_tree_root(dirty_roots: &[u64]) -> bool {
-        TesseraRuntime::with(|runtime| {
-            let tree = runtime.component_tree.tree();
-            dirty_roots.iter().any(|instance_key| {
-                let node_id = runtime
-                    .component_tree
-                    .find_node_id_by_instance_key(*instance_key)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "missing node for dirty instance key {instance_key}; this violates replay invariants"
-                        )
-                    });
-                tree.get(node_id)
-                    .and_then(|node| node.parent())
-                    .is_none()
-            })
-        })
-    }
-
-    #[cfg(feature = "profiling")]
-    fn subtree_node_count_by_instance_key(instance_key: u64) -> u64 {
-        TesseraRuntime::with(|runtime| {
-            let node_id = runtime
-                .component_tree
-                .find_node_id_by_instance_key(instance_key)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "missing node for dirty instance key {instance_key}; this violates replay invariants"
-                    )
-                });
-            let tree = runtime.component_tree.tree();
-            let mut stack = vec![node_id];
-            let mut count = 0_u64;
-            while let Some(current) = stack.pop() {
-                count = count.saturating_add(1);
-                stack.extend(current.children(tree));
-            }
-            count
-        })
-    }
-
-    /// Build the component tree only when invalidated.
-    #[instrument(level = "debug", skip(entry_point))]
-    fn build_component_tree(entry_point: &F) -> BuildTreeResult {
-        with_entry_point_callback(entry_point, || {
-            let run_root_recompose = || {
-                let recomposed_state_instance_logic_ids =
-                    crate::runtime::live_slot_instance_logic_ids();
-                let recomposed_context_instance_logic_ids =
-                    crate::context::live_context_slot_instance_logic_ids();
-                let tree_timer = Instant::now();
-                debug!("Building component tree...");
-                clear_frame_nanos_receivers();
-                // Root recomposition rebuilds reader dependencies from scratch.
-                reset_focus_read_dependencies();
-                reset_render_slot_read_dependencies();
-                reset_state_read_dependencies();
-                reset_context_read_dependencies();
-                TesseraRuntime::with_mut(|runtime| runtime.component_tree.clear());
-                begin_frame_component_replay_tracking();
-                begin_frame_component_context_tracking();
-                begin_frame_layout_dirty_tracking();
-                begin_recompose_slot_epoch();
-                begin_recompose_context_slot_epoch();
-                let _phase_guard = crate::runtime::push_phase(crate::runtime::RuntimePhase::Build);
-                entry_wrapper();
-                finalize_frame_component_replay_tracking();
-                finalize_frame_component_context_tracking();
-                finalize_frame_layout_dirty_tracking();
-                crate::runtime::recycle_recomposed_slots_for_instance_logic_ids(
-                    &recomposed_state_instance_logic_ids,
-                );
-                crate::context::recycle_recomposed_context_slots_for_instance_logic_ids(
-                    &recomposed_context_instance_logic_ids,
-                );
-                let build_tree_cost = tree_timer.elapsed();
-                debug!("Component tree built in {build_tree_cost:?}");
-                BuildTreeResult::root_recompose(build_tree_cost)
-            };
-
-            let tree_is_empty = TesseraRuntime::with(|rt| rt.component_tree.tree().count() == 0);
-            let invalidations = take_build_invalidations();
-            #[cfg(feature = "debug-dirty-overlay")]
-            let had_invalidations = !invalidations.dirty_instance_keys.is_empty();
-            with_build_dirty_instance_keys(&invalidations.dirty_instance_keys, || {
-                if tree_is_empty {
-                    let result = run_root_recompose();
-                    #[cfg(feature = "debug-dirty-overlay")]
-                    let result = result.with_dirty_replay_info(had_invalidations, Vec::new());
-                    return result;
-                }
-
-                if invalidations.dirty_instance_keys.is_empty() {
-                    debug!("Skipping component tree build: no invalidations");
-                    let result = BuildTreeResult::skip_no_invalidation();
-                    #[cfg(feature = "debug-dirty-overlay")]
-                    let result = result.with_dirty_replay_info(false, Vec::new());
-                    return result;
-                }
-
-                let dirty_roots =
-                    Self::collect_dirty_replay_roots(&invalidations.dirty_instance_keys);
-                if Self::dirty_roots_include_tree_root(&dirty_roots) {
-                    let result = run_root_recompose();
-                    #[cfg(feature = "debug-dirty-overlay")]
-                    let result = result.with_dirty_replay_info(had_invalidations, Vec::new());
-                    return result;
-                }
-                if dirty_roots.is_empty() {
-                    debug!("Skipping component tree build: no dirty replay roots");
-                    let result = BuildTreeResult::skip_no_invalidation();
-                    #[cfg(feature = "debug-dirty-overlay")]
-                    let result = result.with_dirty_replay_info(had_invalidations, Vec::new());
-                    return result;
-                }
-
-                let replay_snapshots = previous_component_replay_nodes();
-                let context_snapshots = previous_component_context_snapshots();
-
-                let tree_timer = Instant::now();
-                debug!("Building dirty subtrees with replay...");
-                begin_frame_component_replay_tracking();
-                begin_frame_component_context_tracking();
-                begin_frame_layout_dirty_tracking();
-                begin_recompose_slot_epoch();
-                begin_recompose_context_slot_epoch();
-                let _phase_guard = crate::runtime::push_phase(crate::runtime::RuntimePhase::Build);
-                let mut stale_instance_keys = HashSet::default();
-                let mut stale_instance_logic_ids = HashSet::default();
-                let mut recomposed_instance_logic_ids = HashSet::default();
-                #[cfg(feature = "profiling")]
-                let mut replayed_nodes = 0_u64;
-                #[cfg(feature = "profiling")]
-                let total_nodes_before_build =
-                    TesseraRuntime::with(|runtime| runtime.component_tree.tree().count() as u64);
-
-                for instance_key in &dirty_roots {
-                    #[cfg(feature = "profiling")]
-                    {
-                        replayed_nodes = replayed_nodes.saturating_add(
-                            Self::subtree_node_count_by_instance_key(*instance_key),
-                        );
-                    }
-                    let replay_snapshot = replay_snapshots.get(instance_key).unwrap_or_else(|| {
-                        panic!(
-                            "missing replay snapshot for dirty instance key {instance_key}; this violates replay invariants"
-                        )
-                    });
-                    let context_snapshot = context_snapshots.get(instance_key).unwrap_or_else(|| {
-                        panic!(
-                            "missing context snapshot for dirty instance key {instance_key}; this violates replay invariants"
-                        )
-                    });
-                    let replay = replay_snapshot.replay.clone();
-                    let replay_instance_logic_id = replay_snapshot.instance_logic_id;
-                    let replay_group_path = replay_snapshot.group_path.clone();
-                    let replay_instance_key_override = replay_snapshot.instance_key_override;
-
-                    let replace_context = TesseraRuntime::with_mut(|runtime| {
-                        runtime
-                            .component_tree
-                            .begin_replace_subtree_by_instance_key(*instance_key)
-                    });
-                    let replace_context = match replace_context {
-                        Ok(context) => context,
-                        Err(ReplayReplaceError::RootNodeNotReplaceable) => panic!(
-                            "dirty root {} resolved to component tree root; root recomposition must be selected before partial replay",
-                            instance_key
-                        ),
-                        Err(_) => {
-                            panic!(
-                                "begin_replace_subtree_by_instance_key failed for instance key {instance_key}"
-                            )
-                        }
-                    };
-
-                    with_context_snapshot(context_snapshot, || {
-                        with_replay_scope(
-                            replay_instance_logic_id,
-                            &replay_group_path,
-                            replay_instance_key_override,
-                            || {
-                                replay.runner.run(replay.props.as_ref());
-                            },
-                        );
-                    });
-
-                    let replace_result = TesseraRuntime::with_mut(|runtime| {
-                        runtime
-                            .component_tree
-                            .finish_replace_subtree(replace_context)
-                    });
-                    let replace_result = replace_result.unwrap_or_else(|_| {
-                        panic!("finish_replace_subtree failed for instance key {instance_key}")
-                    });
-                    recomposed_instance_logic_ids.extend(
-                        replace_result
-                            .inserted_instance_logic_ids
-                            .difference(&replace_result.reused_instance_logic_ids)
-                            .copied(),
-                    );
-
-                    for removed in &replace_result.removed_instance_keys {
-                        if !replace_result.inserted_instance_keys.contains(removed) {
-                            stale_instance_keys.insert(*removed);
-                        }
-                    }
-                    for removed in &replace_result.removed_instance_logic_ids {
-                        if !replace_result.inserted_instance_logic_ids.contains(removed) {
-                            stale_instance_logic_ids.insert(*removed);
-                        }
-                    }
-                }
-                finalize_frame_component_replay_tracking_partial();
-                finalize_frame_component_context_tracking_partial();
-                finalize_frame_layout_dirty_tracking();
-                remove_previous_component_replay_nodes(&stale_instance_keys);
-                remove_frame_nanos_receivers(&stale_instance_keys);
-                remove_focus_read_dependencies(&stale_instance_keys);
-                remove_render_slot_read_dependencies(&stale_instance_keys);
-                remove_state_read_dependencies(&stale_instance_keys);
-                crate::runtime::remove_build_invalidations(&stale_instance_keys);
-                remove_previous_component_context_snapshots(&stale_instance_keys);
-                remove_context_read_dependencies(&stale_instance_keys);
-                drop_slots_for_instance_logic_ids(&stale_instance_logic_ids);
-                drop_context_slots_for_instance_logic_ids(&stale_instance_logic_ids);
-                crate::runtime::recycle_recomposed_slots_for_instance_logic_ids(
-                    &recomposed_instance_logic_ids,
-                );
-                crate::context::recycle_recomposed_context_slots_for_instance_logic_ids(
-                    &recomposed_instance_logic_ids,
-                );
-                let build_tree_cost = tree_timer.elapsed();
-                debug!("Dirty subtree replay finished in {build_tree_cost:?}");
-                #[cfg(feature = "profiling")]
-                {
-                    let result = BuildTreeResult::partial_replay(
-                        build_tree_cost,
-                        replayed_nodes,
-                        total_nodes_before_build,
-                    );
-                    #[cfg(feature = "debug-dirty-overlay")]
-                    let result =
-                        result.with_dirty_replay_info(had_invalidations, dirty_roots.clone());
-                    result
-                }
-                #[cfg(not(feature = "profiling"))]
-                {
-                    let result = BuildTreeResult::partial_replay(build_tree_cost);
-                    #[cfg(feature = "debug-dirty-overlay")]
-                    let result =
-                        result.with_dirty_replay_info(had_invalidations, dirty_roots.clone());
-                    result
-                }
-            })
-        })
-    }
-
     fn log_frame_stats(
         build_tree_cost: std::time::Duration,
         draw_cost: std::time::Duration,
@@ -1340,7 +1102,7 @@ Fps: {:.2}
 
         // Clear any existing compute resources
         args.app.compute_resource_manager().write().clear();
-        let layout_self_dirty_nodes = take_layout_self_dirty_nodes();
+        let layout_dirty_nodes = take_layout_dirty_nodes();
 
         let (
             graph,
@@ -1351,19 +1113,23 @@ Fps: {:.2}
             pending_focus_reveal_retry,
         ) = TesseraRuntime::with_mut(|rt| {
             let component_tree = &mut rt.component_tree;
-            component_tree.compute(crate::component_tree::ComputeParams {
-                screen_size,
-                cursor_position,
-                pointer_changes,
-                keyboard_events,
-                ime_events,
-                retry_focus_move,
-                retry_focus_reveal,
-                modifiers: args.keyboard_state.modifiers(),
-                compute_resource_manager: args.app.compute_resource_manager(),
-                gpu: args.app.device(),
-                layout_self_dirty_nodes: &layout_self_dirty_nodes,
-            })
+            component_tree.compute(
+                crate::component_tree::ComputeParams {
+                    screen_size,
+                    cursor_position,
+                    pointer_changes,
+                    keyboard_events,
+                    ime_events,
+                    retry_focus_move,
+                    retry_focus_reveal,
+                    modifiers: args.keyboard_state.modifiers(),
+                    layout_dirty_nodes: &layout_dirty_nodes,
+                },
+                crate::component_tree::ComputeMode::Full {
+                    compute_resource_manager: args.app.compute_resource_manager(),
+                    gpu: args.app.device(),
+                },
+            )
         });
         flush_pending_focus_callbacks();
 
@@ -1385,18 +1151,18 @@ Fps: {:.2}
         screen_size: PxSize,
         build_tree_result: &BuildTreeResult,
     ) -> Vec<PxRect> {
-        if matches!(build_tree_result.mode, BuildTreeMode::SkipNoInvalidation) {
+        if matches!(build_tree_result.mode(), BuildTreeMode::SkipNoInvalidation) {
             return Vec::new();
         }
-        if matches!(build_tree_result.mode, BuildTreeMode::RootRecompose) {
-            if build_tree_result.had_invalidations {
+        if matches!(build_tree_result.mode(), BuildTreeMode::RootRecompose) {
+            if build_tree_result.had_invalidations() {
                 return vec![PxRect::from_position_size(PxPosition::ZERO, screen_size)];
             }
             return Vec::new();
         }
         TesseraRuntime::with(|rt| {
-            let mut rects = Vec::with_capacity(build_tree_result.dirty_replay_roots.len());
-            for instance_key in &build_tree_result.dirty_replay_roots {
+            let mut rects = Vec::with_capacity(build_tree_result.dirty_replay_roots().len());
+            for instance_key in build_tree_result.dirty_replay_roots() {
                 let Some(node_id) = rt
                     .component_tree
                     .find_node_id_by_instance_key(*instance_key)
@@ -1515,7 +1281,7 @@ Fps: {:.2}
             redraw_reasons,
         } = context;
         #[cfg(feature = "profiling")]
-        let frame_timer = std::time::Instant::now();
+        let frame_timer = Instant::now();
         #[cfg(feature = "profiling")]
         profiler_begin_frame(frame_idx);
         begin_frame_clock(Instant::now());
@@ -1529,8 +1295,8 @@ Fps: {:.2}
         // and tell runtime the new size
         TesseraRuntime::with_mut(|rt: &mut TesseraRuntime| rt.window_size = args.app.size().into());
         // Build the component tree and measure time
-        let mut build_tree_result = Self::build_component_tree(entry_point);
-        debug!("Component tree build mode: {:?}", build_tree_result.mode);
+        let mut build_tree_result = build_component_tree(entry_point);
+        debug!("Component tree build mode: {:?}", build_tree_result.mode());
 
         // Compute draw commands
         let screen_size: PxSize = args.app.size().into();
@@ -1552,19 +1318,8 @@ Fps: {:.2}
             }
 
             beyond_bounds_retry_count += 1;
-            let retry_build = Self::build_component_tree(entry_point);
-            build_tree_result.duration += retry_build.duration;
-            build_tree_result.mode = retry_build.mode;
-            #[cfg(feature = "profiling")]
-            {
-                build_tree_result.partial_replay_nodes = retry_build.partial_replay_nodes;
-                build_tree_result.total_nodes_before_build = retry_build.total_nodes_before_build;
-            }
-            #[cfg(feature = "debug-dirty-overlay")]
-            {
-                build_tree_result.had_invalidations = retry_build.had_invalidations;
-                build_tree_result.dirty_replay_roots = retry_build.dirty_replay_roots;
-            }
+            let retry_build = build_component_tree(entry_point);
+            build_tree_result.absorb_retry(retry_build);
 
             let (
                 retry_graph,
@@ -1632,7 +1387,7 @@ Fps: {:.2}
         // Log frame statistics
         let render_breakdown = args.app.last_render_breakdown();
         Self::log_frame_stats(
-            build_tree_result.duration,
+            build_tree_result.duration(),
             draw_cost,
             render_cost,
             render_breakdown,
@@ -1655,15 +1410,15 @@ Fps: {:.2}
                 build_mode: build_tree_result.profiler_build_mode(),
                 redraw_reasons,
                 inter_frame_wait_ns,
-                partial_replay_nodes: build_tree_result.partial_replay_nodes,
-                total_nodes_before_build: build_tree_result.total_nodes_before_build,
+                partial_replay_nodes: build_tree_result.partial_replay_nodes(),
+                total_nodes_before_build: build_tree_result.total_nodes_before_build(),
                 render_time_ns: render_duration_ns,
                 render_acquire_ns,
                 render_build_passes_ns,
                 render_encode_ns,
                 render_submit_ns,
                 render_present_ns,
-                build_tree_time_ns: Some(build_tree_result.duration.as_nanos()),
+                build_tree_time_ns: Some(build_tree_result.duration().as_nanos()),
                 draw_time_ns: Some(draw_cost.as_nanos()),
                 record_time_ns: Some(record_cost.as_nanos()),
                 frame_total_ns: Some(frame_total_ns),
@@ -1714,35 +1469,36 @@ Fps: {:.2}
 
         let window_action = window_requests.window_action;
 
-        if let Some(ime_request) = window_requests.ime_request {
+        let ime_bridge_update = args
+            .ime_bridge_state
+            .update_request(window_requests.ime_request);
+        if let Some(allowed) = ime_bridge_update.allowed {
             #[cfg(not(target_os = "android"))]
-            args.app.window().set_ime_allowed(true);
+            args.app.window().set_ime_allowed(allowed);
             #[cfg(target_os = "android")]
             {
-                if !*args.android_ime_opened {
-                    args.app.window().set_ime_allowed(true);
-                    show_soft_input(true, args.event_loop.android_app());
-                    *args.android_ime_opened = true;
-                }
-            }
-            if let Some(position) = ime_request.position {
-                args.app
-                    .window()
-                    .set_ime_cursor_area::<PxPosition, PxSize>(position, ime_request.size);
-            } else {
-                warn!("IME request missing position; skipping IME cursor area update");
-            }
-        } else {
-            #[cfg(not(target_os = "android"))]
-            args.app.window().set_ime_allowed(false);
-            #[cfg(target_os = "android")]
-            {
-                if *args.android_ime_opened {
+                if allowed {
+                    if !*args.android_ime_opened {
+                        args.app.window().set_ime_allowed(true);
+                        show_soft_input(true, args.event_loop.android_app());
+                        *args.android_ime_opened = true;
+                    }
+                } else if *args.android_ime_opened {
                     args.app.window().set_ime_allowed(false);
                     hide_soft_input(args.event_loop.android_app());
                     *args.android_ime_opened = false;
                 }
             }
+        }
+        if let Some((position, size)) = ime_bridge_update.cursor_area {
+            args.app
+                .window()
+                .set_ime_cursor_area::<PxPosition, PxSize>(position, size);
+        } else if ime_bridge_update.snapshot_changed
+            && let Some(ime_request) = ime_bridge_update.request
+            && ime_request.position.is_none()
+        {
+            warn!("IME request missing position; skipping IME cursor area update");
         }
 
         // End of frame cleanup
@@ -1802,6 +1558,61 @@ impl<F: Fn()> Renderer<F> {
         install_redraw_waker(Arc::new(move || {
             let _ = proxy.send_event(RendererUserEvent::RuntimeRedrawWake);
         }));
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn begin_web_initialization(&mut self, window: Arc<Window>) {
+        let Some(proxy) = self.event_loop_proxy.clone() else {
+            error!("Missing event loop proxy for web renderer initialization");
+            return;
+        };
+
+        self.web_init_in_progress = true;
+        let epoch = self.web_init_epoch;
+        let pending_web_inits = self.pending_web_inits.clone();
+        let sample_count = self.config.sample_count;
+        let transparent = self.config.window.transparent;
+        spawn_local(async move {
+            let render_core = RenderCore::new(window, sample_count, transparent).await;
+            pending_web_inits.borrow_mut().push((epoch, render_core));
+            let _ = proxy.send_event(RendererUserEvent::WebInitReady(epoch));
+        });
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn finish_web_initialization(&mut self, event_loop: &ActiveEventLoop, epoch: u64) -> bool {
+        let pending_render_core = {
+            let mut pending_web_inits = self.pending_web_inits.borrow_mut();
+            pending_web_inits
+                .iter()
+                .position(|(ready_epoch, _)| *ready_epoch == epoch)
+                .map(|position| pending_web_inits.remove(position).1)
+        };
+        let Some(mut render_core) = pending_render_core else {
+            return false;
+        };
+
+        if epoch != self.web_init_epoch {
+            return false;
+        }
+
+        let mut context = PipelineContext::new(&mut render_core);
+        for module in &self.modules {
+            module.register_pipelines(&mut context);
+        }
+
+        self.app = Some(render_core);
+        self.web_init_in_progress = false;
+        self.install_runtime_redraw_waker();
+        #[cfg(feature = "profiling")]
+        self.request_redraw_with_reasons(WakeSource::Lifecycle, vec![RedrawReason::Startup]);
+        #[cfg(not(feature = "profiling"))]
+        self.request_redraw_now();
+
+        if let Some(context) = self.plugin_context(event_loop) {
+            self.plugins.resumed(&context);
+        }
+        true
     }
 
     #[cfg(feature = "profiling")]
@@ -2075,6 +1886,7 @@ impl<F: Fn()> Renderer<F> {
                 cursor_state: &mut self.cursor_state,
                 keyboard_state: &mut self.keyboard_state,
                 ime_state: &mut self.ime_state,
+                ime_bridge_state: &mut self.ime_bridge_state,
                 #[cfg(target_os = "android")]
                 android_ime_opened: &mut self.android_ime_opened,
                 app: &mut app,
@@ -2160,6 +1972,8 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
         submit_runtime_meta(RuntimeMeta {
             kind: RuntimeEventKind::Resumed,
         });
+        #[cfg(target_family = "wasm")]
+        self.finish_web_initialization(event_loop, self.web_init_epoch);
         // Just return if the app is already created
         if self.app.is_some() {
             self.install_runtime_redraw_waker();
@@ -2167,6 +1981,10 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
             self.request_redraw_with_reasons(WakeSource::Lifecycle, vec![RedrawReason::Startup]);
             #[cfg(not(feature = "profiling"))]
             self.request_redraw_now();
+            return;
+        }
+        #[cfg(target_family = "wasm")]
+        if self.web_init_in_progress {
             return;
         }
 
@@ -2177,6 +1995,18 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
             .with_resizable(self.config.window.resizable)
             .with_transparent(self.config.window.transparent)
             .with_visible(false); // Hide initially for AccessKit
+        #[cfg(target_family = "wasm")]
+        let window_attributes = {
+            use winit::platform::web::WindowAttributesExtWebSys;
+
+            if let Some(canvas) = Self::resolve_web_canvas(&self.config) {
+                window_attributes
+                    .with_canvas(Some(canvas))
+                    .with_append(false)
+            } else {
+                window_attributes.with_append(true)
+            }
+        };
         let window = match event_loop.create_window(window_attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -2196,27 +2026,36 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
         window.set_visible(true);
         self.update_native_window_shape(&window);
 
-        let mut render_core = pollster::block_on(RenderCore::new(
-            window.clone(),
-            self.config.sample_count,
-            self.config.window.transparent,
-        ));
-
-        // Register pipelines
-        let mut context = PipelineContext::new(&mut render_core);
-        for module in &self.modules {
-            module.register_pipelines(&mut context);
+        #[cfg(target_family = "wasm")]
+        {
+            self.begin_web_initialization(window);
+            return;
         }
 
-        self.app = Some(render_core);
-        self.install_runtime_redraw_waker();
-        #[cfg(feature = "profiling")]
-        self.request_redraw_with_reasons(WakeSource::Lifecycle, vec![RedrawReason::Startup]);
-        #[cfg(not(feature = "profiling"))]
-        self.request_redraw_now();
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let mut render_core = pollster::block_on(RenderCore::new(
+                window.clone(),
+                self.config.sample_count,
+                self.config.window.transparent,
+            ));
 
-        if let Some(context) = self.plugin_context(event_loop) {
-            self.plugins.resumed(&context);
+            // Register pipelines
+            let mut context = PipelineContext::new(&mut render_core);
+            for module in &self.modules {
+                module.register_pipelines(&mut context);
+            }
+
+            self.app = Some(render_core);
+            self.install_runtime_redraw_waker();
+            #[cfg(feature = "profiling")]
+            self.request_redraw_with_reasons(WakeSource::Lifecycle, vec![RedrawReason::Startup]);
+            #[cfg(not(feature = "profiling"))]
+            self.request_redraw_now();
+
+            if let Some(context) = self.plugin_context(event_loop) {
+                self.plugins.resumed(&context);
+            }
         }
     }
 
@@ -2252,8 +2091,15 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
         self.cursor_state = CursorState::default();
         self.keyboard_state = KeyboardState::default();
         self.ime_state = ImeState::default();
+        self.ime_bridge_state.reset();
         self.resize_in_progress = false;
         self.redraw_request_pending.store(false, Ordering::Release);
+        #[cfg(target_family = "wasm")]
+        {
+            self.web_init_epoch = self.web_init_epoch.wrapping_add(1);
+            self.web_init_in_progress = false;
+            self.pending_web_inits.borrow_mut().clear();
+        }
         #[cfg(target_os = "android")]
         {
             self.android_ime_opened = false;
@@ -2421,8 +2267,10 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: RendererUserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RendererUserEvent) {
         use accesskit_winit::WindowEvent as AccessKitWindowEvent;
+        #[cfg(not(target_family = "wasm"))]
+        let _ = event_loop;
 
         match event {
             RendererUserEvent::RuntimeRedrawWake => {
@@ -2433,6 +2281,10 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
                 );
                 #[cfg(not(feature = "profiling"))]
                 self.request_redraw_now();
+            }
+            #[cfg(target_family = "wasm")]
+            RendererUserEvent::WebInitReady(epoch) => {
+                self.finish_web_initialization(event_loop, epoch);
             }
             RendererUserEvent::AccessKit(event) => {
                 if self.accessibility_adapter.is_none() {
@@ -2466,6 +2318,125 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RendererImeBridgeState, RendererImeBridgeUpdate};
+    use crate::{ImeRequest, Px, PxPosition, px::PxSize};
+
+    fn positioned_request(
+        position: PxPosition,
+        size: PxSize,
+        selection_range: Option<std::ops::Range<usize>>,
+        composition_range: Option<std::ops::Range<usize>>,
+    ) -> ImeRequest {
+        let mut request = ImeRequest::new(size)
+            .with_local_position(position)
+            .with_selection_range(selection_range)
+            .with_composition_range(composition_range);
+        request.position = Some(position);
+        request
+    }
+
+    #[test]
+    fn ime_bridge_enables_and_updates_cursor_area_for_first_request() {
+        let mut bridge = RendererImeBridgeState::default();
+        let request = positioned_request(
+            PxPosition::new(Px(12), Px(18)),
+            PxSize::new(Px(7), Px(13)),
+            Some(2..6),
+            Some(3..5),
+        );
+
+        let update = bridge.update_request(Some(request.clone()));
+
+        assert_eq!(
+            update,
+            RendererImeBridgeUpdate {
+                allowed: Some(true),
+                cursor_area: Some((PxPosition::new(Px(12), Px(18)), PxSize::new(Px(7), Px(13)))),
+                request: Some(request.clone()),
+                snapshot_changed: true,
+            }
+        );
+        assert_eq!(bridge.request(), Some(&request));
+    }
+
+    #[test]
+    fn ime_bridge_reuses_identical_request_without_window_updates() {
+        let request = positioned_request(
+            PxPosition::new(Px(12), Px(18)),
+            PxSize::new(Px(7), Px(13)),
+            Some(2..6),
+            Some(3..5),
+        );
+        let mut bridge = RendererImeBridgeState::default();
+        bridge.update_request(Some(request.clone()));
+
+        let update = bridge.update_request(Some(request.clone()));
+
+        assert_eq!(
+            update,
+            RendererImeBridgeUpdate {
+                allowed: None,
+                cursor_area: None,
+                request: Some(request.clone()),
+                snapshot_changed: false,
+            }
+        );
+        assert_eq!(bridge.request(), Some(&request));
+    }
+
+    #[test]
+    fn ime_bridge_preserves_selection_and_composition_changes_without_cursor_reapply() {
+        let size = PxSize::new(Px(7), Px(13));
+        let mut bridge = RendererImeBridgeState::default();
+        bridge.update_request(Some(positioned_request(
+            PxPosition::new(Px(12), Px(18)),
+            size,
+            Some(2..6),
+            Some(3..5),
+        )));
+        let next_request = positioned_request(
+            PxPosition::new(Px(12), Px(18)),
+            size,
+            Some(4..8),
+            Some(5..7),
+        );
+
+        let update = bridge.update_request(Some(next_request.clone()));
+
+        assert_eq!(update.allowed, None);
+        assert_eq!(update.cursor_area, None);
+        assert!(update.snapshot_changed);
+        assert_eq!(bridge.request(), Some(&next_request));
+    }
+
+    #[test]
+    fn ime_bridge_disables_and_clears_snapshot_when_request_is_removed() {
+        let request = positioned_request(
+            PxPosition::new(Px(12), Px(18)),
+            PxSize::new(Px(7), Px(13)),
+            Some(2..6),
+            Some(3..5),
+        );
+        let mut bridge = RendererImeBridgeState::default();
+        bridge.update_request(Some(request));
+
+        let update = bridge.update_request(None);
+
+        assert_eq!(
+            update,
+            RendererImeBridgeUpdate {
+                allowed: Some(false),
+                cursor_area: None,
+                request: None,
+                snapshot_changed: true,
+            }
+        );
+        assert_eq!(bridge.request(), None);
     }
 }
 
@@ -2711,67 +2682,4 @@ pub fn hide_soft_input(android_app: &AndroidApp) {
     if env.exception_check().unwrap_or(false) {
         let _ = env.exception_clear();
     }
-}
-
-/// Entry point wrapper for tessera applications.
-///
-/// # Why this is needed
-///
-/// Tessera component entry points must be functions annotated with the
-/// `tessera` macro. Unlike some other frameworks, we cannot detect whether a
-/// provided closure has been annotated with `tessera`. Wrapping the entry
-/// function guarantees it is invoked from a `tessera`-annotated function,
-/// ensuring correct behavior regardless of how the user supplied their entry
-/// point.
-type EntryPointInvoker = fn(*const ());
-
-#[derive(Clone, Copy)]
-struct EntryPointCallback {
-    data: *const (),
-    invoker: EntryPointInvoker,
-}
-
-thread_local! {
-    static ENTRY_POINT_CALLBACK: RefCell<Option<EntryPointCallback>> = const { RefCell::new(None) };
-}
-
-fn invoke_entry_point<F: Fn()>(data: *const ()) {
-    // SAFETY: The pointer is installed by `with_entry_point_callback` and is
-    // valid for the guarded call scope.
-    let entry_point = unsafe { &*(data as *const F) };
-    entry_point();
-}
-
-struct EntryPointCallbackGuard;
-
-impl Drop for EntryPointCallbackGuard {
-    fn drop(&mut self) {
-        ENTRY_POINT_CALLBACK.with(|slot| {
-            *slot.borrow_mut() = None;
-        });
-    }
-}
-
-fn with_entry_point_callback<F: Fn(), R>(entry_point: &F, run: impl FnOnce() -> R) -> R {
-    ENTRY_POINT_CALLBACK.with(|slot| {
-        *slot.borrow_mut() = Some(EntryPointCallback {
-            data: entry_point as *const F as *const (),
-            invoker: invoke_entry_point::<F>,
-        });
-    });
-    let _guard = EntryPointCallbackGuard;
-    run()
-}
-
-fn run_entry_point_callback() {
-    let callback = ENTRY_POINT_CALLBACK.with(|slot| *slot.borrow());
-    let Some(callback) = callback else {
-        panic!("entry point callback is not set");
-    };
-    (callback.invoker)(callback.data);
-}
-
-#[tessera(crate)]
-fn entry_wrapper() {
-    run_entry_point_callback();
 }

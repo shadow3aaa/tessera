@@ -14,6 +14,7 @@ default = ["shard"]
 shard = ["tessera-shard"]
 profiling = ["serde", "serde_json"]
 debug-dirty-overlay = []
+testing = []
 
 [dependencies]
 bytemuck = { version = "1.24.0", features = ["derive"] }
@@ -27,7 +28,6 @@ rayon = "1.11.0"
 slotmap = "1.1.1"
 rustc-hash = "2.1.1"
 dashmap = "6.1.0"
-uuid = { version = "1.20.0", features = ["v4"] }
 tessera-macros = { path = "../tessera-macros" }
 tessera-shard = { path = "../tessera-shard", optional = true }
 accesskit = "0.24.0"
@@ -60,6 +60,11 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 winit = "0.30.12"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-sys = { version = "0.3.93", features = ["Document", "Element", "HtmlCanvasElement", "Window"] }
+wasm-bindgen-futures = "0.4.55"
+web-time = "1.1.0"
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30.12", features = ["android-game-activity"] }

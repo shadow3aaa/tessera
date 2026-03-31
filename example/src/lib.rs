@@ -1,24 +1,30 @@
 mod app;
-mod example_components;
 pub mod res;
 
-use tessera_ui::{
-    EntryPoint,
-    renderer::{TesseraConfig, WindowConfig},
-};
+use tessera_ui::{EntryPoint, renderer::TesseraConfig};
 
-use crate::app::app;
+use app::app;
+
+#[cfg(target_family = "wasm")]
+use tessera_ui::renderer::WebConfig;
+#[cfg(target_family = "wasm")]
+use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
 #[tessera_ui::entry]
 pub fn run() -> EntryPoint {
-    let config = TesseraConfig {
-        window: WindowConfig {
-            decorations: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
     EntryPoint::new(app)
+        .config(TesseraConfig {
+            #[cfg(target_family = "wasm")]
+            web: WebConfig::default().with_canvas_id(env!("CARGO_CRATE_NAME")),
+            ..Default::default()
+        })
         .package(tessera_components::ComponentsPackage)
-        .config(config)
+}
+
+#[cfg(target_family = "wasm")]
+#[wasm_bindgen(start)]
+pub fn start() -> Result<(), JsValue> {
+    run()
+        .run_web()
+        .map_err(|err| JsValue::from_str(&err.to_string()))
 }

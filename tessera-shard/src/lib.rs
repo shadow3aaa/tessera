@@ -1,5 +1,6 @@
 pub mod router;
 pub mod task_handles;
+#[cfg(not(target_family = "wasm"))]
 mod tokio_runtime;
 
 use std::{
@@ -15,7 +16,7 @@ use parking_lot::RwLock;
 /// Describes the lifecycle of this shard state.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ShardStateLifeCycle {
-    /// State exists for the lifetime of a router scope.
+    /// State exists for the lifetime of one router controller instance.
     Scope,
     /// State exists for the lifetime of a route instance.
     Shard,
