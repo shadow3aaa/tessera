@@ -4,24 +4,23 @@
 //!
 //! Use to add gaps between components or to create flexible, expanding regions.
 use tessera_ui::{
-    ComputedData, Constraint, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError, Modifier,
-    layout::layout_primitive, tessera,
+    ComputedData, Constraint, LayoutPolicy, LayoutResult, MeasurementError, Modifier,
+    layout::{MeasureScope, layout},
+    tessera,
 };
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct SpacerLayout;
 
 impl LayoutPolicy for SpacerLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
         let constraint = Constraint::new(
             input.parent_constraint().width(),
             input.parent_constraint().height(),
         );
-        Ok(ComputedData::min_from_constraint(&constraint))
+        Ok(LayoutResult::new(ComputedData::min_from_constraint(
+            &constraint,
+        )))
     }
 }
 
@@ -36,7 +35,7 @@ impl LayoutPolicy for SpacerLayout {
 ///
 /// ## Parameters
 ///
-/// - `args` — props for this component; see [`SpacerArgs`].
+/// - `modifier` — modifier chain applied to the spacer node.
 ///
 /// ## Examples
 ///
@@ -56,8 +55,7 @@ impl LayoutPolicy for SpacerLayout {
 /// # component();
 /// ```
 #[tessera]
-pub fn spacer(modifier: Modifier) {
-    layout_primitive()
-        .modifier(modifier)
-        .layout_policy(SpacerLayout);
+pub fn spacer(modifier: Option<Modifier>) {
+    let modifier = modifier.unwrap_or_default();
+    layout().modifier(modifier).layout_policy(SpacerLayout);
 }

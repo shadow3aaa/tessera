@@ -10,7 +10,7 @@ use tessera_ui::{
     wgpu,
 };
 
-use crate::fluid_glass::FluidGlassCommand;
+use crate::pipelines::fluid_glass::FluidGlassCommand;
 
 // Define MAX_CONCURRENT_SHAPES, can be adjusted later
 pub const MAX_CONCURRENT_GLASSES: usize = 256;
@@ -127,7 +127,7 @@ impl FluidGlassSdfGenerator {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Fluid Glass SDF Cache Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -239,11 +239,6 @@ struct GlassUniforms {
     rect_size_px: Vec2,
     ripple_center: Vec2,
     shape_type: f32,
-    dispersion_height: f32,
-    chroma_multiplier: f32,
-    refraction_height: f32,
-    refraction_amount: f32,
-    eccentric_factor: f32,
     noise_amount: f32,
     noise_scale: f32,
     time: f32,
@@ -252,9 +247,6 @@ struct GlassUniforms {
     ripple_strength: f32,
     border_width: f32,
     sdf_cache_enabled: f32,
-    screen_size: Vec2,  // Screen dimensions
-    light_source: Vec2, // Light source position in world coordinates
-    light_scale: f32,   // Light intensity scale factor
 }
 
 #[derive(PartialEq, ShaderType)]
@@ -425,7 +417,7 @@ impl FluidGlassPipeline {
     ) -> wgpu::RenderPipeline {
         let pipeline_layout = gpu.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Fluid Glass Pipeline Layout"),
-            bind_group_layouts: &[bind_group_layout],
+            bind_group_layouts: &[Some(bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -529,7 +521,7 @@ impl FluidGlassPipeline {
             device: gpu,
             queue,
         } = input;
-        let args = &command.args;
+        let render = &command.render;
         let screen_w = target_size.width.to_f32();
         let screen_h = target_size.height.to_f32();
 
@@ -552,7 +544,7 @@ impl FluidGlassPipeline {
             (start_pos.y.0 + size.height.0) as f32 / screen_h,
         ];
 
-        let resolved_shape = args.shape.resolve_for_size(*size);
+        let resolved_shape = render.shape.resolve_for_size(*size);
         let (corner_radii, corner_g2, mut shape_type) = match resolved_shape {
             crate::shape_def::ResolvedShape::Rounded {
                 corner_radii,
@@ -567,7 +559,7 @@ impl FluidGlassPipeline {
             shape_type = 2.0;
         }
 
-        let border_width = args
+        let border_width = render
             .border
             .as_ref()
             .map(|b| b.width.0 as f32)
@@ -577,30 +569,22 @@ impl FluidGlassPipeline {
             self.maybe_get_sdf_entry(gpu, queue, size, corner_radii, shape_type, corner_g2);
 
         let uniforms = GlassUniforms {
-            tint_color: args.tint_color.to_array().into(),
+            tint_color: render.tint_color.to_array().into(),
             rect_uv_bounds: rect_uv_bounds.into(),
             clip_rect_uv,
             rect_size_px: [size.width.0 as f32, size.height.0 as f32].into(),
-            ripple_center: args.ripple_center.unwrap_or([0.0, 0.0]).into(),
+            ripple_center: render.ripple_center.unwrap_or([0.0, 0.0]).into(),
             corner_radii,
             corner_g2,
             shape_type,
-            dispersion_height: args.dispersion_height.to_pixels_f32(),
-            chroma_multiplier: args.chroma_multiplier,
-            refraction_height: args.refraction_height.to_pixels_f32(),
-            refraction_amount: args.refraction_amount,
-            eccentric_factor: args.eccentric_factor,
-            noise_amount: args.noise_amount,
-            noise_scale: args.noise_scale,
-            time: args.time,
-            ripple_radius: args.ripple_radius.unwrap_or(0.0),
-            ripple_alpha: args.ripple_alpha.unwrap_or(0.0),
-            ripple_strength: args.ripple_strength.unwrap_or(0.0),
+            noise_amount: render.noise_amount,
+            noise_scale: render.noise_scale,
+            time: render.time,
+            ripple_radius: render.ripple_radius.unwrap_or(0.0),
+            ripple_alpha: render.ripple_alpha.unwrap_or(0.0),
+            ripple_strength: render.ripple_strength.unwrap_or(0.0),
             border_width,
             sdf_cache_enabled: if sdf_entry.is_some() { 1.0 } else { 0.0 },
-            screen_size: [screen_w, screen_h].into(),
-            light_source: [screen_w * 0.1, screen_h * 0.1].into(),
-            light_scale: 1.0,
         };
 
         PreparedGlassInstance {

@@ -30,19 +30,17 @@ use winit::{
 use crate::{
     ImeRequest, ImeState, PxPosition,
     build_tree::build_component_tree,
-    component_tree::{
-        LayoutFrameDiagnostics, WindowAction, WindowRequests, clear_layout_snapshots,
-    },
+    component_tree::{LayoutFrameDiagnostics, WindowRequests, clear_layout_snapshots},
     context::{reset_component_context_tracking, reset_context_read_dependencies},
     cursor::{
-        CursorEvent, CursorEventContent, CursorState, GestureState, MOUSE_POINTER_ID,
+        CursorEventContent, CursorState, GestureState, MOUSE_POINTER_ID, PointerChange,
         PressKeyEventType,
     },
     dp::SCALE_FACTOR,
     focus::{FocusDirection, flush_pending_focus_callbacks},
     keyboard_state::KeyboardState,
     pipeline_context::PipelineContext,
-    plugin::{PluginContext, PluginHost},
+    plugin::{DesktopPlatformContext, DesktopWindowAction, PluginContext, PluginHost},
     px::PxSize,
     render_graph::{RenderGraph, RenderGraphExecution},
     render_module::RenderModule,
@@ -304,10 +302,9 @@ impl Default for TesseraConfig {
 ///
 /// ## Thread Safety
 ///
-/// The renderer runs on the main thread and coordinates with other threads for:
-/// - Component tree building (potentially parallelized)
-/// - Resource management
-/// - Event processing
+/// The renderer runs on the main thread and coordinates frame building,
+/// resource management, and event processing from a single UI-thread
+/// execution flow.
 ///
 /// ## Usage
 ///
@@ -395,6 +392,9 @@ pub struct Renderer<F: Fn()> {
     accessibility_adapter: Option<AccessKitAdapter>,
     /// Event loop proxy for posting user events (accessibility/runtime wakeups)
     event_loop_proxy: Option<winit::event_loop::EventLoopProxy<RendererUserEvent>>,
+    /// Pending programmatic desktop window action requested through plugin
+    /// APIs.
+    pending_desktop_window_action: Arc<RwLock<Option<DesktopWindowAction>>>,
     /// Incrementing frame index for profiling and debugging.
     frame_index: u64,
     /// Global redraw gate. While `true`, redraw requests are coalesced until
@@ -553,6 +553,7 @@ impl<F: Fn()> Renderer<F> {
             config,
             accessibility_adapter: None,
             event_loop_proxy: Some(event_loop_proxy),
+            pending_desktop_window_action: Arc::new(RwLock::new(None)),
             frame_index: 0,
             redraw_request_pending: Arc::new(AtomicBool::new(false)),
             pending_close_requested: false,
@@ -614,6 +615,7 @@ impl<F: Fn()> Renderer<F> {
             config,
             accessibility_adapter: None,
             event_loop_proxy: Some(event_loop_proxy),
+            pending_desktop_window_action: Arc::new(RwLock::new(None)),
             frame_index: 0,
             redraw_request_pending: Arc::new(AtomicBool::new(false)),
             pending_close_requested: false,
@@ -750,6 +752,7 @@ impl<F: Fn()> Renderer<F> {
             config,
             accessibility_adapter: None,
             event_loop_proxy: Some(event_loop_proxy),
+            pending_desktop_window_action: Arc::new(RwLock::new(None)),
             frame_index: 0,
             redraw_request_pending: Arc::new(AtomicBool::new(false)),
             pending_close_requested: false,
@@ -789,7 +792,7 @@ struct RenderFrameContext<'a, F: Fn()> {
 
 struct RenderFrameOutcome {
     accessibility_update: Option<TreeUpdate>,
-    window_action: Option<WindowAction>,
+    request_window_drag: bool,
     runtime_pending_work: RuntimePendingWork,
     #[cfg(feature = "debug-dirty-overlay")]
     overlay_clear_pending: bool,
@@ -849,6 +852,14 @@ impl RendererImeBridgeState {
 impl<F: Fn()> Renderer<F> {
     const RESIZE_EDGE_THRESHOLD: f64 = 8.0;
     const MAX_FOCUS_BEYOND_BOUNDS_RETRIES: usize = 8;
+
+    const fn supports_native_window_frame_controls() -> bool {
+        !cfg!(any(
+            target_family = "wasm",
+            target_os = "android",
+            target_os = "ios"
+        ))
+    }
 
     #[cfg(target_os = "windows")]
     fn update_native_window_shape(&self, window: &Window) {
@@ -1101,7 +1112,7 @@ Fps: {:.2}
         };
 
         // Clear any existing compute resources
-        args.app.compute_resource_manager().write().clear();
+        args.app.compute_resource_manager_mut().clear();
         let layout_dirty_nodes = take_layout_dirty_nodes();
 
         let (
@@ -1113,6 +1124,7 @@ Fps: {:.2}
             pending_focus_reveal_retry,
         ) = TesseraRuntime::with_mut(|rt| {
             let component_tree = &mut rt.component_tree;
+            let (gpu, compute_resource_manager) = args.app.record_resources();
             component_tree.compute(
                 crate::component_tree::ComputeParams {
                     screen_size,
@@ -1126,8 +1138,8 @@ Fps: {:.2}
                     layout_dirty_nodes: &layout_dirty_nodes,
                 },
                 crate::component_tree::ComputeMode::Full {
-                    compute_resource_manager: args.app.compute_resource_manager(),
-                    gpu: args.app.device(),
+                    compute_resource_manager,
+                    gpu,
                 },
             )
         });
@@ -1147,10 +1159,35 @@ Fps: {:.2}
     }
 
     #[cfg(feature = "debug-dirty-overlay")]
+    fn layout_node_overlay_rect(
+        metadatas: &crate::component_tree::ComponentNodeMetaDatas,
+        node_id: crate::NodeId,
+    ) -> Option<PxRect> {
+        let metadata = metadatas.get(&node_id)?;
+        let abs_position = metadata.abs_position?;
+        let computed_data = metadata.computed_data?;
+        if computed_data.width.0 <= 0 || computed_data.height.0 <= 0 {
+            return None;
+        }
+        let node_rect = PxRect::from_position_size(
+            abs_position,
+            PxSize::new(computed_data.width, computed_data.height),
+        );
+        Some(
+            metadata
+                .event_clip_rect
+                .and_then(|clip_rect| clip_rect.intersection(&node_rect))
+                .unwrap_or(node_rect),
+        )
+    }
+
+    #[cfg(feature = "debug-dirty-overlay")]
     fn collect_dirty_overlay_rects(
         screen_size: PxSize,
         build_tree_result: &BuildTreeResult,
     ) -> Vec<PxRect> {
+        use crate::component_tree::{NodeRole, direct_layout_children};
+
         if matches!(build_tree_result.mode(), BuildTreeMode::SkipNoInvalidation) {
             return Vec::new();
         }
@@ -1161,7 +1198,9 @@ Fps: {:.2}
             return Vec::new();
         }
         TesseraRuntime::with(|rt| {
-            let mut rects = Vec::with_capacity(build_tree_result.dirty_replay_roots().len());
+            let tree = rt.component_tree.tree();
+            let metadatas = rt.component_tree.metadatas();
+            let mut rects = Vec::new();
             for instance_key in build_tree_result.dirty_replay_roots() {
                 let Some(node_id) = rt
                     .component_tree
@@ -1169,21 +1208,16 @@ Fps: {:.2}
                 else {
                     continue;
                 };
-                let Some(metadata) = rt.component_tree.metadatas().get(&node_id) else {
-                    continue;
+                let layout_nodes = match tree.get(node_id) {
+                    Some(node_ref) if node_ref.get().role == NodeRole::Layout => vec![node_id],
+                    Some(_) => direct_layout_children(node_id, tree),
+                    None => continue,
                 };
-                let (Some(abs_position), Some(size)) =
-                    (metadata.abs_position, metadata.computed_data)
-                else {
-                    continue;
-                };
-                if size.width.0 <= 0 || size.height.0 <= 0 {
-                    continue;
+                for layout_node_id in layout_nodes {
+                    if let Some(rect) = Self::layout_node_overlay_rect(metadatas, layout_node_id) {
+                        rects.push(rect);
+                    }
                 }
-                rects.push(PxRect::from_position_size(
-                    abs_position,
-                    PxSize::new(size.width, size.height),
-                ));
             }
             rects
         })
@@ -1208,22 +1242,7 @@ Fps: {:.2}
         }
 
         debug!("Rendering draw commands...");
-        if let Err(e) = args.app.render(execution) {
-            match e {
-                wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
-                    debug!("Surface outdated/lost, resizing...");
-                    args.app.resize_surface();
-                }
-                wgpu::SurfaceError::Timeout => warn!("Surface timeout. Frame will be dropped."),
-                wgpu::SurfaceError::OutOfMemory => {
-                    error!("Surface out of memory. Panicking.");
-                    panic!("Surface out of memory");
-                }
-                _ => {
-                    error!("Surface error: {e}. Attempting to continue.");
-                }
-            }
-        }
+        args.app.render(execution);
         let render_cost = render_timer.elapsed();
         debug!("Rendered to surface in {render_cost:?}");
         render_cost
@@ -1247,22 +1266,7 @@ Fps: {:.2}
         }
 
         debug!("Rendering draw commands...");
-        if let Err(e) = args.app.render(execution, dirty_overlay_rects) {
-            match e {
-                wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
-                    debug!("Surface outdated/lost, resizing...");
-                    args.app.resize_surface();
-                }
-                wgpu::SurfaceError::Timeout => warn!("Surface timeout. Frame will be dropped."),
-                wgpu::SurfaceError::OutOfMemory => {
-                    error!("Surface out of memory. Panicking.");
-                    panic!("Surface out of memory");
-                }
-                _ => {
-                    error!("Surface error: {e}. Attempting to continue.");
-                }
-            }
-        }
+        args.app.render(execution, dirty_overlay_rects);
         let render_cost = render_timer.elapsed();
         debug!("Rendered to surface in {render_cost:?}");
         render_cost
@@ -1443,9 +1447,14 @@ Fps: {:.2}
         // cursors
         let cursor_position = args.cursor_state.position();
         let window_size = args.app.size();
-        let resize_direction = (!decorations).then(|| {
-            Self::cursor_resize_direction(cursor_position, window_size, Self::RESIZE_EDGE_THRESHOLD)
-        });
+        let resize_direction = (Self::supports_native_window_frame_controls() && !decorations)
+            .then(|| {
+                Self::cursor_resize_direction(
+                    cursor_position,
+                    window_size,
+                    Self::RESIZE_EDGE_THRESHOLD,
+                )
+            });
 
         if let Some(direction) = resize_direction.flatten() {
             let icon = Self::cursor_icon_for_resize(direction);
@@ -1467,7 +1476,8 @@ Fps: {:.2}
             }
         }
 
-        let window_action = window_requests.window_action;
+        let request_window_drag =
+            Self::supports_native_window_frame_controls() && window_requests.request_window_drag;
 
         let ime_bridge_update = args
             .ime_bridge_state
@@ -1511,7 +1521,7 @@ Fps: {:.2}
 
         RenderFrameOutcome {
             accessibility_update,
-            window_action,
+            request_window_drag,
             runtime_pending_work,
             #[cfg(feature = "debug-dirty-overlay")]
             overlay_clear_pending,
@@ -1520,19 +1530,37 @@ Fps: {:.2}
 }
 
 impl<F: Fn()> Renderer<F> {
+    fn desktop_platform_context(&self) -> Option<DesktopPlatformContext> {
+        let app = self.app.as_ref()?;
+        let redraw_pending = self.redraw_request_pending.clone();
+        let window = app.window_arc();
+        let wake_handler = Arc::new(move || {
+            Self::try_request_redraw(window.as_ref(), redraw_pending.as_ref());
+        });
+        Some(DesktopPlatformContext::new(
+            app.window_arc(),
+            self.pending_desktop_window_action.clone(),
+            wake_handler,
+        ))
+    }
+
+    fn take_pending_desktop_window_action(&self) -> Option<DesktopWindowAction> {
+        self.pending_desktop_window_action.write().take()
+    }
+
     #[cfg(target_os = "android")]
     fn plugin_context(&self, event_loop: &ActiveEventLoop) -> Option<PluginContext> {
-        let app = self.app.as_ref()?;
+        let desktop = self.desktop_platform_context()?;
         Some(PluginContext::new(
-            app.window_arc(),
+            desktop,
             event_loop.android_app().clone(),
         ))
     }
 
     #[cfg(not(target_os = "android"))]
     fn plugin_context(&self, _event_loop: &ActiveEventLoop) -> Option<PluginContext> {
-        let app = self.app.as_ref()?;
-        Some(PluginContext::new(app.window_arc()))
+        let desktop = self.desktop_platform_context()?;
+        Some(PluginContext::new(desktop))
     }
 
     fn try_request_redraw(window: &Window, redraw_pending: &AtomicBool) {
@@ -1654,23 +1682,28 @@ impl<F: Fn()> Renderer<F> {
         event_loop.exit();
     }
 
-    fn apply_window_action(&mut self, window: &Window, action: WindowAction) {
+    fn apply_window_drag(&mut self, window: &Window) {
+        if !Self::supports_native_window_frame_controls() {
+            return;
+        }
+        if let Err(err) = window.drag_window() {
+            warn!("Failed to start window drag: {}", err);
+        }
+        self.update_native_window_shape(window);
+    }
+
+    fn apply_desktop_window_action(&mut self, window: &Window, action: DesktopWindowAction) {
         match action {
-            WindowAction::DragWindow => {
-                if let Err(err) = window.drag_window() {
-                    warn!("Failed to start window drag: {}", err);
-                }
-            }
-            WindowAction::Minimize => {
+            DesktopWindowAction::Minimize => {
                 window.set_minimized(true);
             }
-            WindowAction::Maximize => {
+            DesktopWindowAction::Maximize => {
                 window.set_maximized(true);
             }
-            WindowAction::ToggleMaximize => {
+            DesktopWindowAction::ToggleMaximize => {
                 window.set_maximized(!window.is_maximized());
             }
-            WindowAction::Close => {
+            DesktopWindowAction::Close => {
                 self.pending_close_requested = true;
             }
         }
@@ -1710,7 +1743,7 @@ impl<F: Fn()> Renderer<F> {
         let px_position = PxPosition::from_f64_arr2([position.x, position.y]);
         // Update cursor position
         self.cursor_state.update_position(px_position);
-        self.cursor_state.push_event(CursorEvent {
+        self.cursor_state.push_event(PointerChange {
             timestamp: Instant::now(),
             pointer_id: MOUSE_POINTER_ID,
             content: CursorEventContent::Moved(px_position),
@@ -1777,7 +1810,8 @@ impl<F: Fn()> Renderer<F> {
         if matches!(
             event_content,
             CursorEventContent::Pressed(PressKeyEventType::Left)
-        ) && !self.config.window.decorations
+        ) && Self::supports_native_window_frame_controls()
+            && !self.config.window.decorations
             && let Some(app) = self.app.as_ref()
         {
             let window_size = app.size();
@@ -1797,7 +1831,7 @@ impl<F: Fn()> Renderer<F> {
                 return;
             }
         }
-        let event = CursorEvent {
+        let event = PointerChange {
             timestamp: Instant::now(),
             pointer_id: MOUSE_POINTER_ID,
             content: event_content,
@@ -1813,7 +1847,7 @@ impl<F: Fn()> Renderer<F> {
             return;
         }
         let event_content = CursorEventContent::from_scroll_event(delta);
-        let event = CursorEvent {
+        let event = PointerChange {
             timestamp: Instant::now(),
             pointer_id: MOUSE_POINTER_ID,
             content: event_content,
@@ -1877,7 +1911,7 @@ impl<F: Fn()> Renderer<F> {
 
         let RenderFrameOutcome {
             accessibility_update,
-            window_action,
+            request_window_drag,
             runtime_pending_work,
             #[cfg(feature = "debug-dirty-overlay")]
             overlay_clear_pending,
@@ -1905,8 +1939,11 @@ impl<F: Fn()> Renderer<F> {
             })
         };
 
-        if let Some(action) = window_action {
-            self.apply_window_action(app.window(), action);
+        if request_window_drag {
+            self.apply_window_drag(app.window());
+        }
+        if let Some(action) = self.take_pending_desktop_window_action() {
+            self.apply_desktop_window_action(app.window(), action);
         }
 
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -2081,8 +2118,8 @@ impl<F: Fn()> ApplicationHandler<RendererUserEvent> for Renderer<F> {
             self.plugins.suspended(&context);
         }
 
-        if let Some(app) = self.app.take() {
-            app.compute_resource_manager().write().clear();
+        if let Some(mut app) = self.app.take() {
+            app.compute_resource_manager_mut().clear();
         }
 
         // Clean up AccessKit adapter

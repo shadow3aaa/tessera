@@ -7,26 +7,25 @@
 //!
 //! Pointer and keyboard handlers in this module focus on interaction state and
 //! gesture flow. Accessibility is attached through semantics modifier nodes,
-//! hover cursors use dedicated cursor modifiers, and window actions use
-//! explicit window-action helpers.
+//! and hover cursors use dedicated cursor modifiers.
 
-use tessera_foundation::modifier::{
-    ClickableArgs, InteractionState, PointerEventContext, SelectableArgs, ToggleableArgs,
+use tessera_foundation::{
+    gesture::{LongPressRecognizer, TapRecognizer},
+    modifier::{
+        ClickableArgs, InteractionState, PointerEventContext, SelectableArgs, ToggleableArgs,
+    },
 };
 use tessera_ui::{
     AccessibilityActionHandler, AccessibilityNode, Callback, CallbackWith, ComputedData,
     FocusRequester, FocusState, KeyboardInput, KeyboardInputModifierNode, Modifier, PointerInput,
-    PointerInputModifierNode, PxPosition, PxSize, SemanticsModifierNode, State, WindowAction,
+    PointerInputModifierNode, PxPosition, PxSize, SemanticsModifierNode, State,
     accesskit::{self, Action, Toggled},
     modifier::{CursorModifierExt as _, FocusModifierExt as _, ModifierCapabilityExt as _},
     remember,
     winit::window::CursorIcon,
 };
 
-use crate::{
-    gesture_recognizer::{LongPressRecognizer, TapRecognizer},
-    pos_misc::is_position_in_rect,
-};
+use crate::pos_misc::is_position_in_rect;
 
 type PressCallback = CallbackWith<PointerEventContext, ()>;
 
@@ -619,10 +618,12 @@ impl SemanticsModifierNode for SelectableSemanticsModifierNode {
     }
 }
 
+#[cfg(not(any(target_family = "wasm", target_os = "android", target_os = "ios")))]
 struct WindowDragRegionPointerModifierNode {
     tap_recognizer: State<TapRecognizer>,
 }
 
+#[cfg(not(any(target_family = "wasm", target_os = "android", target_os = "ios")))]
 impl PointerInputModifierNode for WindowDragRegionPointerModifierNode {
     fn on_pointer_input(&self, mut input: PointerInput<'_>) {
         let within_bounds = input
@@ -654,56 +655,6 @@ impl PointerInputModifierNode for WindowDragRegionPointerModifierNode {
             input.drag_window();
         }
         input.block_all();
-    }
-}
-
-struct WindowActionPointerModifierNode {
-    action: WindowAction,
-    tap_recognizer: State<TapRecognizer>,
-}
-
-impl PointerInputModifierNode for WindowActionPointerModifierNode {
-    fn on_pointer_input(&self, mut input: PointerInput<'_>) {
-        let within_bounds = input
-            .cursor_position_rel
-            .map(|pos| {
-                is_position_in_rect(
-                    pos,
-                    PxPosition::ZERO,
-                    input.computed_data.width,
-                    input.computed_data.height,
-                )
-            })
-            .unwrap_or(false);
-
-        let is_drag_action = matches!(self.action, WindowAction::DragWindow);
-        let tap_result = self.tap_recognizer.with_mut(|recognizer| {
-            recognizer.update(
-                input.pass,
-                input.pointer_changes.as_mut_slice(),
-                input.cursor_position_rel,
-                within_bounds,
-            )
-        });
-        let requested = if is_drag_action {
-            tap_result.pressed
-        } else {
-            tap_result.tapped
-        };
-
-        if requested && within_bounds {
-            match self.action {
-                WindowAction::DragWindow => input.drag_window(),
-                WindowAction::Minimize => input.minimize_window(),
-                WindowAction::Maximize => input.maximize_window(),
-                WindowAction::ToggleMaximize => input.toggle_maximize_window(),
-                WindowAction::Close => input.close_window(),
-            }
-        }
-
-        if requested || within_bounds {
-            input.block_all();
-        }
     }
 }
 
@@ -913,18 +864,15 @@ pub(crate) fn apply_selectable_modifier(base: Modifier, args: SelectableArgs) ->
         })
 }
 
+#[cfg(not(any(target_family = "wasm", target_os = "android", target_os = "ios")))]
 pub(crate) fn apply_window_drag_region_modifier(base: Modifier) -> Modifier {
     let tap_recognizer = remember(TapRecognizer::default);
     base.push_pointer_input(WindowDragRegionPointerModifierNode { tap_recognizer })
 }
 
-pub(crate) fn apply_window_action_modifier(base: Modifier, action: WindowAction) -> Modifier {
-    let tap_recognizer = remember(TapRecognizer::default);
-    base.hover_cursor_icon(CursorIcon::Pointer)
-        .push_pointer_input(WindowActionPointerModifierNode {
-            action,
-            tap_recognizer,
-        })
+#[cfg(any(target_family = "wasm", target_os = "android", target_os = "ios"))]
+pub(crate) fn apply_window_drag_region_modifier(base: Modifier) -> Modifier {
+    base
 }
 
 pub(crate) fn apply_block_touch_propagation_modifier(base: Modifier) -> Modifier {

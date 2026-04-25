@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use tessera_foundation::gesture::{DragRecognizer, TapRecognizer};
 use tessera_ui::{
-    AccessibilityActionHandler, AccessibilityNode, Color, ComputedData, Constraint, DimensionValue,
-    Dp, MeasurementError, Modifier, Px, PxPosition, SemanticsModifierNode, State,
+    AccessibilityActionHandler, AccessibilityNode, AxisConstraint, Color, ComputedData, Constraint,
+    Dp, LayoutResult, MeasurementError, Modifier, Px, PxPosition, SemanticsModifierNode, State,
     accesskit::{Action, Role},
     current_frame_nanos,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, PlacementInput, layout_primitive},
+    layout::{LayoutPolicy, MeasureScope, PlacementScope, layout},
     modifier::ModifierCapabilityExt as _,
     receive_frame_nanos, remember, tessera,
 };
 
 use crate::{
-    gesture_recognizer::{DragRecognizer, TapRecognizer},
     modifier::{ModifierExt as _, with_pointer_input},
     scrollable::{ScrollBarBehavior, ScrollableController},
     shape_def::{RoundedCorner, Shape},
@@ -23,6 +23,15 @@ use crate::{
 enum ScrollOrientation {
     Vertical,
     Horizontal,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ZeroLayout;
+
+impl LayoutPolicy for ZeroLayout {
+    fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        Ok(LayoutResult::new(ComputedData::ZERO))
+    }
 }
 
 const HOVER_FADE_DURATION_SECS: f32 = 0.2;
@@ -38,20 +47,18 @@ struct ScrollBarVLayout {
 }
 
 impl LayoutPolicy for ScrollBarVLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let track_node_id = input.children_ids()[0];
-        let size = input.measure_child(track_node_id, &Constraint::NONE)?;
-        output.place_child(track_node_id, PxPosition::ZERO);
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let track = children[0];
+        let size = track.measure(&Constraint::NONE)?;
+        result.place_child(track, PxPosition::ZERO);
 
-        let thumb_node_id = input.children_ids()[1];
-        input.measure_child(thumb_node_id, &Constraint::NONE)?;
-        output.place_child(thumb_node_id, PxPosition::new(Px::ZERO, self.thumb_offset));
+        let thumb = children[1];
+        thumb.measure(&Constraint::NONE)?;
+        result.place_child(thumb, PxPosition::new(Px::ZERO, self.thumb_offset));
 
-        Ok(size)
+        Ok(result.with_size(size.size()))
     }
 
     fn measure_eq(&self, _other: &Self) -> bool {
@@ -62,16 +69,18 @@ impl LayoutPolicy for ScrollBarVLayout {
         self.thumb_offset == other.thumb_offset
     }
 
-    fn place_children(&self, input: &PlacementInput<'_>, output: &mut LayoutOutput<'_>) -> bool {
-        let Some(&track_node_id) = input.children_ids().first() else {
-            return true;
+    fn place_children(&self, input: &PlacementScope<'_>) -> Option<Vec<(u64, PxPosition)>> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let Some(&track) = children.first() else {
+            return Some(result.into_placements());
         };
-        output.place_child(track_node_id, PxPosition::ZERO);
-        let Some(&thumb_node_id) = input.children_ids().get(1) else {
-            return true;
+        result.place_child(track, PxPosition::ZERO);
+        let Some(&thumb) = children.get(1) else {
+            return Some(result.into_placements());
         };
-        output.place_child(thumb_node_id, PxPosition::new(Px::ZERO, self.thumb_offset));
-        true
+        result.place_child(thumb, PxPosition::new(Px::ZERO, self.thumb_offset));
+        Some(result.into_placements())
     }
 }
 
@@ -81,20 +90,18 @@ struct ScrollBarHLayout {
 }
 
 impl LayoutPolicy for ScrollBarHLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let track_node_id = input.children_ids()[0];
-        let size = input.measure_child(track_node_id, &Constraint::NONE)?;
-        output.place_child(track_node_id, PxPosition::ZERO);
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let track = children[0];
+        let size = track.measure(&Constraint::NONE)?;
+        result.place_child(track, PxPosition::ZERO);
 
-        let thumb_node_id = input.children_ids()[1];
-        input.measure_child(thumb_node_id, &Constraint::NONE)?;
-        output.place_child(thumb_node_id, PxPosition::new(self.thumb_offset, Px::ZERO));
+        let thumb = children[1];
+        thumb.measure(&Constraint::NONE)?;
+        result.place_child(thumb, PxPosition::new(self.thumb_offset, Px::ZERO));
 
-        Ok(size)
+        Ok(result.with_size(size.size()))
     }
 
     fn measure_eq(&self, _other: &Self) -> bool {
@@ -105,16 +112,18 @@ impl LayoutPolicy for ScrollBarHLayout {
         self.thumb_offset == other.thumb_offset
     }
 
-    fn place_children(&self, input: &PlacementInput<'_>, output: &mut LayoutOutput<'_>) -> bool {
-        let Some(&track_node_id) = input.children_ids().first() else {
-            return true;
+    fn place_children(&self, input: &PlacementScope<'_>) -> Option<Vec<(u64, PxPosition)>> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let Some(&track) = children.first() else {
+            return Some(result.into_placements());
         };
-        output.place_child(track_node_id, PxPosition::ZERO);
-        let Some(&thumb_node_id) = input.children_ids().get(1) else {
-            return true;
+        result.place_child(track, PxPosition::ZERO);
+        let Some(&thumb) = children.get(1) else {
+            return Some(result.into_placements());
         };
-        output.place_child(thumb_node_id, PxPosition::new(self.thumb_offset, Px::ZERO));
-        true
+        result.place_child(thumb, PxPosition::new(self.thumb_offset, Px::ZERO));
+        Some(result.into_placements())
     }
 }
 #[derive(Clone, PartialEq)]
@@ -282,8 +291,8 @@ fn compute_thumb_color(
 fn render_track_surface_v(width: Px, height: Px, color: Color) {
     surface()
         .modifier(Modifier::new().constrain(
-            Some(DimensionValue::Fixed(width)),
-            Some(DimensionValue::Fixed(height)),
+            Some(AxisConstraint::exact(width)),
+            Some(AxisConstraint::exact(height)),
         ))
         .style(color.into())
         .shape(Shape::RoundedRectangle {
@@ -292,15 +301,15 @@ fn render_track_surface_v(width: Px, height: Px, color: Color) {
             bottom_left: RoundedCorner::Capsule,
             bottom_right: RoundedCorner::ZERO,
         })
-        .with_child(|| {});
+        .child(|| {});
 }
 
 /// Render a rounded surface for a vertical thumb (radius based on width).
 fn render_thumb_surface_v(width: Px, height: Px, color: Color) {
     surface()
         .modifier(Modifier::new().constrain(
-            Some(DimensionValue::Fixed(width)),
-            Some(DimensionValue::Fixed(height)),
+            Some(AxisConstraint::exact(width)),
+            Some(AxisConstraint::exact(height)),
         ))
         .shape(Shape::RoundedRectangle {
             top_left: RoundedCorner::Capsule,
@@ -309,15 +318,15 @@ fn render_thumb_surface_v(width: Px, height: Px, color: Color) {
             bottom_right: RoundedCorner::ZERO,
         })
         .style(color.into())
-        .with_child(|| {});
+        .child(|| {});
 }
 
 /// Render a rounded surface for a horizontal track (radius based on height).
 fn render_track_surface_h(width: Px, height: Px, color: Color) {
     surface()
         .modifier(Modifier::new().constrain(
-            Some(DimensionValue::Fixed(width)),
-            Some(DimensionValue::Fixed(height)),
+            Some(AxisConstraint::exact(width)),
+            Some(AxisConstraint::exact(height)),
         ))
         .style(color.into())
         .shape(Shape::RoundedRectangle {
@@ -326,15 +335,15 @@ fn render_track_surface_h(width: Px, height: Px, color: Color) {
             bottom_left: RoundedCorner::ZERO,
             bottom_right: RoundedCorner::ZERO,
         })
-        .with_child(|| {});
+        .child(|| {});
 }
 
 /// Render a rounded surface for a horizontal thumb (radius based on height).
 fn render_thumb_surface_h(width: Px, height: Px, color: Color) {
     surface()
         .modifier(Modifier::new().constrain(
-            Some(DimensionValue::Fixed(width)),
-            Some(DimensionValue::Fixed(height)),
+            Some(AxisConstraint::exact(width)),
+            Some(AxisConstraint::exact(height)),
         ))
         .shape(Shape::RoundedRectangle {
             top_left: RoundedCorner::Capsule,
@@ -343,7 +352,7 @@ fn render_thumb_surface_h(width: Px, height: Px, color: Color) {
             bottom_right: RoundedCorner::ZERO,
         })
         .style(color.into())
-        .with_child(|| {});
+        .child(|| {});
 }
 
 /// Decide whether the scrollbar should be shown according to behavior and
@@ -563,30 +572,6 @@ fn scroll_accessibility_step(
     args.state.with_mut(|c| c.set_target_position(new_target));
 
     mark_scroll_activity(state, &args.scrollbar_behavior, current_frame_nanos());
-}
-
-impl ScrollbarVBuilder {
-    pub(crate) fn state_internal(mut self, state: State<ScrollableController>) -> Self {
-        self.props.state = Some(state);
-        self
-    }
-
-    pub(crate) fn scrollbar_state_internal(mut self, scrollbar_state: ScrollBarState) -> Self {
-        self.props.scrollbar_state = Some(scrollbar_state);
-        self
-    }
-}
-
-impl ScrollbarHBuilder {
-    pub(crate) fn state_internal(mut self, state: State<ScrollableController>) -> Self {
-        self.props.state = Some(state);
-        self
-    }
-
-    pub(crate) fn scrollbar_state_internal(mut self, scrollbar_state: ScrollBarState) -> Self {
-        self.props.scrollbar_state = Some(scrollbar_state);
-        self
-    }
 }
 
 /// Update dragging behavior for vertical axis.
@@ -813,17 +798,25 @@ fn handle_state_h(
 
 #[tessera]
 pub fn scrollbar_v(
-    total: Px,
-    visible: Px,
-    offset: Px,
-    thickness: Dp,
-    #[prop(skip_setter)] state: Option<State<ScrollableController>>,
-    scrollbar_behavior: ScrollBarBehavior,
-    track_color: Color,
-    thumb_color: Color,
-    thumb_hover_color: Color,
-    #[prop(skip_setter)] scrollbar_state: Option<ScrollBarState>,
+    total: Option<Px>,
+    visible: Option<Px>,
+    offset: Option<Px>,
+    thickness: Option<Dp>,
+    state: Option<State<ScrollableController>>,
+    scrollbar_behavior: Option<ScrollBarBehavior>,
+    track_color: Option<Color>,
+    thumb_color: Option<Color>,
+    thumb_hover_color: Option<Color>,
+    scrollbar_state: Option<ScrollBarState>,
 ) {
+    let total = total.unwrap_or(Px::ZERO);
+    let visible = visible.unwrap_or(Px::ZERO);
+    let offset = offset.unwrap_or(Px::ZERO);
+    let thickness = thickness.unwrap_or(Dp(0.0));
+    let scrollbar_behavior = scrollbar_behavior.unwrap_or_default();
+    let track_color = track_color.unwrap_or(Color::TRANSPARENT);
+    let thumb_color = thumb_color.unwrap_or(Color::TRANSPARENT);
+    let thumb_hover_color = thumb_hover_color.unwrap_or(Color::TRANSPARENT);
     let state = state.expect("scrollbar_v requires state");
     let args = ScrollBarConfig {
         total,
@@ -864,11 +857,13 @@ pub fn scrollbar_v(
 
     // If scrollbar should be hidden, don't render anything
     if !should_show {
+        layout().layout_policy(ZeroLayout);
         return;
     }
 
     // Ensure the scrollbar is visible
     if args.visible <= Px::ZERO || args.total <= Px::ZERO || args.thickness <= Dp::ZERO {
+        layout().layout_policy(ZeroLayout);
         return;
     }
 
@@ -915,7 +910,7 @@ pub fn scrollbar_v(
     let progress = compute_thumb_progress(args.offset, args.total);
     let thumb_y = args.visible.to_f32() * progress;
 
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(ScrollBarVLayout {
             thumb_offset: Px::from_f32(thumb_y),
@@ -928,17 +923,25 @@ pub fn scrollbar_v(
 
 #[tessera]
 pub fn scrollbar_h(
-    total: Px,
-    visible: Px,
-    offset: Px,
-    thickness: Dp,
-    #[prop(skip_setter)] state: Option<State<ScrollableController>>,
-    scrollbar_behavior: ScrollBarBehavior,
-    track_color: Color,
-    thumb_color: Color,
-    thumb_hover_color: Color,
-    #[prop(skip_setter)] scrollbar_state: Option<ScrollBarState>,
+    total: Option<Px>,
+    visible: Option<Px>,
+    offset: Option<Px>,
+    thickness: Option<Dp>,
+    state: Option<State<ScrollableController>>,
+    scrollbar_behavior: Option<ScrollBarBehavior>,
+    track_color: Option<Color>,
+    thumb_color: Option<Color>,
+    thumb_hover_color: Option<Color>,
+    scrollbar_state: Option<ScrollBarState>,
 ) {
+    let total = total.unwrap_or(Px::ZERO);
+    let visible = visible.unwrap_or(Px::ZERO);
+    let offset = offset.unwrap_or(Px::ZERO);
+    let thickness = thickness.unwrap_or(Dp(0.0));
+    let scrollbar_behavior = scrollbar_behavior.unwrap_or_default();
+    let track_color = track_color.unwrap_or(Color::TRANSPARENT);
+    let thumb_color = thumb_color.unwrap_or(Color::TRANSPARENT);
+    let thumb_hover_color = thumb_hover_color.unwrap_or(Color::TRANSPARENT);
     let state = state.expect("scrollbar_h requires state");
     let args = ScrollBarConfig {
         total,
@@ -979,11 +982,13 @@ pub fn scrollbar_h(
 
     // If scrollbar should be hidden, don't render anything
     if !should_show {
+        layout().layout_policy(ZeroLayout);
         return;
     }
 
     // Ensure the scrollbar is visible
     if args.visible <= Px::ZERO || args.total <= Px::ZERO || args.thickness <= Dp::ZERO {
+        layout().layout_policy(ZeroLayout);
         return;
     }
 
@@ -1030,7 +1035,7 @@ pub fn scrollbar_h(
     let progress = compute_thumb_progress(args.offset, args.total);
     let thumb_x = args.visible.to_f32() * progress;
 
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(ScrollBarHLayout {
             thumb_offset: Px::from_f32(thumb_x),

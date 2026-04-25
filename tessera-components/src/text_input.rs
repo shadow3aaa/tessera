@@ -4,18 +4,18 @@
 //!
 //! Embed as a bare text input surface when you need to build custom styling.
 use glyphon::Action as GlyphonAction;
+use tessera_foundation::gesture::{ScrollRecognizer, ScrollResult, TapRecognizer};
 use tessera_ui::{
     AccessibilityActionHandler, AccessibilityNode, Callback, CallbackWith, Color, ComputedData, Dp,
     ImeInput, ImeInputModifierNode, ImeRequest, KeyboardInput, KeyboardInputModifierNode, Modifier,
     PointerInput, PointerInputModifierNode, Px, PxPosition, PxSize, SemanticsModifierNode, State,
     accesskit::{Action, Role},
-    layout::layout_primitive,
+    layout::layout,
     modifier::{CursorModifierExt as _, FocusModifierExt as _, ModifierCapabilityExt as _},
     remember, tessera, use_context, winit,
 };
 
 use crate::{
-    gesture_recognizer::{ScrollRecognizer, ScrollResult, TapRecognizer},
     modifier::ModifierExt as _,
     pos_misc::is_position_inside_bounds,
     shape_def::{RoundedCorner, Shape},
@@ -334,36 +334,77 @@ impl TextInputBuilder {
 /// ```
 #[tessera]
 pub fn text_input(
-    #[default(true)] enabled: bool,
-    read_only: bool,
-    modifier: Modifier,
+    enabled: Option<bool>,
+    read_only: Option<bool>,
+    modifier: Option<Modifier>,
     on_change: Option<CallbackWith<String, String>>,
     on_submit: Option<Callback>,
     min_width: Option<Dp>,
     min_height: Option<Dp>,
-    #[default(TextInputProps::default().background_color)] background_color: Option<Color>,
-    #[default(TextInputProps::default().border_width)] border_width: Dp,
-    #[default(TextInputProps::default().border_color)] border_color: Option<Color>,
-    #[default(TextInputProps::default().shape)] shape: Shape,
-    #[default(TextInputProps::default().padding)] padding: Dp,
-    #[default(TextInputProps::default().focus_border_color)] focus_border_color: Option<Color>,
+    background_color: Option<Color>,
+    border_width: Option<Dp>,
+    border_color: Option<Color>,
+    shape: Option<Shape>,
+    padding: Option<Dp>,
+    focus_border_color: Option<Color>,
     focus_border_width: Option<Dp>,
-    #[default(TextInputProps::default().focus_background_color)] focus_background_color: Option<
-        Color,
-    >,
-    #[default(TextInputProps::default().selection_color)] selection_color: Option<Color>,
-    #[default(TextInputProps::default().text_color)] text_color: Option<Color>,
-    #[default(TextInputProps::default().cursor_color)] cursor_color: Option<Color>,
+    focus_background_color: Option<Color>,
+    selection_color: Option<Color>,
+    text_color: Option<Color>,
+    cursor_color: Option<Color>,
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
     #[prop(into)] initial_text: Option<String>,
-    #[default(TextInputProps::default().font_size)] font_size: Dp,
+    font_size: Option<Dp>,
     line_height: Option<Dp>,
-    single_line: bool,
+    single_line: Option<bool>,
     input_transform: Option<CallbackWith<String, String>>,
     display_transform: Option<DisplayTransform>,
     controller: Option<State<TextInputController>>,
 ) {
+    let enabled = enabled.unwrap_or(true);
+    let read_only = read_only.unwrap_or(false);
+    let modifier = modifier.unwrap_or_default();
+    let background_color = if let Some(v) = background_color {
+        Some(v)
+    } else {
+        TextInputProps::default().background_color
+    };
+    let border_width = border_width.unwrap_or(TextInputProps::default().border_width);
+    let border_color = if let Some(v) = border_color {
+        Some(v)
+    } else {
+        TextInputProps::default().border_color
+    };
+    let shape = shape.unwrap_or(TextInputProps::default().shape);
+    let padding = padding.unwrap_or(TextInputProps::default().padding);
+    let focus_border_color = if let Some(v) = focus_border_color {
+        Some(v)
+    } else {
+        TextInputProps::default().focus_border_color
+    };
+    let focus_background_color = if let Some(v) = focus_background_color {
+        Some(v)
+    } else {
+        TextInputProps::default().focus_background_color
+    };
+    let selection_color = if let Some(v) = selection_color {
+        Some(v)
+    } else {
+        TextInputProps::default().selection_color
+    };
+    let text_color = if let Some(v) = text_color {
+        Some(v)
+    } else {
+        TextInputProps::default().text_color
+    };
+    let cursor_color = if let Some(v) = cursor_color {
+        Some(v)
+    } else {
+        TextInputProps::default().cursor_color
+    };
+    let font_size = font_size.unwrap_or(TextInputProps::default().font_size);
+    let single_line = single_line.unwrap_or(false);
     let args = TextInputProps {
         enabled,
         read_only,
@@ -427,9 +468,9 @@ pub fn text_input(
         scroll_recognizer,
     );
 
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let surface_args = editor_args.clone();
-        create_surface_args(&surface_args, &controller).with_child(move || {
+        create_surface_args(&surface_args, &controller).child(move || {
             text_input_padded_content()
                 .padding(surface_args.padding)
                 .controller(controller);
@@ -468,7 +509,7 @@ fn text_input_editor(props: TextInputProps) {
         scroll_recognizer,
     );
 
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         text_input_padded_content()
             .padding(editor_args.padding)
             .controller(controller);
@@ -476,9 +517,10 @@ fn text_input_editor(props: TextInputProps) {
 }
 
 #[tessera]
-fn text_input_padded_content(padding: Dp, controller: Option<State<TextInputController>>) {
+fn text_input_padded_content(padding: Option<Dp>, controller: Option<State<TextInputController>>) {
+    let padding = padding.unwrap_or(Dp(0.0));
     let controller = controller.expect("text_input_padded_content requires controller to be set");
-    layout_primitive()
+    layout()
         .modifier(Modifier::new().padding_all(padding))
         .child(move || {
             text_edit_core().controller(controller);
@@ -488,7 +530,7 @@ fn text_input_padded_content(padding: Dp, controller: Option<State<TextInputCont
 pub(crate) fn text_input_core(args: &TextInputProps, controller: State<TextInputController>) {
     let mut core_args = args.clone();
     core_args.controller = Some(controller);
-    text_input_editor().props(core_args);
+    text_input_editor(core_args);
 }
 
 fn sync_text_input_controller(controller: &State<TextInputController>, args: &TextInputProps) {
@@ -1358,8 +1400,8 @@ impl TextInputBuilder {
     /// ```
     pub fn outlined() -> Self {
         Self::simple()
-            .with_border_width(Dp(1.0))
-            .with_focus_border_color(Color::new(0.0, 0.5, 1.0, 1.0))
+            .border_width(Dp(1.0))
+            .focus_border_color(Color::new(0.0, 0.5, 1.0, 1.0))
     }
 
     /// Creates a text input with no border (minimal style).
@@ -1391,245 +1433,6 @@ impl TextInputBuilder {
                 bottom_right: RoundedCorner::manual(Dp(0.0), 3.0),
                 bottom_left: RoundedCorner::manual(Dp(0.0), 3.0),
             })
-    }
-}
-
-/// Builder methods for fluent API
-impl TextInputBuilder {
-    /// Sets the minimum width in Dp.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Dp;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_min_width(Dp(80.0));
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_min_width(self, min_width: Dp) -> Self {
-        self.min_width(min_width)
-    }
-
-    /// Sets the minimum height in Dp.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Dp;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_min_height(Dp(40.0));
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_min_height(self, min_height: Dp) -> Self {
-        self.min_height(min_height)
-    }
-
-    /// Sets the background color.
-    ///
-    /// # Example
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Color;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_background_color(Color::WHITE);
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_background_color(self, color: Color) -> Self {
-        self.background_color(color)
-    }
-
-    /// Sets the border width in pixels.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Dp;
-    ///
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_border_width(Dp(1.0));
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_border_width(self, width: Dp) -> Self {
-        self.border_width(width)
-    }
-
-    /// Sets the border color.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Color;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_border_color(Color::BLACK);
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_border_color(self, color: Color) -> Self {
-        self.border_color(color)
-    }
-
-    /// Sets the shape of the editor container.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::shape_def::{RoundedCorner, Shape};
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Dp;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_shape(Shape::RoundedRectangle {
-    ///     top_left: RoundedCorner::manual(Dp(8.0), 3.0),
-    ///     top_right: RoundedCorner::manual(Dp(8.0), 3.0),
-    ///     bottom_right: RoundedCorner::manual(Dp(8.0), 3.0),
-    ///     bottom_left: RoundedCorner::manual(Dp(8.0), 3.0),
-    /// });
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_shape(self, shape: Shape) -> Self {
-        self.shape(shape)
-    }
-
-    /// Sets the inner padding in Dp.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Dp;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_padding(Dp(12.0));
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_padding(self, padding: Dp) -> Self {
-        self.padding(padding)
-    }
-
-    /// Sets the border color when focused.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Color;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_focus_border_color(Color::new(0.0, 0.5, 1.0, 1.0));
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_focus_border_color(self, color: Color) -> Self {
-        self.focus_border_color(color)
-    }
-
-    /// Sets the background color when focused.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Color;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_focus_background_color(Color::WHITE);
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_focus_background_color(self, color: Color) -> Self {
-        self.focus_background_color(color)
-    }
-
-    /// Sets the selection highlight color.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use tessera_ui::tessera;
-    /// # #[tessera]
-    /// # fn component() {
-    /// use tessera_components::text_input::TextInputBuilder;
-    /// use tessera_ui::Color;
-    /// # use tessera_components::theme::{MaterialTheme, material_theme};
-    /// # material_theme()
-    /// #     .theme(|| MaterialTheme::default())
-    /// #     .child(|| {
-    /// let args = TextInputBuilder::simple().with_selection_color(Color::new(0.5, 0.7, 1.0, 0.4));
-    /// # });
-    /// # }
-    /// # component();
-    /// ```
-    pub fn with_selection_color(self, color: Color) -> Self {
-        self.selection_color(color)
     }
 }
 

@@ -4,12 +4,10 @@
 //!
 //! Use to indicate the completion of a task or a specific value in a range.
 use tessera_ui::{
-    Color, ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Modifier,
+    Color, ComputedData, Constraint, Dp, LayoutResult, MeasurementError, Modifier,
     ParentConstraint, Px, PxPosition,
     accesskit::Role,
-    layout::{
-        LayoutInput, LayoutOutput, LayoutPolicy, RenderInput, RenderPolicy, layout_primitive,
-    },
+    layout::{LayoutPolicy, MeasureScope, RenderInput, RenderPolicy, layout},
     receive_frame_nanos, remember, tessera,
     time::Instant,
     use_context,
@@ -49,18 +47,15 @@ struct LinearProgressLayout {
 }
 
 impl LayoutPolicy for LinearProgressLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
         let (self_width, self_height) = resolve_linear_size(input.parent_constraint());
         let is_butt = self.stroke_cap.effective_is_butt(self_width, self_height);
         let gap_fraction =
             adjusted_linear_gap_fraction(self_width, self_height, self.gap_size, is_butt);
         let child_height = self_height;
 
-        let children_ids = input.children_ids();
+        let children = input.children();
 
         if let Some(progress) = self.progress {
             let progress = if progress.is_nan() {
@@ -70,10 +65,10 @@ impl LayoutPolicy for LinearProgressLayout {
             };
             let track_start = progress + progress.min(gap_fraction);
 
-            let track_id = children_ids[0];
-            let indicator_id = children_ids[1];
+            let track = children[0];
+            let indicator = children[1];
             let stop_id = if self.draw_stop_indicator {
-                children_ids.get(2).copied()
+                children.get(2).copied()
             } else {
                 None
             };
@@ -81,48 +76,33 @@ impl LayoutPolicy for LinearProgressLayout {
             if let Some((x, w)) =
                 linear_segment_bounds(0.0, progress, self_width, self_height, is_butt)
             {
-                let constraint = Constraint::new(
-                    DimensionValue::Fixed(w),
-                    DimensionValue::Fixed(child_height),
-                );
-                input.measure_child(indicator_id, &constraint)?;
-                output.place_child(indicator_id, PxPosition::new(x, Px(0)));
+                let constraint = Constraint::new(w, child_height);
+                indicator.measure(&constraint)?;
+                result.place_child(indicator, PxPosition::new(x, Px(0)));
             } else {
-                let constraint = Constraint::new(
-                    DimensionValue::Fixed(Px(0)),
-                    DimensionValue::Fixed(child_height),
-                );
-                input.measure_child(indicator_id, &constraint)?;
-                output.place_child(indicator_id, PxPosition::new(Px(0), Px(0)));
+                let constraint = Constraint::new(Px(0), child_height);
+                indicator.measure(&constraint)?;
+                result.place_child(indicator, PxPosition::new(Px(0), Px(0)));
             }
 
             if track_start <= 1.0
                 && let Some((x, w)) =
                     linear_segment_bounds(track_start, 1.0, self_width, self_height, is_butt)
             {
-                let constraint = Constraint::new(
-                    DimensionValue::Fixed(w),
-                    DimensionValue::Fixed(child_height),
-                );
-                input.measure_child(track_id, &constraint)?;
-                output.place_child(track_id, PxPosition::new(x, Px(0)));
+                let constraint = Constraint::new(w, child_height);
+                track.measure(&constraint)?;
+                result.place_child(track, PxPosition::new(x, Px(0)));
             } else {
-                let constraint = Constraint::new(
-                    DimensionValue::Fixed(Px(0)),
-                    DimensionValue::Fixed(child_height),
-                );
-                input.measure_child(track_id, &constraint)?;
-                output.place_child(track_id, PxPosition::new(Px(0), Px(0)));
+                let constraint = Constraint::new(Px(0), child_height);
+                track.measure(&constraint)?;
+                result.place_child(track, PxPosition::new(Px(0), Px(0)));
             }
 
-            if let Some(stop_id) = stop_id {
+            if let Some(stop) = stop_id {
                 let (pos, stop_size) = stop_indicator_bounds(self_width, self_height);
-                let constraint = Constraint::new(
-                    DimensionValue::Fixed(stop_size),
-                    DimensionValue::Fixed(stop_size),
-                );
-                input.measure_child(stop_id, &constraint)?;
-                output.place_child(stop_id, pos);
+                let constraint = Constraint::new(stop_size, stop_size);
+                stop.measure(&constraint)?;
+                result.place_child(stop, pos);
             }
         } else {
             let cycle = self.animation_cycle.unwrap_or(0.0);
@@ -131,29 +111,26 @@ impl LayoutPolicy for LinearProgressLayout {
             let second_head = keyframe_0_to_1(cycle, 650, 850, 1750, emphasized_accelerate);
             let second_tail = keyframe_0_to_1(cycle, 900, 850, 1750, emphasized_accelerate);
 
-            let track_before_id = children_ids[0];
-            let line1_id = children_ids[1];
-            let track_between_id = children_ids[2];
-            let line2_id = children_ids[3];
-            let track_after_id = children_ids[4];
+            let track_before = children[0];
+            let line1 = children[1];
+            let track_between = children[2];
+            let line2 = children[3];
+            let track_after = children[4];
 
-            let mut set_segment = |node_id, start: f32, end: f32| -> Result<(), MeasurementError> {
+            let mut set_segment = |child: tessera_ui::layout::LayoutChild<'_>,
+                                   start: f32,
+                                   end: f32|
+             -> Result<(), MeasurementError> {
                 if let Some((x, w)) =
                     linear_segment_bounds(start, end, self_width, self_height, is_butt)
                 {
-                    let constraint = Constraint::new(
-                        DimensionValue::Fixed(w),
-                        DimensionValue::Fixed(child_height),
-                    );
-                    input.measure_child(node_id, &constraint)?;
-                    output.place_child(node_id, PxPosition::new(x, Px(0)));
+                    let constraint = Constraint::new(w, child_height);
+                    child.measure(&constraint)?;
+                    result.place_child(child, PxPosition::new(x, Px(0)));
                 } else {
-                    let constraint = Constraint::new(
-                        DimensionValue::Fixed(Px(0)),
-                        DimensionValue::Fixed(child_height),
-                    );
-                    input.measure_child(node_id, &constraint)?;
-                    output.place_child(node_id, PxPosition::new(Px(0), Px(0)));
+                    let constraint = Constraint::new(Px(0), child_height);
+                    child.measure(&constraint)?;
+                    result.place_child(child, PxPosition::new(Px(0), Px(0)));
                 }
                 Ok(())
             };
@@ -164,15 +141,15 @@ impl LayoutPolicy for LinearProgressLayout {
                 } else {
                     0.0
                 };
-                set_segment(track_before_id, start, 1.0)?;
+                set_segment(track_before, start, 1.0)?;
             } else {
-                set_segment(track_before_id, 0.0, 0.0)?;
+                set_segment(track_before, 0.0, 0.0)?;
             }
 
             if first_head - first_tail > 0.0 {
-                set_segment(line1_id, first_head, first_tail)?;
+                set_segment(line1, first_head, first_tail)?;
             } else {
-                set_segment(line1_id, 0.0, 0.0)?;
+                set_segment(line1, 0.0, 0.0)?;
             }
 
             if first_tail > gap_fraction {
@@ -186,15 +163,15 @@ impl LayoutPolicy for LinearProgressLayout {
                 } else {
                     1.0
                 };
-                set_segment(track_between_id, start, end)?;
+                set_segment(track_between, start, end)?;
             } else {
-                set_segment(track_between_id, 0.0, 0.0)?;
+                set_segment(track_between, 0.0, 0.0)?;
             }
 
             if second_head - second_tail > 0.0 {
-                set_segment(line2_id, second_head, second_tail)?;
+                set_segment(line2, second_head, second_tail)?;
             } else {
-                set_segment(line2_id, 0.0, 0.0)?;
+                set_segment(line2, 0.0, 0.0)?;
             }
 
             if second_tail > gap_fraction {
@@ -203,16 +180,16 @@ impl LayoutPolicy for LinearProgressLayout {
                 } else {
                     1.0
                 };
-                set_segment(track_after_id, 0.0, end)?;
+                set_segment(track_after, 0.0, end)?;
             } else {
-                set_segment(track_after_id, 0.0, 0.0)?;
+                set_segment(track_after, 0.0, 0.0)?;
             }
         }
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: self_width,
             height: self_height,
-        })
+        }))
     }
 }
 
@@ -229,21 +206,17 @@ struct CircularProgressLayout {
 }
 
 impl LayoutPolicy for CircularProgressLayout {
-    fn measure(
-        &self,
-        _input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
         let diameter_px = self.diameter.to_px();
-        Ok(ComputedData {
+        Ok(LayoutResult::new(ComputedData {
             width: diameter_px,
             height: diameter_px,
-        })
+        }))
     }
 }
 
 impl RenderPolicy for CircularProgressLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         let diameter_px = self.diameter.to_px();
         let stroke_px = self.stroke_width.to_px();
 
@@ -425,21 +398,11 @@ fn standard_easing(progress: f32) -> f32 {
     cubic_bezier_easing(progress, 0.2, 0.0, 0.0, 1.0)
 }
 
-fn resolve_dimension(dimension: DimensionValue, fallback: Px) -> Px {
-    match dimension {
-        DimensionValue::Fixed(px) => px,
-        DimensionValue::Fill { max, .. } | DimensionValue::Wrap { max, .. } => {
-            max.unwrap_or(fallback)
-        }
-    }
-}
-
 fn resolve_linear_size(parent: ParentConstraint<'_>) -> (Px, Px) {
     let fallback_width = ProgressIndicatorDefaults::LINEAR_INDICATOR_WIDTH.to_px();
     let fallback_height = ProgressIndicatorDefaults::LINEAR_INDICATOR_HEIGHT.to_px();
-    let merged = Constraint::new(parent.width(), parent.height()).merge(parent);
-    let width = resolve_dimension(merged.width, fallback_width);
-    let height = resolve_dimension(merged.height, fallback_height);
+    let width = parent.width().clamp(fallback_width);
+    let height = parent.height().clamp(fallback_height);
     (width, height)
 }
 
@@ -521,44 +484,6 @@ fn stop_indicator_bounds(width: Px, height: Px) -> (PxPosition, Px) {
     )
 }
 
-impl LinearProgressIndicatorBuilder {
-    /// Sets the modifier chain applied to the indicator subtree.
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    /// Sets the active indicator color.
-    pub fn color(mut self, color: Color) -> Self {
-        self.props.color = Some(color);
-        self
-    }
-
-    /// Sets the inactive track color.
-    pub fn track_color(mut self, track_color: Color) -> Self {
-        self.props.track_color = Some(track_color);
-        self
-    }
-
-    /// Sets the stroke cap used for the indicator ends.
-    pub fn stroke_cap(mut self, stroke_cap: ProgressStrokeCap) -> Self {
-        self.props.stroke_cap = Some(stroke_cap);
-        self
-    }
-
-    /// Sets the gap size between the active indicator and the track.
-    pub fn gap_size(mut self, gap_size: Dp) -> Self {
-        self.props.gap_size = Some(gap_size);
-        self
-    }
-
-    /// Sets whether to draw a stop indicator at the end of the track.
-    pub fn draw_stop_indicator(mut self, draw_stop_indicator: bool) -> Self {
-        self.props.draw_stop_indicator = Some(draw_stop_indicator);
-        self
-    }
-}
-
 /// # linear_progress_indicator
 ///
 /// Renders a Material Design progress indicator in a horizontal, linear form.
@@ -601,12 +526,12 @@ impl LinearProgressIndicatorBuilder {
 #[tessera]
 pub fn linear_progress_indicator(
     progress: Option<f32>,
-    #[prop(skip_setter)] modifier: Option<Modifier>,
-    #[prop(skip_setter)] color: Option<Color>,
-    #[prop(skip_setter)] track_color: Option<Color>,
-    #[prop(skip_setter)] stroke_cap: Option<ProgressStrokeCap>,
-    #[prop(skip_setter)] gap_size: Option<Dp>,
-    #[prop(skip_setter)] draw_stop_indicator: Option<bool>,
+    modifier: Option<Modifier>,
+    color: Option<Color>,
+    track_color: Option<Color>,
+    stroke_cap: Option<ProgressStrokeCap>,
+    gap_size: Option<Dp>,
+    draw_stop_indicator: Option<bool>,
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
 ) {
@@ -626,7 +551,7 @@ pub fn linear_progress_indicator(
     let gap_size = gap_size.unwrap_or(ProgressIndicatorDefaults::LINEAR_INDICATOR_TRACK_GAP_SIZE);
     let draw_stop_indicator = draw_stop_indicator.unwrap_or(true);
 
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let animation_start = remember(Instant::now);
         let frame_tick = remember(|| 0_u64);
         let should_receive_frames = remember(|| progress.is_none());
@@ -645,7 +570,7 @@ pub fn linear_progress_indicator(
         let segment_shape = if stroke_cap == ProgressStrokeCap::Butt {
             Shape::RECTANGLE
         } else {
-            Shape::capsule()
+            Shape::CAPSULE
         };
 
         let mut semantics = SemanticsArgs {
@@ -675,7 +600,7 @@ pub fn linear_progress_indicator(
             Some(linear_cycle_progress(animation_start.get(), 1750))
         };
 
-        layout_primitive()
+        layout()
             .modifier(Modifier::new().semantics(semantics))
             .layout_policy(LinearProgressLayout {
                 progress,
@@ -690,18 +615,18 @@ pub fn linear_progress_indicator(
                         .style(track_color.into())
                         .shape(segment_shape)
                         .modifier(Modifier::new().fill_max_size())
-                        .with_child(|| {});
+                        .child(|| {});
                     surface()
                         .style(color.into())
                         .shape(segment_shape)
                         .modifier(Modifier::new().fill_max_size())
-                        .with_child(|| {});
+                        .child(|| {});
                     if draw_stop_indicator {
                         surface()
                             .style(color.into())
                             .shape(stop_shape)
                             .modifier(Modifier::new().fill_max_size())
-                            .with_child(|| {});
+                            .child(|| {});
                     }
                 } else {
                     for (color, shape) in [
@@ -715,49 +640,11 @@ pub fn linear_progress_indicator(
                             .style(color.into())
                             .shape(shape)
                             .modifier(Modifier::new().fill_max_size())
-                            .with_child(|| {});
+                            .child(|| {});
                     }
                 }
             });
     });
-}
-
-impl CircularProgressIndicatorBuilder {
-    /// Sets the indicator diameter.
-    pub fn diameter(mut self, diameter: Dp) -> Self {
-        self.props.diameter = Some(diameter);
-        self
-    }
-
-    /// Sets the indicator stroke width.
-    pub fn stroke_width(mut self, stroke_width: Dp) -> Self {
-        self.props.stroke_width = Some(stroke_width);
-        self
-    }
-
-    /// Sets the active indicator color.
-    pub fn color(mut self, color: Color) -> Self {
-        self.props.color = Some(color);
-        self
-    }
-
-    /// Sets the track color.
-    pub fn track_color(mut self, track_color: Color) -> Self {
-        self.props.track_color = Some(track_color);
-        self
-    }
-
-    /// Sets the stroke cap.
-    pub fn stroke_cap(mut self, stroke_cap: ProgressStrokeCap) -> Self {
-        self.props.stroke_cap = Some(stroke_cap);
-        self
-    }
-
-    /// Sets the gap size between the active indicator and the track.
-    pub fn gap_size(mut self, gap_size: Dp) -> Self {
-        self.props.gap_size = Some(gap_size);
-        self
-    }
 }
 
 fn circular_gap_sweep_degrees(diameter: Dp, stroke_width: Dp, gap_size: Dp, is_butt: bool) -> f32 {
@@ -863,12 +750,12 @@ fn circular_indeterminate_progress(cycle_ms: f32) -> f32 {
 #[tessera]
 pub fn circular_progress_indicator(
     progress: Option<f32>,
-    #[prop(skip_setter)] diameter: Option<Dp>,
-    #[prop(skip_setter)] stroke_width: Option<Dp>,
-    #[prop(skip_setter)] color: Option<Color>,
-    #[prop(skip_setter)] track_color: Option<Color>,
-    #[prop(skip_setter)] stroke_cap: Option<ProgressStrokeCap>,
-    #[prop(skip_setter)] gap_size: Option<Dp>,
+    diameter: Option<Dp>,
+    stroke_width: Option<Dp>,
+    color: Option<Color>,
+    track_color: Option<Color>,
+    stroke_cap: Option<ProgressStrokeCap>,
+    gap_size: Option<Dp>,
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
 ) {
@@ -923,30 +810,10 @@ pub fn circular_progress_indicator(
         gap_size,
         animation_start: animation_start.get(),
     };
-    layout_primitive()
+    layout()
         .modifier(Modifier::new().semantics(semantics))
         .layout_policy(policy.clone())
         .render_policy(policy);
-}
-
-impl ProgressBuilder {
-    /// Sets the modifier chain applied to the progress bar subtree.
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    /// Sets the active part color.
-    pub fn progress_color(mut self, progress_color: Color) -> Self {
-        self.props.progress_color = Some(progress_color);
-        self
-    }
-
-    /// Sets the inactive track color.
-    pub fn track_color(mut self, track_color: Color) -> Self {
-        self.props.track_color = Some(track_color);
-        self
-    }
 }
 
 /// # progress
@@ -985,11 +852,12 @@ impl ProgressBuilder {
 /// ```
 #[tessera]
 pub fn progress(
-    value: f32,
-    #[prop(skip_setter)] modifier: Option<Modifier>,
-    #[prop(skip_setter)] progress_color: Option<Color>,
-    #[prop(skip_setter)] track_color: Option<Color>,
+    value: Option<f32>,
+    modifier: Option<Modifier>,
+    progress_color: Option<Color>,
+    track_color: Option<Color>,
 ) {
+    let value = value.unwrap_or(0.0);
     linear_progress_indicator()
         .progress(value)
         .modifier(modifier.unwrap_or_else(|| {

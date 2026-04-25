@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use tessera_ui::{
-    Callback, Color, ComputedData, DimensionValue, Dp, FocusRequester, FocusScopeNode,
-    FocusTraversalPolicy, MeasurementError, Modifier, ParentConstraint, Px, PxPosition, PxSize,
-    RenderSlot, State,
+    AxisConstraint, Callback, Color, ComputedData, Dp, FocusRequester, FocusScopeNode,
+    FocusTraversalPolicy, LayoutResult, MeasurementError, Modifier, ParentConstraint, Px,
+    PxPosition, PxSize, RenderSlot, State,
     accesskit::Role,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, layout_primitive},
+    layout::{LayoutPolicy, MeasureScope, layout},
     modifier::FocusModifierExt as _,
     provide_context, remember, tessera, use_context, winit,
 };
@@ -20,8 +20,9 @@ use crate::{
     alignment::CrossAxisAlignment,
     checkmark::checkmark,
     column::column,
-    icon::{IconContent, icon},
+    icon::icon,
     modifier::{ModifierExt as _, with_keyboard_input, with_pointer_input},
+    painter::Painter,
     pos_misc::is_position_in_rect,
     row::row,
     shape_def::Shape,
@@ -40,11 +41,8 @@ const MENU_LEADING_SIZE: Dp = Dp(20.0);
 const MENU_ITEM_HEIGHT: Dp = Dp(48.0);
 const MENU_TRAILING_SPACING: Dp = Dp(16.0);
 
-fn default_menu_width() -> DimensionValue {
-    DimensionValue::Wrap {
-        min: Some(Px::from(MENU_MIN_WIDTH)),
-        max: Some(Px::from(MENU_MAX_WIDTH)),
-    }
+fn default_menu_width() -> AxisConstraint {
+    AxisConstraint::new(Px::from(MENU_MIN_WIDTH), Some(Px::from(MENU_MAX_WIDTH)))
 }
 
 fn default_menu_modifier() -> Modifier {
@@ -247,34 +245,30 @@ impl PartialEq for MenuLayout {
 }
 
 impl LayoutPolicy for MenuLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let main_content_id = input
-            .children_ids()
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let child_constraint = input.parent_constraint().without_min();
+        let main_content = children
             .first()
             .copied()
             .expect("main content should exist");
-        let main_size = input.measure_child_in_parent_constraint(main_content_id)?;
-        output.place_child(main_content_id, PxPosition::new(Px::ZERO, Px::ZERO));
+        let main_size = main_content.measure(&child_constraint)?;
+        result.place_child(main_content, PxPosition::new(Px::ZERO, Px::ZERO));
 
-        let background_id = input
-            .children_ids()
+        let background = children
             .get(1)
             .copied()
             .expect("menu background should exist");
-        let menu_id = input
-            .children_ids()
-            .get(2)
-            .copied()
-            .expect("menu surface should exist");
+        let menu = children.get(2).copied().expect("menu surface should exist");
 
-        let background_size = input.measure_child_in_parent_constraint(background_id)?;
-        output.place_child(background_id, PxPosition::new(Px::ZERO, Px::ZERO));
+        let background_size = background.measure(&child_constraint)?;
+        result.place_child(background, PxPosition::new(Px::ZERO, Px::ZERO));
 
-        let menu_size = input.measure_child_in_parent_constraint(menu_id)?;
+        let menu_size = menu.measure(&child_constraint)?;
+        let background_size = background_size.size();
+        let menu_size = menu_size.size();
+        let main_size = main_size.size();
         let available = if background_size.width > Px::ZERO && background_size.height > Px::ZERO {
             background_size
         } else {
@@ -288,14 +282,14 @@ impl LayoutPolicy for MenuLayout {
         });
         let menu_position =
             resolve_menu_position(anchor, self.placement, menu_size, available, self.offset);
-        output.place_child(menu_id, menu_position);
+        result.place_child(menu, menu_position);
 
         *self.bounds.write() = Some(MenuBounds {
             origin: menu_position,
             size: menu_size,
         });
 
-        Ok(main_size)
+        Ok(result.with_size(main_size))
     }
 }
 
@@ -344,18 +338,8 @@ fn resolve_menu_position(
 }
 
 fn extract_available_size(constraint: ParentConstraint<'_>) -> ComputedData {
-    let width = match constraint.width() {
-        DimensionValue::Fixed(px) => px,
-        DimensionValue::Wrap { max, .. } | DimensionValue::Fill { max, .. } => {
-            max.unwrap_or(Px::MAX)
-        }
-    };
-    let height = match constraint.height() {
-        DimensionValue::Fixed(px) => px,
-        DimensionValue::Wrap { max, .. } | DimensionValue::Fill { max, .. } => {
-            max.unwrap_or(Px::MAX)
-        }
-    };
+    let width = constraint.width().resolve_max().unwrap_or(Px::MAX);
+    let height = constraint.height().resolve_max().unwrap_or(Px::MAX);
 
     ComputedData { width, height }
 }
@@ -415,7 +399,7 @@ fn apply_close_action(controller: State<MenuController>, on_dismiss: &Option<Cal
 ///     menus::{MenuPlacement, menu_item, menu_provider},
 ///     text::text,
 /// };
-/// use tessera_ui::{Callback, Dp};
+/// use tessera_ui::{Callback, Dp, LayoutResult};
 /// # use tessera_components::theme::{MaterialTheme, material_theme};
 ///
 /// # material_theme()
@@ -447,12 +431,13 @@ pub fn menu_provider(
     close_on_background: Option<bool>,
     close_on_escape: Option<bool>,
     on_dismiss: Option<Callback>,
-    is_open: bool,
+    is_open: Option<bool>,
     controller: Option<State<MenuController>>,
     focus_restorer_fallback: Option<FocusRequester>,
     main_content: Option<RenderSlot>,
     menu_content: Option<RenderSlot>,
 ) {
+    let is_open = is_open.unwrap_or(false);
     let provider_args = MenuProviderConfig {
         placement: placement.unwrap_or_default(),
         offset: offset.unwrap_or([Dp(0.0), MENU_VERTICAL_GAP]),
@@ -541,7 +526,7 @@ pub fn menu_provider(
     }
 
     // Measurement: place main content, background, and menu based on anchor.
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(MenuLayout {
             placement: provider_args.placement,
@@ -559,7 +544,7 @@ pub fn menu_provider(
                 })
                 .modifier(Modifier::new().fill_max_size())
                 .block_input(true)
-                .with_child(|| {});
+                .child(|| {});
 
             menu_panel()
                 .provider(provider_args.clone())
@@ -571,11 +556,13 @@ pub fn menu_provider(
 
 #[tessera]
 fn menu_panel(
-    provider: MenuProviderConfig,
+    provider: Option<MenuProviderConfig>,
     controller: Option<State<MenuController>>,
     menu_content: Option<RenderSlot>,
-    just_opened: bool,
+    just_opened: Option<bool>,
 ) {
+    let provider = provider.unwrap_or_default();
+    let just_opened = just_opened.unwrap_or(false);
     let controller = controller.expect("menu_panel requires controller");
     let menu_content = menu_content.expect("menu_panel requires menu content");
     let focus_scope = remember(FocusScopeNode::new).get();
@@ -634,7 +621,7 @@ fn menu_panel(
         focus_scope.restore_focus();
     }
 
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let menu_content = menu_content;
         surface()
             .style(SurfaceStyle::Filled {
@@ -647,17 +634,14 @@ fn menu_panel(
                     .clone()
                     .constrain(
                         None,
-                        Some(DimensionValue::Wrap {
-                            min: None,
-                            max: provider.max_height,
-                        }),
+                        Some(AxisConstraint::new(Px::ZERO, provider.max_height)),
                     )
                     .clip_to_bounds(),
             )
             .accessibility_role(Role::Menu)
             .block_input(true)
             .elevation(provider.elevation)
-            .with_child(move || {
+            .child(move || {
                 let menu_content = menu_content;
                 provide_context(
                     || controller,
@@ -679,8 +663,8 @@ struct MenuItemConfig {
     pub label: String,
     pub supporting_text: Option<String>,
     pub trailing_text: Option<String>,
-    pub leading_icon: Option<IconContent>,
-    pub trailing_icon: Option<IconContent>,
+    pub leading_icon: Option<Painter>,
+    pub trailing_icon: Option<Painter>,
     pub submenu_content: Option<RenderSlot>,
     pub submenu_placement: MenuPlacement,
     pub selected: bool,
@@ -782,14 +766,14 @@ impl Default for MenuItemConfig {
 /// ```
 #[tessera]
 pub fn menu_item(
-    #[prop(into)] label: String,
+    #[prop(into)] label: Option<String>,
     #[prop(into)] supporting_text: Option<String>,
     #[prop(into)] trailing_text: Option<String>,
-    #[prop(into)] leading_icon: Option<IconContent>,
-    #[prop(into)] trailing_icon: Option<IconContent>,
+    #[prop(into)] leading_icon: Option<Painter>,
+    #[prop(into)] trailing_icon: Option<Painter>,
     submenu_content: Option<RenderSlot>,
     submenu_placement: Option<MenuPlacement>,
-    selected: bool,
+    selected: Option<bool>,
     enabled: Option<bool>,
     close_on_click: Option<bool>,
     height: Option<Dp>,
@@ -798,6 +782,8 @@ pub fn menu_item(
     disabled_color: Option<Color>,
     on_click: Option<Callback>,
 ) {
+    let label = label.unwrap_or_default();
+    let selected = selected.unwrap_or(false);
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -881,7 +867,7 @@ fn render_labels(args: &MenuItemConfig, enabled: bool) {
     let supporting_text = args.supporting_text.clone();
 
     column()
-        .modifier(Modifier::new().constrain(Some(DimensionValue::WRAP), None))
+        .modifier(Modifier::new())
         .cross_axis_alignment(CrossAxisAlignment::Start)
         .children(move || {
             {
@@ -927,23 +913,17 @@ fn render_trailing(args: &MenuItemConfig, enabled: bool) {
     }
 }
 
-fn render_menu_icon(content: IconContent, tint: Color) {
-    match content {
-        IconContent::Vector(data) => {
-            icon().vector(data).size(MENU_LEADING_SIZE).tint(tint);
-        }
-        IconContent::Raster(data) => {
-            icon().raster(data).size(MENU_LEADING_SIZE).tint(tint);
-        }
-    }
+fn render_menu_icon(content: Painter, tint: Color) {
+    icon().painter(content).size(MENU_LEADING_SIZE).tint(tint);
 }
 
 #[tessera]
 fn menu_item_surface(
-    item: MenuItemConfig,
+    item: Option<MenuItemConfig>,
     submenu_controller: Option<State<MenuController>>,
     focus_requester: Option<FocusRequester>,
 ) {
+    let item = item.unwrap_or_default();
     let enabled = item.enabled && (item.on_click.is_some() || item.submenu_content.is_some());
     let has_submenu = item.submenu_content.is_some();
     let keyboard_submenu_controller = submenu_controller;
@@ -990,19 +970,17 @@ fn menu_item_surface(
         Modifier::new()
     };
 
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let mut surface_args = surface()
             .style(SurfaceStyle::Filled {
                 color: Color::TRANSPARENT,
             })
             .enabled(enabled)
-            .modifier(Modifier::new().constrain(
-                Some(DimensionValue::FILLED),
-                Some(DimensionValue::Wrap {
-                    min: Some(Px::from(item.height)),
-                    max: None,
-                }),
-            ))
+            .modifier(
+                Modifier::new()
+                    .fill_max_width()
+                    .constrain(None, Some(AxisConstraint::at_least(Px::from(item.height)))),
+            )
             .accessibility_role(Role::MenuItem)
             .accessibility_label(item.label.clone())
             .block_input(true)
@@ -1034,22 +1012,19 @@ fn menu_item_surface(
         }
 
         let item_for_child = item.clone();
-        surface_args.with_child(move || {
+        surface_args.child(move || {
             let item_for_row = item_for_child.clone();
             row()
-                .modifier(Modifier::new().constrain(
-                    Some(DimensionValue::FILLED),
-                    Some(DimensionValue::Wrap {
-                        min: Some(Px::from(item_for_child.height)),
-                        max: None,
-                    }),
+                .modifier(Modifier::new().fill_max_width().constrain(
+                    None,
+                    Some(AxisConstraint::at_least(Px::from(item_for_child.height))),
                 ))
                 .cross_axis_alignment(CrossAxisAlignment::Center)
                 .children(move || {
                     let item_for_child = item_for_row.clone();
                     {
                         spacer().modifier(Modifier::new().constrain(
-                            Some(DimensionValue::Fixed(Px::from(MENU_HORIZONTAL_PADDING))),
+                            Some(AxisConstraint::exact(Px::from(MENU_HORIZONTAL_PADDING))),
                             None,
                         ));
                     };
@@ -1061,7 +1036,7 @@ fn menu_item_surface(
 
                     {
                         spacer().modifier(Modifier::new().constrain(
-                            Some(DimensionValue::Fixed(Px::from(MENU_HORIZONTAL_PADDING))),
+                            Some(AxisConstraint::exact(Px::from(MENU_HORIZONTAL_PADDING))),
                             None,
                         ));
                     };
@@ -1084,14 +1059,14 @@ fn menu_item_surface(
 
                         {
                             spacer().modifier(Modifier::new().constrain(
-                                Some(DimensionValue::Fixed(Px::from(MENU_TRAILING_SPACING))),
+                                Some(AxisConstraint::exact(Px::from(MENU_TRAILING_SPACING))),
                                 None,
                             ));
                         };
                     } else {
                         {
                             spacer().modifier(Modifier::new().constrain(
-                                Some(DimensionValue::Fixed(Px::from(MENU_HORIZONTAL_PADDING))),
+                                Some(AxisConstraint::exact(Px::from(MENU_HORIZONTAL_PADDING))),
                                 None,
                             ));
                         };
@@ -1102,7 +1077,8 @@ fn menu_item_surface(
 }
 
 #[tessera]
-fn menu_item_inner(args: MenuItemConfig) {
+fn menu_item_inner(args: Option<MenuItemConfig>) {
+    let args = args.unwrap_or_default();
     let submenu_content = args.submenu_content;
 
     if let Some(submenu_content) = submenu_content {

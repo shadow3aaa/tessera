@@ -2,25 +2,27 @@
 //!
 //! ## Usage
 //!
-//! Use to organize content into separate pages that can be switched between.
+//! Use to organize related destinations into a horizontal tab strip.
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use tessera_foundation::gesture::{ScrollRecognizer, ScrollSettings};
 use tessera_ui::{
-    Color, ComputedData, Constraint, DimensionValue, Dp, FocusProperties, FocusRequester,
-    FocusState, MeasurementError, Modifier, Px, PxPosition, RenderSlot, State,
+    AxisConstraint, Color, ComputedData, Constraint, Dp, FocusRequester, FocusState, LayoutResult,
+    MeasurementError, Modifier, Px, PxPosition, RenderSlot, State,
     accesskit::Role,
-    layout::{
-        LayoutInput, LayoutOutput, LayoutPolicy, RenderInput, RenderPolicy, layout_primitive,
-    },
+    layout::{LayoutPolicy, MeasureScope, RenderInput, RenderPolicy, layout},
     modifier::FocusModifierExt as _,
-    receive_frame_nanos, remember, tessera, use_context,
+    provide_context, receive_frame_nanos, remember, tessera, use_context,
 };
 
 use crate::{
     alignment::{Alignment, CrossAxisAlignment, MainAxisAlignment},
     boxed::boxed,
     column::column,
-    gesture_recognizer::{ScrollRecognizer, ScrollSettings},
-    icon::{IconContent, icon as icon_component},
+    icon::icon as icon_component,
     modifier::{ModifierExt, SemanticsArgs, with_pointer_input},
+    painter::Painter,
     shape_def::Shape,
     spacer::spacer,
     surface::surface,
@@ -135,48 +137,26 @@ impl Spring1D {
     }
 }
 
-fn clamp_wrap(min: Option<Px>, max: Option<Px>, measure: Px) -> Px {
-    min.unwrap_or(Px(0))
-        .max(measure)
-        .min(max.unwrap_or(Px::MAX))
-}
-
-fn fill_value(min: Option<Px>, max: Option<Px>, measure: Px) -> Px {
-    max.expect("Seems that you are trying to fill an infinite dimension, which is not allowed")
-        .max(measure)
-        .max(min.unwrap_or(Px(0)))
-}
-
 fn clamp_px(value: Px, min: Px, max: Option<Px>) -> Px {
     let clamped_max = max.unwrap_or(value);
     Px(value.0.max(min.0).min(clamped_max.0))
 }
 
-fn resolve_dimension(dim: DimensionValue, measure: Px) -> Px {
-    match dim {
-        DimensionValue::Fixed(v) => v,
-        DimensionValue::Wrap { min, max } => clamp_wrap(min, max, measure),
-        DimensionValue::Fill { min, max } => fill_value(min, max, measure),
-    }
-}
-
 /// Controller for the `tabs` component.
 ///
-/// Tracks the active tab index, previous index, animation progress and cached
-/// values used to animate the indicator and content scrolling.
+/// Tracks the active tab index and cached values used to animate the indicator
+/// and tab-row scrolling.
 #[derive(Clone, PartialEq)]
 pub struct TabsController {
     active_tab: usize,
     indicator_x: Spring1D,
     indicator_width: Spring1D,
-    content_scroll_offset: Spring1D,
     tab_row_scroll_offset: Spring1D,
     tab_row_scroll_max: Px,
     tab_row_scroll_user_overridden: bool,
     tab_bar_height: Px,
     last_frame_nanos: Option<u64>,
     indicator_initialized: bool,
-    content_scroll_initialized: bool,
     tab_row_scroll_initialized: bool,
     pending_retarget_frame: bool,
 }
@@ -188,14 +168,12 @@ impl TabsController {
             active_tab: initial_tab,
             indicator_x: Spring1D::new(0.0),
             indicator_width: Spring1D::new(0.0),
-            content_scroll_offset: Spring1D::new(0.0),
             tab_row_scroll_offset: Spring1D::new(0.0),
             tab_row_scroll_max: Px(0),
             tab_row_scroll_user_overridden: false,
             tab_bar_height: Px(0),
             last_frame_nanos: None,
             indicator_initialized: false,
-            content_scroll_initialized: false,
             tab_row_scroll_initialized: false,
             pending_retarget_frame: false,
         }
@@ -262,21 +240,6 @@ impl TabsController {
         self.tab_row_scroll_offset.value_px()
     }
 
-    fn set_content_scroll_target(&mut self, target: Px) {
-        self.pending_retarget_frame = false;
-        if !self.content_scroll_initialized {
-            self.content_scroll_offset.snap_to(target.to_f32());
-            self.content_scroll_initialized = true;
-        } else {
-            self.last_frame_nanos = None;
-            self.content_scroll_offset.set_target(target.to_f32());
-        }
-    }
-
-    fn content_scroll_px(&self) -> Px {
-        self.content_scroll_offset.value_px()
-    }
-
     fn set_indicator_targets(&mut self, width: Px, x: Px) {
         self.pending_retarget_frame = false;
         let width = width.max(Px(0)).to_f32();
@@ -312,11 +275,6 @@ impl TabsController {
             .update(dt, DEFAULT_SPATIAL_STIFFNESS, DEFAULT_SPATIAL_DAMPING_RATIO);
         self.indicator_width
             .update(dt, DEFAULT_SPATIAL_STIFFNESS, DEFAULT_SPATIAL_DAMPING_RATIO);
-        self.content_scroll_offset.update(
-            dt,
-            DEFAULT_SPATIAL_STIFFNESS,
-            DEFAULT_SPATIAL_DAMPING_RATIO,
-        );
         self.tab_row_scroll_offset.update(
             dt,
             DEFAULT_SPATIAL_STIFFNESS,
@@ -328,7 +286,6 @@ impl TabsController {
         self.pending_retarget_frame
             || self.indicator_x.is_animating()
             || self.indicator_width.is_animating()
-            || self.content_scroll_offset.is_animating()
             || self.tab_row_scroll_offset.is_animating()
     }
 }
@@ -339,27 +296,10 @@ impl Default for TabsController {
     }
 }
 
-/// A single tab item rendered by [`tabs`].
-#[derive(Clone, PartialEq)]
-pub struct TabItem {
-    title: TabTitle,
-    content: RenderSlot,
-}
-
-#[derive(Clone, PartialEq)]
-enum TabTitle {
-    Custom(RenderSlot),
-    Label {
-        text: String,
-        icon: Option<IconContent>,
-    },
-}
-
 #[derive(Clone, PartialEq)]
 struct TabsConfig {
     modifier: Modifier,
     variant: TabsVariant,
-    initial_active_tab: usize,
     indicator_color: Color,
     container_color: Color,
     active_content_color: Color,
@@ -375,67 +315,161 @@ struct TabsConfig {
     scrollable: bool,
     edge_padding: Dp,
     min_scrollable_tab_width: Dp,
-    items: Vec<TabItem>,
 }
 
-impl TabsBuilder {
-    /// Adds a tab with its title and content builders.
-    pub fn child<F1, F2>(mut self, title: F1, content: F2) -> Self
-    where
-        F1: Fn() + Send + Sync + 'static,
-        F2: Fn() + Send + Sync + 'static,
-    {
-        self.props.items.push(TabItem {
-            title: TabTitle::Custom(RenderSlot::new(title)),
-            content: RenderSlot::new(content),
-        });
-        self
-    }
+#[derive(Clone)]
+struct TabsCompositionContext {
+    controller: State<TabsController>,
+    active_tab: usize,
+    enabled: bool,
+    active_content_color: Color,
+    inactive_content_color: Color,
+    disabled_content_color: Color,
+    ripple_color: Color,
+    min_tab_height: Dp,
+    tab_padding: Dp,
+    next_index: Arc<Mutex<usize>>,
+}
 
-    /// Adds a tab whose title is rendered with the standard Material label
-    /// layout.
-    pub fn child_label<F>(mut self, text: impl Into<String>, content: F) -> Self
+#[derive(Clone, PartialEq)]
+enum TabTitle {
+    Custom(RenderSlot),
+    Label { text: String, icon: Option<Painter> },
+}
+
+impl TabBuilder {
+    /// Set a custom title slot for the tab and clear built-in label state.
+    pub fn title<F>(mut self, title: F) -> Self
     where
         F: Fn() + Send + Sync + 'static,
     {
-        self.props.items.push(TabItem {
-            title: TabTitle::Label {
-                text: text.into(),
-                icon: None,
-            },
-            content: RenderSlot::new(content),
-        });
+        self.props.title_slot = Some(RenderSlot::new(title));
+        self.props.label_text = None;
+        self.props.label_icon = None;
         self
     }
 
-    /// Adds a tab whose title is rendered with an icon and standard Material
-    /// label layout.
-    pub fn child_label_with_icon<F>(
-        mut self,
-        text: impl Into<String>,
-        icon: impl Into<IconContent>,
-        content: F,
-    ) -> Self
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        self.props.items.push(TabItem {
-            title: TabTitle::Label {
-                text: text.into(),
-                icon: Some(icon.into()),
-            },
-            content: RenderSlot::new(content),
-        });
+    /// Set a shared custom title slot for the tab and clear built-in label
+    /// state.
+    pub fn title_shared(mut self, title: impl Into<RenderSlot>) -> Self {
+        self.props.title_slot = Some(title.into());
+        self.props.label_text = None;
+        self.props.label_icon = None;
         self
+    }
+
+    /// Set the built-in Material text label for the tab and clear any custom
+    /// title slot.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.props.title_slot = None;
+        self.props.label_text = Some(label.into());
+        self
+    }
+
+    /// Set the built-in Material icon for the tab and clear any custom title
+    /// slot.
+    pub fn icon(mut self, icon: impl Into<Painter>) -> Self {
+        self.props.title_slot = None;
+        self.props.label_icon = Some(icon.into());
+        self
+    }
+
+    /// Set the built-in Material label and icon for the tab.
+    pub fn label_with_icon(self, label: impl Into<String>, icon: impl Into<Painter>) -> Self {
+        self.label(label).icon(icon)
     }
 }
 
-impl TabLabelBuilder {
-    /// Set the optional icon shown above the label text.
-    pub fn icon(mut self, icon: impl Into<IconContent>) -> Self {
-        self.props.icon = Some(icon.into());
-        self
-    }
+/// # tab
+///
+/// Renders a single tab inside [`tabs`].
+///
+/// ## Usage
+///
+/// Use inside a `tabs().content(...)` slot to declare one tab-strip item.
+///
+/// ## Parameters
+///
+/// - `title` — custom title slot rendered in the tab row.
+/// - `label` — built-in Material text label for the tab.
+/// - `icon` — built-in Material icon for the tab.
+///
+/// ## Examples
+///
+/// ```
+/// use tessera_components::tabs::{tab, tabs};
+/// use tessera_components::text::text;
+/// use tessera_ui::tessera;
+/// # use tessera_components::theme::{MaterialTheme, material_theme};
+///
+/// #[tessera]
+/// fn demo() {
+/// #     material_theme()
+/// #         .theme(|| MaterialTheme::default())
+/// #         .child(|| {
+///     tabs().content(|| {
+///         tab().label("Home");
+///     });
+/// #         });
+/// }
+/// ```
+#[tessera]
+pub fn tab(
+    #[prop(skip_setter)] title_slot: Option<RenderSlot>,
+    #[prop(skip_setter)] label_text: Option<String>,
+    #[prop(skip_setter)] label_icon: Option<Painter>,
+) {
+    let composition = use_context::<TabsCompositionContext>()
+        .expect("tab must be used inside tabs")
+        .get();
+    let index = {
+        let mut next_index = composition.next_index.lock();
+        let index = *next_index;
+        *next_index += 1;
+        index
+    };
+    let title = if let Some(title_slot) = title_slot {
+        TabTitle::Custom(title_slot)
+    } else if label_text.is_some() || label_icon.is_some() {
+        TabTitle::Label {
+            text: label_text.unwrap_or_default(),
+            icon: label_icon,
+        }
+    } else {
+        panic!("tab requires title(), label(), icon(), or label_with_icon()");
+    };
+    let accessibility_label = match &title {
+        TabTitle::Label { text, .. } => Some(text.clone()),
+        _ => None,
+    };
+    let label_color = if !composition.enabled {
+        composition.disabled_content_color
+    } else if index == composition.active_tab {
+        composition.active_content_color
+    } else {
+        composition.inactive_content_color
+    };
+    let tab_height = match &title {
+        TabTitle::Label {
+            text,
+            icon: Some(_),
+        } if !text.is_empty() => TabsDefaults::LARGE_TAB_HEIGHT,
+        _ => composition.min_tab_height,
+    };
+    let focus_requester = remember(FocusRequester::new).get();
+
+    tab_trigger(TabTriggerArgs {
+        controller: composition.controller,
+        title,
+        enabled: composition.enabled,
+        index,
+        focus_requester,
+        label_color,
+        ripple_color: composition.ripple_color,
+        tab_height,
+        tab_padding: composition.tab_padding,
+        accessibility_label,
+    });
 }
 
 /// # tab_label
@@ -471,11 +505,12 @@ impl TabLabelBuilder {
 /// ```
 #[tessera]
 pub fn tab_label(
-    #[prop(into)] text: String,
-    #[prop(skip_setter)] icon: Option<IconContent>,
+    #[prop(into)] text: Option<String>,
+    #[prop(into)] icon: Option<Painter>,
     horizontal_text_padding: Option<Dp>,
     icon_size: Option<Dp>,
 ) {
+    let text = text.unwrap_or_default();
     let typography = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -491,9 +526,6 @@ pub fn tab_label(
     let text_content = text.clone();
     let icon_size = icon_size.unwrap_or(Dp(24.0));
     let horizontal_padding = horizontal_text_padding.unwrap_or(TabsDefaults::TAB_PADDING);
-    let font_size = style.font_size;
-    let line_height = style.line_height.unwrap_or(Dp(style.font_size.0 * 1.2));
-
     // Determine container height based on content type
     let small_height = TabsDefaults::MIN_TAB_HEIGHT;
     let large_height = TabsDefaults::LARGE_TAB_HEIGHT;
@@ -506,11 +538,8 @@ pub fn tab_label(
     // Use boxed to center the content within the tab
     let modifier = Modifier::new()
         .constrain(
-            Some(DimensionValue::Wrap {
-                min: None,
-                max: None,
-            }),
-            Some(DimensionValue::Fixed(container_height.into())),
+            Some(AxisConstraint::NONE),
+            Some(AxisConstraint::exact(container_height.into())),
         )
         .padding_symmetric(horizontal_padding, Dp(0.0));
 
@@ -525,34 +554,21 @@ pub fn tab_label(
                     column()
                         .main_axis_alignment(MainAxisAlignment::Center)
                         .cross_axis_alignment(CrossAxisAlignment::Center)
-                        .modifier(
-                            Modifier::new()
-                                .constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP)),
-                        )
+                        .modifier(Modifier::new())
                         .children(move || {
                             let icon_content = icon_content.clone();
                             {
                                 if let Some(ic) = icon_content.clone() {
-                                    match ic {
-                                        IconContent::Vector(data) => {
-                                            icon_component()
-                                                .vector(data)
-                                                .size(icon_size)
-                                                .tint(content_color);
-                                        }
-                                        IconContent::Raster(data) => {
-                                            icon_component()
-                                                .raster(data)
-                                                .size(icon_size)
-                                                .tint(content_color);
-                                        }
-                                    }
+                                    icon_component()
+                                        .painter(ic)
+                                        .size(icon_size)
+                                        .tint(content_color);
                                 }
                             };
                             {
                                 spacer().modifier(Modifier::new().constrain(
-                                    Some(DimensionValue::Fixed(Px(0))),
-                                    Some(DimensionValue::Fixed(Dp(2.0).into())),
+                                    Some(AxisConstraint::exact(Px(0))),
+                                    Some(AxisConstraint::exact(Dp(2.0).into())),
                                 ));
                             };
                             let text_content = text_content.clone();
@@ -560,106 +576,29 @@ pub fn tab_label(
                                 text_component()
                                     .content(text_content.clone())
                                     .color(content_color)
-                                    .size(font_size)
-                                    .line_height(line_height);
+                                    .style(style);
                             };
                         });
                 } else if has_icon {
                     if let Some(ic) = icon_content.clone() {
-                        match ic {
-                            IconContent::Vector(data) => {
-                                icon_component()
-                                    .vector(data)
-                                    .size(icon_size)
-                                    .tint(content_color);
-                            }
-                            IconContent::Raster(data) => {
-                                icon_component()
-                                    .raster(data)
-                                    .size(icon_size)
-                                    .tint(content_color);
-                            }
-                        }
+                        icon_component()
+                            .painter(ic)
+                            .size(icon_size)
+                            .tint(content_color);
                     }
                 } else if has_text {
                     text_component()
                         .content(text_content.clone())
                         .color(content_color)
-                        .size(font_size)
-                        .line_height(line_height);
+                        .style(style);
                 }
             };
         });
 }
 
 #[derive(Clone)]
-struct TabsContentLayout {
-    scroll_offset: Px,
-}
-
-impl PartialEq for TabsContentLayout {
-    fn eq(&self, other: &Self) -> bool {
-        self.scroll_offset == other.scroll_offset
-    }
-}
-
-impl LayoutPolicy for TabsContentLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let mut max_height = Px(0);
-        let container_width = resolve_dimension(input.parent_constraint().width(), Px(0));
-
-        for &child_id in input.children_ids().iter() {
-            let child_constraint = Constraint::new(
-                DimensionValue::Fixed(container_width),
-                DimensionValue::Wrap {
-                    min: None,
-                    max: None,
-                },
-            );
-            let child_size = input.measure_child(child_id, &child_constraint)?;
-            max_height = max_height.max(child_size.height);
-        }
-
-        let mut current_x = self.scroll_offset;
-        for &child_id in input.children_ids().iter() {
-            output.place_child(child_id, PxPosition::new(current_x, Px(0)));
-            current_x += container_width;
-        }
-
-        Ok(ComputedData {
-            width: container_width,
-            height: max_height,
-        })
-    }
-}
-
-impl RenderPolicy for TabsContentLayout {
-    fn record(&self, input: &RenderInput<'_>) {
-        input.metadata_mut().set_clips_children(true);
-    }
-}
-
-fn render_tabs_content_container(scroll_offset: Px, children: Vec<RenderSlot>) {
-    let policy = TabsContentLayout { scroll_offset };
-    layout_primitive()
-        .layout_policy(policy.clone())
-        .render_policy(policy)
-        .child(move || {
-            for child in &children {
-                child.render();
-            }
-        });
-}
-
-#[derive(Clone)]
 struct TabsLayout {
     args: TabsConfig,
-    num_tabs: usize,
-    active_tab: usize,
     controller: State<TabsController>,
     tab_row_scroll_px: Px,
     indicator_x_px: Px,
@@ -668,9 +607,7 @@ struct TabsLayout {
 
 impl PartialEq for TabsLayout {
     fn eq(&self, other: &Self) -> bool {
-        self.num_tabs == other.num_tabs
-            && self.active_tab == other.active_tab
-            && self.tab_row_scroll_px == other.tab_row_scroll_px
+        self.tab_row_scroll_px == other.tab_row_scroll_px
             && self.indicator_x_px == other.indicator_x_px
             && self.indicator_width_px == other.indicator_width_px
             && self.args.variant == other.args.variant
@@ -686,29 +623,24 @@ impl PartialEq for TabsLayout {
 }
 
 impl LayoutPolicy for TabsLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let tabs_effective_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let parent_constraint = *input.parent_constraint().as_ref();
 
-        let container_id = input.children_ids()[0];
-        let divider_id = input.children_ids()[1];
-        let indicator_id = input.children_ids()[2];
-        let title_ids = &input.children_ids()[3..=self.num_tabs + 2];
-        let content_container_id = input.children_ids()[self.num_tabs + 3];
+        let container = children[0];
+        let divider = children[1];
+        let indicator = children[2];
+        let title_ids = &children[3..];
+        let num_tabs = title_ids.len();
+        let active_tab = self
+            .controller
+            .with(|controller| controller.active_tab())
+            .min(num_tabs.saturating_sub(1));
 
         let horizontal_padding = self.args.tab_padding.to_px().to_f32() * 2.0;
         let indicator_min_width: Px = self.args.indicator_min_width.into();
-        let available_width = match tabs_effective_constraint.width {
-            DimensionValue::Fixed(v) => Some(v),
-            DimensionValue::Wrap { max, .. } => max,
-            DimensionValue::Fill { max, .. } => max,
-        };
+        let available_width = parent_constraint.width.resolve_max();
 
         let is_scrollable = self.args.scrollable || available_width.is_none();
         let match_content_size = matches!(self.args.variant, TabsVariant::Primary);
@@ -721,63 +653,39 @@ impl LayoutPolicy for TabsLayout {
             indicator_widths,
             titles_max_height,
             scroll_target,
-        ) = if !is_scrollable {
+        ): (Px, Px, Vec<Px>, Vec<Px>, Vec<Px>, Px, Px) = if !is_scrollable {
             let final_width = available_width.unwrap_or(Px(0));
-            let tab_width = if self.num_tabs == 0 {
+            let tab_width = if num_tabs == 0 {
                 Px(0)
             } else {
-                Px(final_width.0 / self.num_tabs as i32)
+                Px(final_width.0 / num_tabs as i32)
             };
-
-            let measure_constraints: Vec<_> = title_ids
-                .iter()
-                .map(|&id| {
-                    (
-                        id,
-                        Constraint::new(
-                            DimensionValue::Fixed(tab_width),
-                            DimensionValue::Wrap {
-                                min: None,
-                                max: None,
-                            },
-                        ),
-                    )
-                })
-                .collect();
-            let title_results = input.measure_children_untracked(measure_constraints)?;
 
             let mut titles_max_height = Px(0);
             for &title_id in title_ids {
-                if let Some(result) = title_results.get(&title_id) {
-                    titles_max_height = titles_max_height.max(result.height);
-                }
+                let result = title_id.measure_untracked(&Constraint::new(
+                    AxisConstraint::exact(tab_width),
+                    AxisConstraint::NONE,
+                ))?;
+                titles_max_height = titles_max_height.max(result.height);
             }
 
-            let intrinsic_constraints: Vec<_> = title_ids
+            let intrinsic_results: Vec<_> = title_ids
                 .iter()
                 .map(|&id| {
-                    (
-                        id,
-                        Constraint::new(
-                            DimensionValue::Wrap {
-                                min: None,
-                                max: Some(tab_width),
-                            },
-                            DimensionValue::Fixed(titles_max_height),
-                        ),
-                    )
+                    id.measure_untracked(&Constraint::new(
+                        AxisConstraint::at_most(tab_width),
+                        AxisConstraint::exact(titles_max_height),
+                    ))
                 })
-                .collect();
-            let intrinsic_results = input.measure_children_untracked(intrinsic_constraints)?;
+                .collect::<Result<_, _>>()?;
 
             let indicator_widths: Vec<Px> = title_ids
                 .iter()
-                .map(|id| {
+                .enumerate()
+                .map(|(idx, _id)| {
                     if match_content_size {
-                        let intrinsic_width = intrinsic_results
-                            .get(id)
-                            .map_or(Px(0), |s| s.width)
-                            .min(tab_width);
+                        let intrinsic_width = intrinsic_results[idx].width.min(tab_width);
                         let content_width =
                             (intrinsic_width.to_f32() - horizontal_padding).max(0.0);
                         Px::saturating_from_f32(content_width).max(indicator_min_width)
@@ -787,8 +695,8 @@ impl LayoutPolicy for TabsLayout {
                 })
                 .collect();
 
-            let tab_widths = vec![tab_width; self.num_tabs];
-            let tab_lefts: Vec<Px> = (0..self.num_tabs)
+            let tab_widths: Vec<Px> = vec![tab_width; num_tabs];
+            let tab_lefts: Vec<Px> = (0..num_tabs)
                 .map(|index| Px(index as i32 * tab_width.0))
                 .collect();
 
@@ -805,60 +713,32 @@ impl LayoutPolicy for TabsLayout {
             let min_tab_width: Px = self.args.min_scrollable_tab_width.into();
             let edge_padding: Px = self.args.edge_padding.into();
 
-            let measure_constraints: Vec<_> = title_ids
-                .iter()
-                .map(|&id| {
-                    (
-                        id,
-                        Constraint::new(
-                            DimensionValue::Wrap {
-                                min: Some(min_tab_width),
-                                max: None,
-                            },
-                            DimensionValue::Wrap {
-                                min: None,
-                                max: None,
-                            },
-                        ),
-                    )
-                })
-                .collect();
-            let title_results = input.measure_children_untracked(measure_constraints)?;
-
-            let mut tab_widths = Vec::with_capacity(self.num_tabs);
+            let mut tab_widths = Vec::with_capacity(num_tabs);
             let mut titles_max_height = Px(0);
             for &title_id in title_ids {
-                if let Some(result) = title_results.get(&title_id) {
-                    tab_widths.push(result.width);
-                    titles_max_height = titles_max_height.max(result.height);
-                }
+                let result = title_id.measure_untracked(&Constraint::new(
+                    AxisConstraint::at_least(min_tab_width),
+                    AxisConstraint::NONE,
+                ))?;
+                tab_widths.push(result.width);
+                titles_max_height = titles_max_height.max(result.height);
             }
 
-            let intrinsic_constraints: Vec<_> = title_ids
+            let intrinsic_results: Vec<_> = title_ids
                 .iter()
                 .map(|&id| {
-                    (
-                        id,
-                        Constraint::new(
-                            DimensionValue::Wrap {
-                                min: None,
-                                max: None,
-                            },
-                            DimensionValue::Fixed(titles_max_height),
-                        ),
-                    )
+                    id.measure_untracked(&Constraint::new(
+                        AxisConstraint::NONE,
+                        AxisConstraint::exact(titles_max_height),
+                    ))
                 })
-                .collect();
-            let intrinsic_results = input.measure_children_untracked(intrinsic_constraints)?;
+                .collect::<Result<_, _>>()?;
 
-            let mut indicator_widths = Vec::with_capacity(self.num_tabs);
-            for (idx, &title_id) in title_ids.iter().enumerate() {
+            let mut indicator_widths = Vec::with_capacity(num_tabs);
+            for (idx, &_title_id) in title_ids.iter().enumerate() {
                 let tab_width = tab_widths.get(idx).copied().unwrap_or(Px(0));
                 if match_content_size {
-                    let intrinsic_width = intrinsic_results
-                        .get(&title_id)
-                        .map_or(Px(0), |s| s.width)
-                        .min(tab_width);
+                    let intrinsic_width = intrinsic_results[idx].width.min(tab_width);
                     let content_width = (intrinsic_width.to_f32() - horizontal_padding).max(0.0);
                     let indicator_width =
                         Px::saturating_from_f32(content_width).max(indicator_min_width);
@@ -868,7 +748,7 @@ impl LayoutPolicy for TabsLayout {
                 }
             }
 
-            let mut tab_lefts = Vec::with_capacity(self.num_tabs);
+            let mut tab_lefts = Vec::with_capacity(num_tabs);
             let mut left = edge_padding;
             for width in &tab_widths {
                 tab_lefts.push(left);
@@ -894,11 +774,8 @@ impl LayoutPolicy for TabsLayout {
                     .with_mut(|c| c.set_tab_row_scroll_bounds(max_scroll));
             }
 
-            let selected_left = tab_lefts
-                .get(self.active_tab)
-                .copied()
-                .unwrap_or(edge_padding);
-            let selected_width = tab_widths.get(self.active_tab).copied().unwrap_or(Px(0));
+            let selected_left = tab_lefts.get(active_tab).copied().unwrap_or(edge_padding);
+            let selected_width = tab_widths.get(active_tab).copied().unwrap_or(Px(0));
             let selected_center = selected_left + Px(selected_width.0.saturating_div(2));
             let target_scroll_f = (selected_center.to_f32() - final_width.to_f32() / 2.0)
                 .clamp(0.0, max_scroll.to_f32());
@@ -914,27 +791,6 @@ impl LayoutPolicy for TabsLayout {
                 scroll_target,
             )
         };
-
-        let content_container_constraint = Constraint::new(
-            DimensionValue::Fixed(final_width),
-            DimensionValue::Wrap {
-                min: None,
-                max: None,
-            },
-        );
-        let content_container_size =
-            input.measure_child(content_container_id, &content_container_constraint)?;
-
-        let page_width = content_container_size.width;
-        let target_offset = -Px(self.active_tab as i32 * page_width.0);
-        let should_update_content_scroll = self.controller.with(|c| {
-            !c.content_scroll_initialized
-                || (c.content_scroll_offset.target - target_offset.to_f32()).abs() > f32::EPSILON
-        });
-        if should_update_content_scroll {
-            self.controller
-                .with_mut(|c| c.set_content_scroll_target(target_offset));
-        }
 
         if is_scrollable {
             let should_update_tab_row_scroll_target = self.controller.with(|c| {
@@ -956,18 +812,15 @@ impl LayoutPolicy for TabsLayout {
         };
 
         let (indicator_width, indicator_x) = {
-            let desired_width = indicator_widths
-                .get(self.active_tab)
-                .copied()
-                .unwrap_or(Px(0));
+            let desired_width = indicator_widths.get(active_tab).copied().unwrap_or(Px(0));
             let clamped_width = clamp_px(
                 desired_width,
                 self.args.indicator_min_width.into(),
                 self.args.indicator_max_width.map(|v| v.into()),
             );
 
-            let tab_left = tab_lefts.get(self.active_tab).copied().unwrap_or(Px(0));
-            let tab_width = tab_widths.get(self.active_tab).copied().unwrap_or(Px(0));
+            let tab_left = tab_lefts.get(active_tab).copied().unwrap_or(Px(0));
+            let tab_width = tab_widths.get(active_tab).copied().unwrap_or(Px(0));
 
             let centered_x = tab_left + Px((tab_width.0 - clamped_width.0) / 2);
 
@@ -988,10 +841,10 @@ impl LayoutPolicy for TabsLayout {
 
         let indicator_height: Px = self.args.indicator_height.into();
         let indicator_constraint = Constraint::new(
-            DimensionValue::Fixed(indicator_width),
-            DimensionValue::Fixed(indicator_height),
+            AxisConstraint::exact(indicator_width),
+            AxisConstraint::exact(indicator_height),
         );
-        let _ = input.measure_child(indicator_id, &indicator_constraint)?;
+        let _ = indicator.measure(&indicator_constraint)?;
 
         let divider_height: Px = TabsDefaults::DIVIDER_HEIGHT.into();
         let divider_width = if is_scrollable {
@@ -1000,10 +853,10 @@ impl LayoutPolicy for TabsLayout {
             final_width
         };
         let divider_constraint = Constraint::new(
-            DimensionValue::Fixed(divider_width),
-            DimensionValue::Fixed(divider_height),
+            AxisConstraint::exact(divider_width),
+            AxisConstraint::exact(divider_height),
         );
-        let _ = input.measure_child(divider_id, &divider_constraint)?;
+        let _ = divider.measure(&divider_constraint)?;
 
         let tab_bar_height = titles_max_height.max(self.args.min_tab_height.into());
         let should_update_tab_bar_height =
@@ -1012,38 +865,30 @@ impl LayoutPolicy for TabsLayout {
             self.controller
                 .with_mut(|c| c.set_tab_bar_height(tab_bar_height));
         }
-        let final_height = tab_bar_height + content_container_size.height;
+        let final_height = tab_bar_height;
         let title_offset_y = Px((tab_bar_height.0 - titles_max_height.0) / 2).max(Px(0));
 
-        let title_constraints: Vec<_> = title_ids
-            .iter()
-            .enumerate()
-            .map(|(idx, &id)| {
-                (
-                    id,
-                    Constraint::new(
-                        DimensionValue::Fixed(tab_widths.get(idx).copied().unwrap_or(Px(0))),
-                        DimensionValue::Fixed(tab_bar_height),
-                    ),
-                )
-            })
-            .collect();
-        let _ = input.measure_children(title_constraints)?;
+        for (idx, &title_id) in title_ids.iter().enumerate() {
+            let _ = title_id.measure(&Constraint::new(
+                AxisConstraint::exact(tab_widths.get(idx).copied().unwrap_or(Px(0))),
+                AxisConstraint::exact(tab_bar_height),
+            ))?;
+        }
 
         let container_constraint = Constraint::new(
-            DimensionValue::Fixed(final_width),
-            DimensionValue::Fixed(tab_bar_height),
+            AxisConstraint::exact(final_width),
+            AxisConstraint::exact(tab_bar_height),
         );
-        let _ = input.measure_child(container_id, &container_constraint)?;
+        let _ = container.measure(&container_constraint)?;
 
         for (i, &title_id) in title_ids.iter().enumerate() {
             let x = tab_lefts.get(i).copied().unwrap_or(Px(0)) - current_scroll_px;
-            output.place_child(title_id, PxPosition::new(x, title_offset_y));
+            result.place_child(title_id, PxPosition::new(x, title_offset_y));
         }
 
-        output.place_child(container_id, PxPosition::new(Px(0), Px(0)));
-        output.place_child(
-            divider_id,
+        result.place_child(container, PxPosition::new(Px(0), Px(0)));
+        result.place_child(
+            divider,
             PxPosition::new(
                 if is_scrollable {
                     -current_scroll_px
@@ -1053,43 +898,44 @@ impl LayoutPolicy for TabsLayout {
                 tab_bar_height - divider_height,
             ),
         );
-        output.place_child(
-            indicator_id,
+        result.place_child(
+            indicator,
             PxPosition::new(
                 indicator_x - current_scroll_px,
                 tab_bar_height - indicator_height,
             ),
         );
 
-        output.place_child(content_container_id, PxPosition::new(Px(0), tab_bar_height));
-
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: final_width,
             height: final_height,
-        })
+        }))
     }
 }
 
 impl RenderPolicy for TabsLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         input.metadata_mut().set_clips_children(true);
     }
 }
 
 /// # tabs
 ///
-/// Renders a set of tabs with corresponding content pages.
+/// Renders a Material tab row.
 ///
 /// ## Usage
 ///
-/// Display a row of tab titles and a content area that switches between
-/// different views.
+/// Show a row of related destinations and render the selected page outside the
+/// tab row.
 ///
 /// ## Parameters
 ///
 /// - `modifier` — modifier chain applied to the tabs subtree.
 /// - `variant` — visual variant of the tab row.
-/// - `initial_active_tab` — index of the initially selected tab.
+/// - `controller` — optional external controller used to read or drive the
+///   active tab.
+/// - `initial_active_tab` — index of the initially selected tab when no
+///   external controller is provided.
 /// - `indicator_color` — optional override for the active indicator color.
 /// - `container_color` — optional override for the tab row background color.
 /// - `active_content_color` — optional override for active tab content color.
@@ -1108,13 +954,16 @@ impl RenderPolicy for TabsLayout {
 /// - `edge_padding` — optional override for scrollable edge padding.
 /// - `min_scrollable_tab_width` — optional override for minimum scrollable tab
 ///   width.
-/// - `items` — tabs added through the builder methods.
+/// - `content` — tab declarations rendered inside the tab row.
 ///
 /// ## Examples
 ///
 /// ```
-/// use tessera_components::{tabs::tabs, text::text};
-/// use tessera_ui::{Dp, tessera};
+/// use tessera_components::{
+///     tabs::{TabsController, tab, tabs},
+///     text::text,
+/// };
+/// use tessera_ui::{LayoutResult, remember, tessera};
 /// # use tessera_components::theme::{MaterialTheme, material_theme};
 ///
 /// #[tessera]
@@ -1122,32 +971,28 @@ impl RenderPolicy for TabsLayout {
 /// #     material_theme()
 /// #         .theme(|| MaterialTheme::default())
 /// #         .child(|| {
-///     tabs()
-///         .initial_active_tab(1)
-///         .child(
-///             || {
-///                 text().content("Flights").size(Dp(14.0));
-///             },
-///             || {
-///                 text().content("Content for Flights");
-///             },
-///         )
-///         .child(
-///             || {
-///                 text().content("Hotel").size(Dp(14.0));
-///             },
-///             || {
-///                 text().content("Content for Hotel");
-///             },
-///         );
+///     let controller = remember(|| TabsController::new(1));
+///     let active_tab = controller.with(|controller| controller.active_tab());
+///
+///     tabs().controller(controller).content(|| {
+///         tab().label("Flights");
+///         tab().label("Hotel");
+///     });
+///
+///     if active_tab == 0 {
+///         text().content("Content for Flights");
+///     } else {
+///         text().content("Content for Hotel");
+///     }
 /// #         });
 /// }
 /// ```
 #[tessera]
 pub fn tabs(
-    modifier: Modifier,
-    variant: TabsVariant,
-    initial_active_tab: usize,
+    modifier: Option<Modifier>,
+    variant: Option<TabsVariant>,
+    controller: Option<State<TabsController>>,
+    initial_active_tab: Option<usize>,
     indicator_color: Option<Color>,
     container_color: Option<Color>,
     active_content_color: Option<Color>,
@@ -1160,11 +1005,16 @@ pub fn tabs(
     enabled: Option<bool>,
     disabled_content_color: Option<Color>,
     divider_color: Option<Color>,
-    scrollable: bool,
+    scrollable: Option<bool>,
     edge_padding: Option<Dp>,
     min_scrollable_tab_width: Option<Dp>,
-    #[prop(skip_setter)] items: Vec<TabItem>,
+    content: Option<RenderSlot>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let variant = variant.unwrap_or_default();
+    let initial_active_tab = initial_active_tab.unwrap_or(0);
+    let scrollable = scrollable.unwrap_or(false);
+    let content = content.unwrap_or_else(RenderSlot::empty);
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -1172,7 +1022,6 @@ pub fn tabs(
     let config = TabsConfig {
         modifier,
         variant,
-        initial_active_tab,
         indicator_color: indicator_color.unwrap_or(scheme.primary),
         container_color: container_color.unwrap_or(scheme.surface),
         active_content_color: active_content_color.unwrap_or(scheme.primary),
@@ -1190,32 +1039,13 @@ pub fn tabs(
         edge_padding: edge_padding.unwrap_or(TabsDefaults::SCROLLABLE_EDGE_PADDING),
         min_scrollable_tab_width: min_scrollable_tab_width
             .unwrap_or(TabsDefaults::SCROLLABLE_MIN_TAB_WIDTH),
-        items: items.clone(),
     };
-    let controller = remember(|| TabsController::new(config.initial_active_tab));
-    render_tabs(config, controller);
+    let controller =
+        controller.unwrap_or_else(|| remember(|| TabsController::new(initial_active_tab)));
+    render_tabs(config, controller, content);
 }
 
-fn render_tabs(args: TabsConfig, controller: State<TabsController>) {
-    let tabs = args.items.clone();
-
-    let num_tabs = tabs.len();
-    if num_tabs == 0 {
-        return;
-    }
-    let active_tab = controller
-        .with(|c| c.active_tab())
-        .min(num_tabs.saturating_sub(1));
-
-    let (title_closures, content_closures): (Vec<_>, Vec<_>) =
-        tabs.into_iter().map(|def| (def.title, def.content)).unzip();
-    let tab_focus_requesters = remember(Vec::<FocusRequester>::new);
-    let tab_focus_requesters = tab_focus_requesters.with_mut(|requesters| {
-        requesters.resize_with(num_tabs, FocusRequester::new);
-        requesters.truncate(num_tabs);
-        requesters.clone()
-    });
-
+fn render_tabs(args: TabsConfig, controller: State<TabsController>, content: RenderSlot) {
     let indicator_shape = match args.variant {
         TabsVariant::Primary => Shape::rounded_rectangle(Dp(3.0)),
         TabsVariant::Secondary => Shape::RECTANGLE,
@@ -1236,7 +1066,6 @@ fn render_tabs(args: TabsConfig, controller: State<TabsController>) {
             }
         });
     }
-    let scroll_offset = controller.with(|c| c.content_scroll_px());
     let tab_row_scroll_px = controller.with(|c| c.tab_row_scroll_px());
     let indicator_x_px = controller.with(|c| c.indicator_x_px());
     let indicator_width_px = controller.with(|c| c.indicator_width_px());
@@ -1286,74 +1115,51 @@ fn render_tabs(args: TabsConfig, controller: State<TabsController>) {
 
     let policy = TabsLayout {
         args: layout_args,
-        num_tabs,
-        active_tab,
         controller,
         tab_row_scroll_px,
         indicator_x_px,
         indicator_width_px,
     };
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(policy.clone())
         .render_policy(policy)
         .child(move || {
-            let content_closures = content_closures.clone();
             surface()
                 .style(args.container_color.into())
                 .modifier(Modifier::new().fill_max_size())
                 .shape(Shape::RECTANGLE)
-                .with_child(|| {});
+                .child(|| {});
 
             surface()
                 .style(args.divider_color.into())
                 .modifier(Modifier::new().fill_max_size())
                 .shape(Shape::RECTANGLE)
-                .with_child(|| {});
+                .child(|| {});
 
             surface()
                 .style(args.indicator_color.into())
                 .modifier(Modifier::new().fill_max_size())
                 .shape(indicator_shape)
-                .with_child(|| {});
+                .child(|| {});
 
-            for (index, child) in title_closures.iter().cloned().enumerate() {
-                let label_color = if !args.enabled {
-                    args.disabled_content_color
-                } else if index == active_tab {
-                    args.active_content_color
-                } else {
-                    args.inactive_content_color
-                };
-
-                let tab_height = match &child {
-                    TabTitle::Label {
-                        text,
-                        icon: Some(_),
-                    } if !text.is_empty() => TabsDefaults::LARGE_TAB_HEIGHT,
-                    _ => args.min_tab_height,
-                };
-                let focus_requester = tab_focus_requesters[index];
-                let previous_focus_requester =
-                    tab_focus_requesters[(index + num_tabs.saturating_sub(1)) % num_tabs];
-                let next_focus_requester = tab_focus_requesters[(index + 1) % num_tabs];
-
-                tab_trigger(TabTriggerArgs {
+            provide_context(
+                || TabsCompositionContext {
                     controller,
-                    title: child,
+                    active_tab: controller.with(|controller| controller.active_tab()),
                     enabled: args.enabled,
-                    index,
-                    focus_requester,
-                    previous_focus_requester,
-                    next_focus_requester,
-                    label_color,
+                    active_content_color: args.active_content_color,
+                    inactive_content_color: args.inactive_content_color,
+                    disabled_content_color: args.disabled_content_color,
                     ripple_color,
-                    tab_height,
+                    min_tab_height: args.min_tab_height,
                     tab_padding: args.tab_padding,
-                });
-            }
-
-            render_tabs_content_container(scroll_offset, content_closures);
+                    next_index: Arc::new(Mutex::new(0)),
+                },
+                move || {
+                    content.render();
+                },
+            );
         });
 }
 
@@ -1363,17 +1169,16 @@ struct TabTriggerArgs {
     enabled: bool,
     index: usize,
     focus_requester: FocusRequester,
-    previous_focus_requester: FocusRequester,
-    next_focus_requester: FocusRequester,
     label_color: Color,
     ripple_color: Color,
     tab_height: Dp,
     tab_padding: Dp,
+    accessibility_label: Option<String>,
 }
 
 fn tab_trigger(args: TabTriggerArgs) {
     let tab_modifier = Modifier::new()
-        .constrain(None, Some(DimensionValue::Fixed(args.tab_height.into())))
+        .constrain(None, Some(AxisConstraint::exact(args.tab_height.into())))
         .focus_group()
         .on_focus_changed(move |focus_state: FocusState| {
             if !focus_state.has_focus() {
@@ -1389,12 +1194,7 @@ fn tab_trigger(args: TabTriggerArgs) {
             }
         });
 
-    let accessibility_label = match &args.title {
-        TabTitle::Label { text, .. } => Some(text.clone()),
-        _ => None,
-    };
-
-    match (args.enabled, accessibility_label) {
+    match (args.enabled, args.accessibility_label.clone()) {
         (true, Some(label)) => {
             surface()
                 .style(Color::TRANSPARENT.into())
@@ -1408,16 +1208,11 @@ fn tab_trigger(args: TabTriggerArgs) {
                 .accessibility_role(tessera_ui::accesskit::Role::Tab)
                 .accessibility_focusable(true)
                 .accessibility_label(label)
-                .focus_properties(
-                    FocusProperties::new()
-                        .left(args.previous_focus_requester)
-                        .right(args.next_focus_requester),
-                )
                 .on_click(move || {
                     args.controller
                         .with_mut(|state| state.set_active_tab(args.index));
                 })
-                .with_child(move || {
+                .child(move || {
                     render_tab_title(args.title.clone(), args.tab_padding);
                 });
         }
@@ -1433,16 +1228,11 @@ fn tab_trigger(args: TabTriggerArgs) {
                 .focus_requester(args.focus_requester)
                 .accessibility_role(tessera_ui::accesskit::Role::Tab)
                 .accessibility_focusable(true)
-                .focus_properties(
-                    FocusProperties::new()
-                        .left(args.previous_focus_requester)
-                        .right(args.next_focus_requester),
-                )
                 .on_click(move || {
                     args.controller
                         .with_mut(|state| state.set_active_tab(args.index));
                 })
-                .with_child(move || {
+                .child(move || {
                     render_tab_title(args.title.clone(), args.tab_padding);
                 });
         }
@@ -1459,7 +1249,7 @@ fn tab_trigger(args: TabTriggerArgs) {
                 .accessibility_role(tessera_ui::accesskit::Role::Tab)
                 .accessibility_focusable(true)
                 .accessibility_label(label)
-                .with_child(move || {
+                .child(move || {
                     render_tab_title(args.title.clone(), args.tab_padding);
                 });
         }
@@ -1475,7 +1265,7 @@ fn tab_trigger(args: TabTriggerArgs) {
                 .focus_requester(args.focus_requester)
                 .accessibility_role(tessera_ui::accesskit::Role::Tab)
                 .accessibility_focusable(true)
-                .with_child(move || {
+                .child(move || {
                     render_tab_title(args.title.clone(), args.tab_padding);
                 });
         }

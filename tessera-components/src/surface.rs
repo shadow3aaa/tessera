@@ -4,14 +4,12 @@
 //!
 //! Use as a base for buttons, cards, or any styled and interactive region.
 use tessera_ui::{
-    Callback, Color, ComputedData, Constraint, DimensionValue, Dp, FocusProperties, FocusRequester,
+    Callback, Color, ComputedData, Constraint, Dp, FocusProperties, FocusRequester, LayoutResult,
     MeasurementError, Modifier, PointerInput, PointerInputModifierNode, Px, PxPosition, PxSize,
     RenderSlot, State,
     accesskit::Role,
     current_frame_nanos,
-    layout::{
-        LayoutInput, LayoutOutput, LayoutPolicy, RenderInput, RenderPolicy, layout_primitive,
-    },
+    layout::{LayoutPolicy, MeasureScope, RenderInput, RenderPolicy, layout},
     modifier::ModifierCapabilityExt as _,
     provide_context, receive_frame_nanos, remember, tessera, use_context,
 };
@@ -128,39 +126,8 @@ impl From<Color> for SurfaceStyle {
 }
 
 impl SurfaceBuilder {
-    /// Creates props from base args and a child render function.
-    pub fn with_child(mut self, child: impl Fn() + Send + Sync + 'static) -> Self {
-        self.props.child = Some(RenderSlot::new(child));
-        self
-    }
-
     pub(crate) fn set_ripple_state(&mut self, state: Option<State<RippleState>>) {
         self.props.ripple_state = state;
-    }
-
-    pub(crate) fn ripple_state_internal(mut self, state: Option<State<RippleState>>) -> Self {
-        self.props.ripple_state = state;
-        self
-    }
-}
-
-impl SurfaceContentBuilder {
-    fn resolved_internal(mut self, resolved: SurfaceResolvedArgs) -> Self {
-        self.props.resolved = Some(resolved);
-        self
-    }
-
-    fn interaction_state_internal(
-        mut self,
-        interaction_state: Option<State<InteractionState>>,
-    ) -> Self {
-        self.props.interaction_state = interaction_state;
-        self
-    }
-
-    fn ripple_state_internal(mut self, ripple_state: Option<State<RippleState>>) -> Self {
-        self.props.ripple_state = ripple_state;
-        self
     }
 }
 
@@ -515,46 +482,11 @@ fn try_build_simple_rect_command(
 }
 
 fn compute_surface_size(
-    effective_surface_constraint: Constraint,
+    parent_constraint: Constraint,
     child_measurement: ComputedData,
 ) -> (Px, Px) {
-    fn clamp_wrap(min: Option<Px>, max: Option<Px>, min_measure: Px) -> Px {
-        min.unwrap_or(Px(0))
-            .max(min_measure)
-            .min(max.unwrap_or(Px::MAX))
-    }
-
-    fn fill_value(min: Option<Px>, max: Px, min_measure: Px) -> Px {
-        max.max(min_measure).max(min.unwrap_or(Px(0)))
-    }
-
-    let width = match effective_surface_constraint.width {
-        DimensionValue::Fixed(value) => value,
-        DimensionValue::Wrap { min, max } => clamp_wrap(min, max, child_measurement.width),
-        DimensionValue::Fill {
-            min,
-            max: Some(max),
-        } => fill_value(min, max, child_measurement.width),
-        DimensionValue::Fill { .. } => {
-            panic!(
-                "Seems that you are trying to fill an infinite dimension, which is not allowed\nsurface width = Fill without max\nconstraint = {effective_surface_constraint:?}\nchild_measurement = {child_measurement:?}"
-            )
-        }
-    };
-
-    let height = match effective_surface_constraint.height {
-        DimensionValue::Fixed(value) => value,
-        DimensionValue::Wrap { min, max } => clamp_wrap(min, max, child_measurement.height),
-        DimensionValue::Fill {
-            min,
-            max: Some(max),
-        } => fill_value(min, max, child_measurement.height),
-        DimensionValue::Fill { .. } => {
-            panic!(
-                "Seems that you are trying to fill an infinite dimension, which is not allowed\nsurface height = Fill without max\nconstraint = {effective_surface_constraint:?}\nchild_measurement = {child_measurement:?}"
-            )
-        }
-    };
+    let width = parent_constraint.width.clamp(child_measurement.width);
+    let height = parent_constraint.height.clamp(child_measurement.height);
 
     (width, height)
 }
@@ -575,28 +507,17 @@ impl PartialEq for SurfaceLayout {
 }
 
 impl LayoutPolicy for SurfaceLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let effective_surface_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let parent_constraint = *input.parent_constraint().as_ref();
+        let child_constraint = input.parent_constraint().without_min();
+        let children = input.children();
 
-        let child_measurement = if !input.children_ids().is_empty() {
-            let child_measurements = input.measure_children(
-                input
-                    .children_ids()
-                    .iter()
-                    .copied()
-                    .map(|node_id| (node_id, effective_surface_constraint))
-                    .collect(),
-            )?;
+        let child_measurement = if !children.is_empty() {
             let mut max_width = Px::ZERO;
             let mut max_height = Px::ZERO;
-            for measurement in child_measurements.values() {
+            for &child in &children {
+                let measurement = child.measure(&child_constraint)?;
                 max_width = max_width.max(measurement.width);
                 max_height = max_height.max(measurement.height);
             }
@@ -611,9 +532,9 @@ impl LayoutPolicy for SurfaceLayout {
             }
         };
 
-        let (width, height) = compute_surface_size(effective_surface_constraint, child_measurement);
+        let (width, height) = compute_surface_size(parent_constraint, child_measurement);
 
-        if !input.children_ids().is_empty() {
+        if !children.is_empty() {
             let (extra_x, extra_y) = compute_content_offset(
                 self.args.content_alignment,
                 width,
@@ -625,17 +546,17 @@ impl LayoutPolicy for SurfaceLayout {
                 x: extra_x,
                 y: extra_y,
             };
-            for &child_id in input.children_ids().iter() {
-                output.place_child(child_id, origin);
+            for &child in &children {
+                result.place_child(child, origin);
             }
         }
 
-        Ok(ComputedData { width, height })
+        Ok(result.with_size(ComputedData { width, height }))
     }
 }
 
 impl RenderPolicy for SurfaceLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         let state_layer_alpha = if self.args.show_state_layer {
             self.interaction_state
                 .as_ref()
@@ -715,9 +636,9 @@ fn apply_surface_block_input_modifier(base: Modifier, block_input: bool) -> Modi
 
 #[tessera]
 fn surface_content(
-    #[prop(skip_setter)] resolved: Option<SurfaceResolvedArgs>,
-    #[prop(skip_setter)] interaction_state: Option<State<InteractionState>>,
-    #[prop(skip_setter)] ripple_state: Option<State<RippleState>>,
+    resolved: Option<SurfaceResolvedArgs>,
+    interaction_state: Option<State<InteractionState>>,
+    ripple_state: Option<State<RippleState>>,
 ) {
     let surface = resolved.expect("surface_content requires resolved args");
     let child = surface.child;
@@ -780,7 +701,7 @@ fn surface_content(
         scheme,
         absolute_tonal_elevation,
     };
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(policy.clone())
         .render_policy(policy)
@@ -852,7 +773,7 @@ fn surface_content(
 ///     surface::surface,
 ///     text::text,
 /// };
-/// use tessera_ui::{Dp, Modifier};
+/// use tessera_ui::{Dp, LayoutResult, Modifier};
 /// # use tessera_components::theme::{MaterialTheme, material_theme};
 ///
 /// # material_theme()
@@ -1012,10 +933,14 @@ pub fn surface(
         });
     }
 
-    layout_primitive().modifier(modifier).child(move || {
-        surface_content()
-            .resolved_internal(resolved.clone())
-            .interaction_state_internal(interaction_state)
-            .ripple_state_internal(ripple_state);
+    layout().modifier(modifier).child(move || {
+        let mut builder = surface_content().resolved(resolved.clone());
+        if let Some(interaction_state) = interaction_state {
+            builder = builder.interaction_state(interaction_state);
+        }
+        if let Some(ripple_state) = ripple_state {
+            builder = builder.ripple_state(ripple_state);
+        }
+        drop(builder);
     });
 }

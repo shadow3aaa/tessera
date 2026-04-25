@@ -3,25 +3,20 @@
 //! ## Usage
 //!
 //! Show onboarding steps or media carousels that snap between pages.
+use tessera_foundation::gesture::{
+    DragAxis, DragRecognizer, DragSettings, ScrollRecognizer, ScrollSettings,
+};
 use tessera_ui::{
-    CallbackWith, ComputedData, Constraint, DimensionValue, Dp, FocusProperties, KeyboardInput,
-    KeyboardInputModifierNode, MeasurementError, Modifier, PointerInput, PointerInputModifierNode,
-    Px, PxPosition, State, key,
-    layout::{
-        LayoutInput, LayoutOutput, LayoutPolicy, PlacementInput, RenderInput, RenderPolicy,
-        layout_primitive,
-    },
+    AxisConstraint, CallbackWith, ComputedData, Constraint, Dp, FocusProperties, KeyboardInput,
+    KeyboardInputModifierNode, LayoutResult, MeasurementError, Modifier, PointerInput,
+    PointerInputModifierNode, Px, PxPosition, ScrollDeltaUnit, ScrollEventSource, State, key,
+    layout::{LayoutPolicy, MeasureScope, PlacementScope, RenderInput, RenderPolicy, layout},
     modifier::{FocusModifierExt as _, ModifierCapabilityExt as _},
-    receive_frame_nanos, remember, tessera, winit,
+    normalize_platform_scroll_delta, receive_frame_nanos, remember, tessera, winit,
 };
 
 use crate::{
-    alignment::CrossAxisAlignment,
-    gesture_recognizer::{
-        DragAxis, DragRecognizer, DragSettings, ScrollRecognizer, ScrollSettings,
-    },
-    modifier::ModifierExt as _,
-    pos_misc::is_position_inside_bounds,
+    alignment::CrossAxisAlignment, modifier::ModifierExt as _, pos_misc::is_position_inside_bounds,
 };
 
 const DEFAULT_SNAP_THRESHOLD: f32 = 0.5;
@@ -69,6 +64,20 @@ struct PagerConfig {
     ///
     /// When this is `None`, the pager creates and owns an internal controller.
     pub controller: Option<State<PagerController>>,
+}
+
+fn normalize_pager_scroll_delta(
+    delta_x: f32,
+    delta_y: f32,
+    unit: Option<ScrollDeltaUnit>,
+    source: Option<ScrollEventSource>,
+) -> (f32, f32) {
+    match (source, unit) {
+        (Some(source), Some(unit)) => {
+            normalize_platform_scroll_delta(delta_x, delta_y, unit, source)
+        }
+        _ => (delta_x, delta_y),
+    }
 }
 
 impl Default for PagerConfig {
@@ -485,18 +494,16 @@ impl PartialEq for PagerLayout {
 }
 
 impl LayoutPolicy for PagerLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
         if self.page_count == 0 {
-            return Ok(ComputedData::min_from_constraint(
+            return Ok(result.with_size(ComputedData::min_from_constraint(
                 input.parent_constraint().as_ref(),
-            ));
+            )));
         }
 
-        if input.children_ids().len() != self.visible_pages.len() {
+        if children.len() != self.visible_pages.len() {
             return Err(MeasurementError::MeasureFnFailed(
                 "Pager measured child count mismatch".into(),
             ));
@@ -516,35 +523,27 @@ impl LayoutPolicy for PagerLayout {
             resolve_page_main_size(self.page_size, main_dimension, self.content_padding);
         let page_spacing = self.page_spacing;
         let padding = self.content_padding;
-        let container_main = resolve_dimension(
-            main_dimension,
-            page_main + padding + padding,
-            "pager main axis",
-        );
+        let container_main = main_dimension.clamp(page_main + padding + padding);
 
         let cross_constraint =
             cross_dimension_for_alignment(cross_dimension, self.cross_axis_alignment);
         let child_constraint = match self.axis {
             PagerAxis::Horizontal => {
-                Constraint::new(DimensionValue::Fixed(page_main), cross_constraint)
+                Constraint::new(AxisConstraint::exact(page_main), cross_constraint)
             }
             PagerAxis::Vertical => {
-                Constraint::new(cross_constraint, DimensionValue::Fixed(page_main))
+                Constraint::new(cross_constraint, AxisConstraint::exact(page_main))
             }
         };
 
-        let children_to_measure: Vec<_> = input
-            .children_ids()
-            .iter()
-            .map(|&child_id| (child_id, child_constraint))
-            .collect();
-        let measurements = input.measure_children(children_to_measure)?;
-
         let mut max_cross = Px::ZERO;
-        for size in measurements.values() {
-            max_cross = max_cross.max(self.axis.cross(*size));
+        let mut measured_children = Vec::with_capacity(children.len());
+        for &child in &children {
+            let measurement = child.measure(&child_constraint)?;
+            max_cross = max_cross.max(self.axis.cross(measurement.size()));
+            measured_children.push((child, measurement.size()));
         }
-        let container_cross = resolve_dimension(cross_dimension, max_cross, "pager cross axis");
+        let container_cross = cross_dimension.clamp(max_cross);
 
         let should_update_layout = self.controller.with(|controller| {
             let mut next = controller.clone();
@@ -560,10 +559,10 @@ impl LayoutPolicy for PagerLayout {
         let scroll_offset = self.controller.with(|c| c.scroll_offset_px());
         let page_step = page_main + page_spacing;
 
-        for (&child_id, &page_index) in input.children_ids().iter().zip(self.visible_pages.iter()) {
-            let measured = measurements
-                .get(&child_id)
-                .copied()
+        for (&child, &page_index) in children.iter().zip(self.visible_pages.iter()) {
+            let measured = measured_children
+                .iter()
+                .find_map(|(measured_child, size)| (*measured_child == child).then_some(*size))
                 .unwrap_or(ComputedData::ZERO);
             let cross_offset = compute_cross_offset(
                 container_cross,
@@ -572,10 +571,10 @@ impl LayoutPolicy for PagerLayout {
             );
             let page_offset = padding + px_mul(page_step, page_index) + scroll_offset;
             let position = self.axis.position(page_offset, cross_offset);
-            output.place_child(child_id, position);
+            result.place_child(child, position);
         }
 
-        Ok(self.axis.pack_size(container_main, container_cross))
+        Ok(result.with_size(self.axis.pack_size(container_main, container_cross)))
     }
 
     fn measure_eq(&self, other: &Self) -> bool {
@@ -599,14 +598,15 @@ impl LayoutPolicy for PagerLayout {
             && self.scroll_offset == other.scroll_offset
     }
 
-    fn place_children(&self, input: &PlacementInput<'_>, output: &mut LayoutOutput<'_>) -> bool {
+    fn place_children(&self, input: &PlacementScope<'_>) -> Option<Vec<(u64, PxPosition)>> {
+        let mut result = LayoutResult::default();
         if self.page_count == 0 {
-            return true;
+            return Some(result.into_placements());
         }
 
-        let child_ids = input.children_ids();
-        if child_ids.len() != self.visible_pages.len() {
-            return false;
+        let children = input.children();
+        if children.len() != self.visible_pages.len() {
+            return None;
         }
 
         let container_cross = self.axis.cross(input.size());
@@ -615,10 +615,8 @@ impl LayoutPolicy for PagerLayout {
             .with(|controller| controller.page_size + controller.page_spacing);
         let padding = self.content_padding;
 
-        for (&child_id, &page_index) in child_ids.iter().zip(self.visible_pages.iter()) {
-            let Some(measured) = input.child_size(child_id) else {
-                return false;
-            };
+        for (&child, &page_index) in children.iter().zip(self.visible_pages.iter()) {
+            let measured = child.size();
             let cross_offset = compute_cross_offset(
                 container_cross,
                 self.axis.cross(measured),
@@ -626,15 +624,15 @@ impl LayoutPolicy for PagerLayout {
             );
             let page_offset = padding + px_mul(page_step, page_index) + self.scroll_offset;
             let position = self.axis.position(page_offset, cross_offset);
-            output.place_child(child_id, position);
+            result.place_child(child, position);
         }
 
-        true
+        Some(result.into_placements())
     }
 }
 
 impl RenderPolicy for PagerLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         input.metadata_mut().set_clips_children(true);
     }
 }
@@ -643,14 +641,10 @@ impl RenderPolicy for PagerLayout {
 struct ZeroLayout;
 
 impl LayoutPolicy for ZeroLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        Ok(ComputedData::min_from_constraint(
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        Ok(LayoutResult::new(ComputedData::min_from_constraint(
             input.parent_constraint().as_ref(),
-        ))
+        )))
     }
 }
 
@@ -664,40 +658,15 @@ fn compute_visible_pages(current_page: usize, page_count: usize, beyond: usize) 
     (start..end).collect()
 }
 
-fn clamp_wrap(min: Option<Px>, max: Option<Px>, measure: Px) -> Px {
-    min.unwrap_or(Px(0))
-        .max(measure)
-        .min(max.unwrap_or(Px::MAX))
-}
-
-fn fill_value(min: Option<Px>, max: Option<Px>, measure: Px, context: &str) -> Px {
-    let Some(max) = max else {
-        panic!("Pager cannot fill an unbounded {context}");
-    };
-    let mut value = max.max(measure);
-    if let Some(min) = min {
-        value = value.max(min);
-    }
-    value
-}
-
-fn resolve_dimension(dim: DimensionValue, measure: Px, context: &str) -> Px {
-    match dim {
-        DimensionValue::Fixed(v) => v,
-        DimensionValue::Wrap { min, max } => clamp_wrap(min, max, measure),
-        DimensionValue::Fill { min, max } => fill_value(min, max, measure, context),
-    }
-}
-
 fn resolve_page_main_size(
     page_size: PagerPageSize,
-    main_dimension: DimensionValue,
+    main_dimension: AxisConstraint,
     padding: Px,
 ) -> Px {
     match page_size {
         PagerPageSize::Fill => {
             let max = main_dimension
-                .get_max()
+                .resolve_max()
                 .expect("Pager page size Fill requires a bounded main-axis constraint");
             (max - padding - padding).max(Px::ZERO)
         }
@@ -706,19 +675,15 @@ fn resolve_page_main_size(
 }
 
 fn cross_dimension_for_alignment(
-    cross_dimension: DimensionValue,
+    cross_dimension: AxisConstraint,
     alignment: CrossAxisAlignment,
-) -> DimensionValue {
-    let max = cross_dimension.get_max();
+) -> AxisConstraint {
     match alignment {
-        CrossAxisAlignment::Stretch => match cross_dimension {
-            DimensionValue::Fixed(value) => DimensionValue::Fixed(value),
-            _ => DimensionValue::Fill {
-                min: cross_dimension.get_min(),
-                max,
-            },
+        CrossAxisAlignment::Stretch => match cross_dimension.resolve_max() {
+            Some(max) => AxisConstraint::exact(max),
+            None => cross_dimension,
         },
-        _ => DimensionValue::Wrap { min: None, max },
+        _ => AxisConstraint::new(Px::ZERO, cross_dimension.resolve_max()),
     }
 }
 
@@ -816,9 +781,13 @@ impl PointerInputModifierNode for PagerPointerModifierNode {
         let scroll_result = self.scroll_recognizer.with_mut(|recognizer| {
             recognizer.update(input.pass, input.pointer_changes.as_mut_slice())
         });
-        let scroll_delta = self
-            .axis
-            .scroll_delta(scroll_result.delta_x, scroll_result.delta_y);
+        let (scroll_delta_x, scroll_delta_y) = normalize_pager_scroll_delta(
+            scroll_result.delta_x,
+            scroll_result.delta_y,
+            scroll_result.unit,
+            scroll_result.source,
+        );
+        let scroll_delta = self.axis.scroll_delta(scroll_delta_x, scroll_delta_y);
 
         if scroll_delta.abs() >= 0.01 {
             self.controller.with_mut(|controller| {
@@ -887,8 +856,8 @@ fn apply_pager_input_modifiers(
 ///
 /// ## Parameters
 ///
-/// - `args` — configures paging, spacing, and layout behavior; see
-///   [`PagerConfig`].
+/// - `args` — configures paging, spacing, and layout behavior through the
+///   component's builder parameters.
 /// - `page_content` — closure that renders each page by index.
 ///
 /// ## Examples
@@ -896,7 +865,7 @@ fn apply_pager_input_modifiers(
 /// ```
 /// use tessera_components::pager::horizontal_pager;
 /// use tessera_components::text::text;
-/// use tessera_ui::{remember, tessera};
+/// use tessera_ui::{LayoutResult, remember, tessera};
 /// # use tessera_components::theme::{MaterialTheme, material_theme};
 ///
 /// #[tessera]
@@ -922,19 +891,30 @@ fn apply_pager_input_modifiers(
 #[tessera]
 pub fn horizontal_pager(
     modifier: Option<Modifier>,
-    page_count: usize,
-    initial_page: usize,
-    page_size: PagerPageSize,
-    page_spacing: Dp,
-    content_padding: Dp,
-    beyond_viewport_page_count: usize,
-    cross_axis_alignment: CrossAxisAlignment,
-    user_scroll_enabled: bool,
+    page_count: Option<usize>,
+    initial_page: Option<usize>,
+    page_size: Option<PagerPageSize>,
+    page_spacing: Option<Dp>,
+    content_padding: Option<Dp>,
+    beyond_viewport_page_count: Option<usize>,
+    cross_axis_alignment: Option<CrossAxisAlignment>,
+    user_scroll_enabled: Option<bool>,
     snap_threshold: Option<f32>,
     scroll_smoothing: Option<f32>,
     page_content: Option<CallbackWith<usize>>,
     controller: Option<State<PagerController>>,
 ) {
+    let page_count = page_count.unwrap_or(PagerConfig::default().page_count);
+    let initial_page = initial_page.unwrap_or(PagerConfig::default().initial_page);
+    let page_size = page_size.unwrap_or(PagerConfig::default().page_size);
+    let page_spacing = page_spacing.unwrap_or(PagerConfig::default().page_spacing);
+    let content_padding = content_padding.unwrap_or(PagerConfig::default().content_padding);
+    let beyond_viewport_page_count =
+        beyond_viewport_page_count.unwrap_or(PagerConfig::default().beyond_viewport_page_count);
+    let cross_axis_alignment =
+        cross_axis_alignment.unwrap_or(PagerConfig::default().cross_axis_alignment);
+    let user_scroll_enabled =
+        user_scroll_enabled.unwrap_or(PagerConfig::default().user_scroll_enabled);
     let pager_args = pager_config_from_params(PagerParams {
         modifier,
         page_count,
@@ -966,8 +946,8 @@ pub fn horizontal_pager(
 ///
 /// ## Parameters
 ///
-/// - `args` — configures paging, spacing, and layout behavior; see
-///   [`PagerConfig`].
+/// - `args` — configures paging, spacing, and layout behavior through the
+///   component's builder parameters.
 /// - `page_content` — closure that renders each page by index.
 ///
 /// ## Examples
@@ -998,19 +978,30 @@ pub fn horizontal_pager(
 #[tessera]
 pub fn vertical_pager(
     modifier: Option<Modifier>,
-    page_count: usize,
-    initial_page: usize,
-    page_size: PagerPageSize,
-    page_spacing: Dp,
-    content_padding: Dp,
-    beyond_viewport_page_count: usize,
-    cross_axis_alignment: CrossAxisAlignment,
-    user_scroll_enabled: bool,
+    page_count: Option<usize>,
+    initial_page: Option<usize>,
+    page_size: Option<PagerPageSize>,
+    page_spacing: Option<Dp>,
+    content_padding: Option<Dp>,
+    beyond_viewport_page_count: Option<usize>,
+    cross_axis_alignment: Option<CrossAxisAlignment>,
+    user_scroll_enabled: Option<bool>,
     snap_threshold: Option<f32>,
     scroll_smoothing: Option<f32>,
     page_content: Option<CallbackWith<usize>>,
     controller: Option<State<PagerController>>,
 ) {
+    let page_count = page_count.unwrap_or(PagerConfig::default().page_count);
+    let initial_page = initial_page.unwrap_or(PagerConfig::default().initial_page);
+    let page_size = page_size.unwrap_or(PagerConfig::default().page_size);
+    let page_spacing = page_spacing.unwrap_or(PagerConfig::default().page_spacing);
+    let content_padding = content_padding.unwrap_or(PagerConfig::default().content_padding);
+    let beyond_viewport_page_count =
+        beyond_viewport_page_count.unwrap_or(PagerConfig::default().beyond_viewport_page_count);
+    let cross_axis_alignment =
+        cross_axis_alignment.unwrap_or(PagerConfig::default().cross_axis_alignment);
+    let user_scroll_enabled =
+        user_scroll_enabled.unwrap_or(PagerConfig::default().user_scroll_enabled);
     let pager_args = pager_config_from_params(PagerParams {
         modifier,
         page_count,
@@ -1065,7 +1056,7 @@ fn pager_render(args: PagerConfig, controller: State<PagerController>, axis: Pag
     );
 
     if visible_pages.is_empty() {
-        layout_primitive()
+        layout()
             .modifier(args.modifier.clone())
             .layout_policy(ZeroLayout);
         return;
@@ -1105,7 +1096,7 @@ fn pager_render(args: PagerConfig, controller: State<PagerController>, axis: Pag
         scroll_offset: controller.with(|current| current.scroll_offset_px()),
         controller,
     };
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(policy.clone())
         .render_policy(policy)

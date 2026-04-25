@@ -8,8 +8,9 @@ use tessera_ui::{Callback, Color, Dp, Modifier, tessera, use_context};
 use crate::{
     button::{ButtonDefaults, button},
     glass_button::glass_button,
-    icon::{IconContent, icon},
+    icon::icon,
     modifier::ModifierExt as _,
+    painter::Painter,
     shape_def::Shape,
     theme::MaterialTheme,
 };
@@ -30,7 +31,7 @@ pub enum IconButtonVariant {
 
 impl IconButtonBuilder {
     /// Sets the icon content using any supported icon source.
-    pub fn icon(mut self, icon: impl Into<IconContent>) -> Self {
+    pub fn icon(mut self, icon: impl Into<Painter>) -> Self {
         self.props.icon = Some(icon.into());
         self
     }
@@ -58,19 +59,14 @@ impl IconButtonBuilder {
 
 impl GlassIconButtonBuilder {
     /// Sets the icon content using any supported icon source.
-    pub fn icon(mut self, icon: impl Into<IconContent>) -> Self {
+    pub fn icon(mut self, icon: impl Into<Painter>) -> Self {
         self.props.icon = Some(icon.into());
         self
     }
 }
 
-fn render_icon_content(content: IconContent, tint: Color) {
-    let builder = match content {
-        IconContent::Vector(data) => icon().vector(data),
-        IconContent::Raster(data) => icon().raster(data),
-    };
-
-    builder.size(Dp(24.0)).tint(tint);
+fn render_icon_content(content: Painter, tint: Color) {
+    icon().painter(content).size(Dp(24.0)).tint(tint);
 }
 
 /// # icon_button
@@ -107,7 +103,7 @@ fn render_icon_content(content: IconContent, tint: Color) {
 #[tessera]
 pub fn icon_button(
     variant: Option<IconButtonVariant>,
-    #[prop(skip_setter)] icon: Option<IconContent>,
+    #[prop(skip_setter)] icon: Option<Painter>,
     on_click: Option<Callback>,
     enabled: Option<bool>,
     color: Option<Color>,
@@ -192,10 +188,6 @@ pub fn icon_button(
 /// - `tint_color` — optional glass tint color.
 /// - `shape` — optional shape override.
 /// - `blur_radius` — optional blur radius.
-/// - `dispersion_height` — optional chromatic dispersion height.
-/// - `chroma_multiplier` — optional chromatic multiplier.
-/// - `refraction_height` — optional refraction height.
-/// - `refraction_amount` — optional refraction amount.
 /// - `noise_amount` — optional noise amount.
 /// - `noise_scale` — optional noise scale.
 /// - `time` — optional animated time input.
@@ -222,17 +214,13 @@ pub fn icon_button(
 /// ```
 #[tessera]
 pub fn glass_icon_button(
-    #[prop(skip_setter)] icon: Option<IconContent>,
-    modifier: Modifier,
+    #[prop(skip_setter)] icon: Option<Painter>,
+    modifier: Option<Modifier>,
     on_click: Option<Callback>,
     padding: Option<Dp>,
     tint_color: Option<Color>,
     shape: Option<Shape>,
     blur_radius: Option<Dp>,
-    dispersion_height: Option<Dp>,
-    chroma_multiplier: Option<f32>,
-    refraction_height: Option<Dp>,
-    refraction_amount: Option<f32>,
     noise_amount: Option<f32>,
     noise_scale: Option<f32>,
     time: Option<f32>,
@@ -248,6 +236,7 @@ pub fn glass_icon_button(
         .get()
         .color_scheme;
     let content_color = content_color.unwrap_or(scheme.on_surface);
+    let modifier = modifier.unwrap_or_default();
 
     let mut builder = glass_button()
         .modifier(modifier)
@@ -255,10 +244,6 @@ pub fn glass_icon_button(
         .tint_color(tint_color.unwrap_or(Color::new(0.5, 0.5, 0.5, 0.1)))
         .shape(shape.unwrap_or(Shape::rounded_rectangle(Dp(25.0))))
         .blur_radius(blur_radius.unwrap_or(Dp(0.0)))
-        .dispersion_height(dispersion_height.unwrap_or(Dp(25.0)))
-        .chroma_multiplier(chroma_multiplier.unwrap_or(1.1))
-        .refraction_height(refraction_height.unwrap_or(Dp(24.0)))
-        .refraction_amount(refraction_amount.unwrap_or(32.0))
         .noise_amount(noise_amount.unwrap_or(0.0))
         .noise_scale(noise_scale.unwrap_or(1.0))
         .time(time.unwrap_or(0.0));

@@ -6,7 +6,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tessera_ui::{
-    Callback, DimensionValue, Dp, Modifier, RenderSlot, State, provide_context, remember, tessera,
+    AxisConstraint, Callback, Dp, Modifier, RenderSlot, State, provide_context, remember, tessera,
     use_context,
 };
 
@@ -19,7 +19,7 @@ use crate::{
     spacer::spacer,
     surface::{SurfaceStyle, surface},
     text::text,
-    theme::{ContentColor, MaterialTheme},
+    theme::{ContentColor, MaterialTheme, TextStyle},
 };
 
 const TIME_CELL_WIDTH: Dp = Dp(72.0);
@@ -253,15 +253,22 @@ struct TimePickerConfig {
 /// ```
 #[tessera]
 pub fn time_picker(
-    modifier: Modifier,
-    initial_hour: u8,
-    initial_minute: u8,
-    is_24_hour: bool,
-    display_mode: TimePickerDisplayMode,
-    hour_step: u8,
-    minute_step: u8,
+    modifier: Option<Modifier>,
+    initial_hour: Option<u8>,
+    initial_minute: Option<u8>,
+    is_24_hour: Option<bool>,
+    display_mode: Option<TimePickerDisplayMode>,
+    hour_step: Option<u8>,
+    minute_step: Option<u8>,
     state: Option<State<TimePickerState>>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let initial_hour = initial_hour.unwrap_or(0);
+    let initial_minute = initial_minute.unwrap_or(0);
+    let is_24_hour = is_24_hour.unwrap_or(false);
+    let display_mode = display_mode.unwrap_or_default();
+    let hour_step = hour_step.unwrap_or(1);
+    let minute_step = minute_step.unwrap_or(1);
     let state = state.unwrap_or_else(|| {
         remember(|| TimePickerState::new(initial_hour, initial_minute, is_24_hour, display_mode))
     });
@@ -321,7 +328,10 @@ fn time_picker_inner(args: TimePickerConfig) {
                     {
                         text()
                             .content(":")
-                            .size(typography.headline_small.font_size)
+                            .style(TextStyle {
+                                font_size: typography.headline_small.font_size,
+                                line_height: typography.headline_small.line_height,
+                            })
                             .color(scheme.on_surface_variant);
                     };
                     {
@@ -405,16 +415,24 @@ pub fn time_picker_dialog(
     #[prop(into)] title: Option<String>,
     confirm_button: Option<RenderSlot>,
     dismiss_button: Option<RenderSlot>,
-    show_mode_toggle: bool,
-    picker_modifier: Modifier,
-    picker_initial_hour: u8,
-    picker_initial_minute: u8,
-    picker_is_24_hour: bool,
-    picker_display_mode: TimePickerDisplayMode,
-    picker_hour_step: u8,
-    picker_minute_step: u8,
+    show_mode_toggle: Option<bool>,
+    picker_modifier: Option<Modifier>,
+    picker_initial_hour: Option<u8>,
+    picker_initial_minute: Option<u8>,
+    picker_is_24_hour: Option<bool>,
+    picker_display_mode: Option<TimePickerDisplayMode>,
+    picker_hour_step: Option<u8>,
+    picker_minute_step: Option<u8>,
 ) {
-    let state = state.expect("time_picker_dialog requires state to be set");
+    let show_mode_toggle = show_mode_toggle.unwrap_or(true);
+    let picker_modifier = picker_modifier.unwrap_or_default();
+    let picker_initial_hour = picker_initial_hour.unwrap_or(0);
+    let picker_initial_minute = picker_initial_minute.unwrap_or(0);
+    let picker_is_24_hour = picker_is_24_hour.unwrap_or(false);
+    let picker_display_mode = picker_display_mode.unwrap_or_default();
+    let picker_hour_step = picker_hour_step.unwrap_or(1);
+    let picker_minute_step = picker_minute_step.unwrap_or(1);
+    let state = state.unwrap_or_else(|| remember(TimePickerState::default));
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -424,11 +442,11 @@ pub fn time_picker_dialog(
 
     column()
         .modifier(Modifier::new().constrain(
-            Some(DimensionValue::Wrap {
-                min: Some(Dp(280.0).into()),
-                max: Some(Dp(520.0).into()),
-            }),
-            Some(DimensionValue::WRAP),
+            Some(AxisConstraint::new(
+                Dp(280.0).into(),
+                Some(Dp(520.0).into()),
+            )),
+            Some(AxisConstraint::NONE),
         ))
         .children(move || {
             {
@@ -552,7 +570,10 @@ fn time_stepper_column(
                 {
                     text()
                         .content(label)
-                        .size(typography.label_small.font_size)
+                        .style(TextStyle {
+                            font_size: typography.label_small.font_size,
+                            line_height: typography.label_small.line_height,
+                        })
                         .color(scheme.on_surface_variant);
                 };
             }
@@ -600,7 +621,7 @@ fn step_button(label: &'static str, on_click: Callback) {
         .style(SurfaceStyle::Filled {
             color: scheme.surface_container_low,
         })
-        .shape(Shape::capsule())
+        .shape(Shape::CAPSULE)
         .content_alignment(Alignment::Center)
         .on_click_shared(on_click)
         .child(move || {
@@ -666,7 +687,7 @@ fn period_button(
                 .height(PERIOD_BUTTON_HEIGHT),
         )
         .style(style)
-        .shape(Shape::capsule())
+        .shape(Shape::CAPSULE)
         .content_alignment(Alignment::Center)
         .on_click(move || {
             state.with_mut(|s| s.set_period(period));
@@ -700,7 +721,7 @@ fn time_display_mode_toggle(state: State<TimePickerState>) {
         .style(SurfaceStyle::Filled {
             color: scheme.surface_container_high,
         })
-        .shape(Shape::capsule())
+        .shape(Shape::CAPSULE)
         .content_alignment(Alignment::Center)
         .on_click(move || {
             state.with_mut(|s| s.toggle_display_mode());

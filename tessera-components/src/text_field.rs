@@ -4,18 +4,19 @@
 //!
 //! Collect short-form inputs like names, passwords, or search queries.
 use glyphon::Action as GlyphonAction;
+use tessera_foundation::gesture::{TapRecognizer, TapSettings};
 use tessera_ui::{
-    Callback, CallbackWith, Color, ComputedData, Constraint, DimensionValue, Dp, LayoutInput,
-    LayoutOutput, LayoutPolicy, MeasurementError, Modifier, PressKeyEventType, Px, PxPosition,
-    RenderSlot, State, layout::layout_primitive, modifier::CursorModifierExt as _, provide_context,
-    remember, tessera, use_context, winit,
+    Callback, CallbackWith, Color, ComputedData, Constraint, Dp, LayoutPolicy, LayoutResult,
+    MeasurementError, Modifier, PressKeyEventType, Px, PxPosition, RenderSlot, State,
+    layout::{MeasureScope, layout},
+    modifier::CursorModifierExt as _,
+    provide_context, remember, tessera, use_context, winit,
 };
 
 use crate::{
     alignment::{Alignment, CrossAxisAlignment},
     boxed::boxed,
     divider::horizontal_divider,
-    gesture_recognizer::{TapRecognizer, TapSettings},
     menus::{MenuAnchor, MenuController, MenuPlacement, menu_item, menu_provider},
     modifier::{ModifierExt as _, Padding, with_pointer_input},
     pos_misc::is_position_inside_bounds,
@@ -28,7 +29,7 @@ use crate::{
         DisplayTransformText, TextInputController, TextInputProps, create_surface_args,
         text_input_core,
     },
-    theme::{ContentColor, MaterialColorScheme, MaterialTheme, TextSelectionColors},
+    theme::{ContentColor, MaterialColorScheme, MaterialTheme, TextSelectionColors, TextStyle},
 };
 
 /// Defaults for Material text fields.
@@ -210,30 +211,6 @@ struct TextFieldProps {
 }
 
 impl TextFieldBuilder {
-    /// Set the input line limit policy.
-    pub fn line_limit(mut self, line_limit: TextFieldLineLimit) -> Self {
-        self.props.line_limit = line_limit;
-        self
-    }
-
-    /// Set the context menu policy.
-    pub fn context_menu(mut self, context_menu: TextFieldContextMenu) -> Self {
-        self.props.context_menu = context_menu;
-        self
-    }
-
-    /// Sets an external text input controller.
-    pub fn controller(mut self, controller: State<TextInputController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-
-    /// Set the obfuscation character for secure fields.
-    pub fn obfuscation_char(mut self, obfuscation_char: char) -> Self {
-        self.props.obfuscation_char = Some(obfuscation_char);
-        self
-    }
-
     /// Creates filled text field defaults.
     pub fn filled() -> Self {
         text_field()
@@ -437,19 +414,16 @@ fn editor_content_len(controller: &State<TextInputController>) -> usize {
     controller.with(|c| c.text().len())
 }
 
-fn label_floating_text_style(theme: &MaterialTheme) -> (Dp, Option<Dp>) {
-    let style = theme.typography.body_small;
-    (style.font_size, style.line_height)
+fn label_floating_text_style(theme: &MaterialTheme) -> TextStyle {
+    theme.typography.body_small
 }
 
-fn label_resting_text_style(theme: &MaterialTheme) -> (Dp, Option<Dp>) {
-    let style = theme.typography.body_large;
-    (style.font_size, style.line_height)
+fn label_resting_text_style(theme: &MaterialTheme) -> TextStyle {
+    theme.typography.body_large
 }
 
-fn placeholder_text_style(theme: &MaterialTheme) -> (Dp, Option<Dp>) {
-    let style = theme.typography.body_large;
-    (style.font_size, style.line_height)
+fn placeholder_text_style(theme: &MaterialTheme) -> TextStyle {
+    theme.typography.body_large
 }
 
 fn resolve_label_color(scheme: &MaterialColorScheme, focused: bool) -> Color {
@@ -572,59 +546,60 @@ struct OutlinedFloatingLabelLayout {
 }
 
 impl LayoutPolicy for OutlinedFloatingLabelLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
         debug_assert_eq!(
-            input.children_ids().len(),
+            children.len(),
             2,
             "OutlinedFloatingLabel expects exactly two children"
         );
-        let notch_id = input.children_ids()[0];
-        let label_id = input.children_ids()[1];
+        let notch = children[0];
+        let label = children[1];
 
-        let parent_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
-        let label_measurement = input.measure_child(label_id, &parent_constraint)?;
+        let parent_constraint = input.parent_constraint().without_min();
+        let label_measurement = label.measure(&parent_constraint)?;
         let notch_width = label_measurement.width + self.notch_padding * 2;
         let notch_height = label_measurement.height + self.notch_vertical_padding * 2;
-        let notch_constraint = Constraint::new(
-            DimensionValue::Fixed(notch_width),
-            DimensionValue::Fixed(notch_height),
-        );
-        let _ = input.measure_child(notch_id, &notch_constraint)?;
+        let notch_constraint = Constraint::exact(notch_width, notch_height);
+        let _ = notch.measure(&notch_constraint)?;
 
         let notch_position = PxPosition::new(
             self.label_offset.x - self.notch_padding,
             self.label_offset.y - self.notch_vertical_padding,
         );
-        output.place_child(notch_id, notch_position);
-        output.place_child(label_id, self.label_offset);
+        result.place_child(notch, notch_position);
+        result.place_child(label, self.label_offset);
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: Px(0),
             height: Px(0),
-        })
+        }))
     }
 }
 
 #[tessera]
 fn outlined_floating_label(
-    label_text: String,
-    label_color: Color,
-    label_font_size: Dp,
-    label_line_height: Dp,
-    label_offset_x: Dp,
-    label_offset_y: Dp,
-    notch_fill_color: Color,
-    notch_padding: Dp,
-    notch_vertical_padding: Dp,
+    label_text: Option<String>,
+    label_color: Option<Color>,
+    label_font_size: Option<Dp>,
+    label_line_height: Option<Dp>,
+    label_offset_x: Option<Dp>,
+    label_offset_y: Option<Dp>,
+    notch_fill_color: Option<Color>,
+    notch_padding: Option<Dp>,
+    notch_vertical_padding: Option<Dp>,
 ) {
-    layout_primitive()
+    let label_text = label_text.unwrap_or_default();
+    let label_color = label_color.unwrap_or(Color::TRANSPARENT);
+    let label_font_size = label_font_size.unwrap_or(Dp(0.0));
+    let label_line_height = label_line_height.unwrap_or(Dp(0.0));
+    let label_offset_x = label_offset_x.unwrap_or(Dp(0.0));
+    let label_offset_y = label_offset_y.unwrap_or(Dp(0.0));
+    let notch_fill_color = notch_fill_color.unwrap_or(Color::TRANSPARENT);
+    let notch_padding = notch_padding.unwrap_or(Dp(0.0));
+    let notch_vertical_padding = notch_vertical_padding.unwrap_or(Dp(0.0));
+    layout()
         .layout_policy(OutlinedFloatingLabelLayout {
             label_offset: PxPosition::new(label_offset_x.into(), label_offset_y.into()),
             notch_padding: notch_padding.into(),
@@ -635,8 +610,10 @@ fn outlined_floating_label(
             text()
                 .content(label_text.clone())
                 .color(label_color)
-                .size(label_font_size)
-                .line_height(label_line_height);
+                .style(TextStyle {
+                    font_size: label_font_size,
+                    line_height: Some(label_line_height),
+                });
         });
 }
 
@@ -664,15 +641,19 @@ fn render_text_field(
     let prefix = args.prefix;
     let suffix = args.suffix;
     let content_padding = args.padding;
-    let (label_floating_font_size, label_floating_line_height) = {
-        let (font_size, line_height) = label_floating_text_style(&theme);
-        let line_height = line_height.unwrap_or(Dp(font_size.0 * 1.2));
-        (font_size, line_height)
+    let label_floating_style = {
+        let style = label_floating_text_style(&theme);
+        TextStyle {
+            font_size: style.font_size,
+            line_height: Some(style.line_height.unwrap_or(Dp(style.font_size.0 * 1.2))),
+        }
     };
-    let (label_resting_font_size, label_resting_line_height) = {
-        let (font_size, line_height) = label_resting_text_style(&theme);
-        let line_height = line_height.unwrap_or(Dp(font_size.0 * 1.2));
-        (font_size, line_height)
+    let label_resting_style = {
+        let style = label_resting_text_style(&theme);
+        TextStyle {
+            font_size: style.font_size,
+            line_height: Some(style.line_height.unwrap_or(Dp(style.font_size.0 * 1.2))),
+        }
     };
     let placeholder_style = placeholder_text_style(&theme);
     let scheme = theme.color_scheme;
@@ -691,7 +672,12 @@ fn render_text_field(
     };
     let floating_label_offset_x = Dp(0.0);
     let floating_label_offset_y = if is_outlined {
-        Dp(-content_padding.0 - (label_floating_line_height.0 * 0.5))
+        Dp(-content_padding.0
+            - (label_floating_style
+                .line_height
+                .unwrap_or(Dp(label_floating_style.font_size.0 * 1.2))
+                .0
+                * 0.5))
     } else {
         Dp(TextFieldDefaults::FLOATING_LABEL_Y_OFFSET.0 - content_padding.0)
     };
@@ -708,7 +694,7 @@ fn render_text_field(
         let surface_args = create_surface_args(&editor, &controller)
             .content_color(content_color)
             .block_input(!args.enabled);
-        surface_args.with_child(move || {
+        surface_args.child(move || {
             let leading_icon = leading_icon;
             let prefix = prefix;
             let core_args = core_args.clone();
@@ -783,22 +769,13 @@ fn render_text_field(
                                         && let Some(placeholder_text) = placeholder_text.as_ref()
                                     {
                                         let placeholder_text = placeholder_text.clone();
-                                        layout_primitive()
+                                        layout()
                                             .modifier(Modifier::new().align(Alignment::TopStart))
                                             .child(move || {
-                                                let (font_size, line_height) = placeholder_style;
-                                                if let Some(line_height) = line_height {
-                                                    text()
-                                                        .content(placeholder_text.clone())
-                                                        .color(placeholder_color)
-                                                        .size(font_size)
-                                                        .line_height(line_height);
-                                                } else {
-                                                    text()
-                                                        .content(placeholder_text.clone())
-                                                        .color(placeholder_color)
-                                                        .size(font_size);
-                                                }
+                                                text()
+                                                    .content(placeholder_text.clone())
+                                                    .color(placeholder_color)
+                                                    .style(placeholder_style);
                                             });
                                     }
 
@@ -809,15 +786,20 @@ fn render_text_field(
                                                 let floating_args = OutlinedFloatingLabelArgs {
                                                     label_text: label_text.clone(),
                                                     label_color,
-                                                    label_font_size: label_floating_font_size,
-                                                    label_line_height: label_floating_line_height,
+                                                    label_font_size: label_floating_style.font_size,
+                                                    label_line_height: label_floating_style
+                                                        .line_height
+                                                        .unwrap_or(Dp(label_floating_style
+                                                            .font_size
+                                                            .0
+                                                            * 1.2)),
                                                     label_offset_x: floating_label_offset_x,
                                                     label_offset_y: floating_label_offset_y,
                                                     notch_fill_color,
                                                     notch_padding,
                                                     notch_vertical_padding,
                                                 };
-                                                layout_primitive()
+                                                layout()
                                                     .modifier(
                                                         Modifier::new().align(Alignment::TopStart),
                                                     )
@@ -839,7 +821,7 @@ fn render_text_field(
                                                             );
                                                     });
                                             } else {
-                                                layout_primitive()
+                                                layout()
                                                     .modifier(
                                                         Modifier::new().align(Alignment::TopStart),
                                                     )
@@ -847,18 +829,15 @@ fn render_text_field(
                                                         text()
                                                             .content(label_text.clone())
                                                             .color(label_color)
-                                                            .size(label_floating_font_size)
+                                                            .style(label_floating_style)
                                                             .modifier(Modifier::new().offset(
                                                                 floating_label_offset_x,
                                                                 floating_label_offset_y,
-                                                            ))
-                                                            .line_height(
-                                                                label_floating_line_height,
-                                                            );
+                                                            ));
                                                     });
                                             }
                                         } else {
-                                            layout_primitive()
+                                            layout()
                                                 .modifier(
                                                     Modifier::new().align(Alignment::TopStart),
                                                 )
@@ -866,8 +845,7 @@ fn render_text_field(
                                                     text()
                                                         .content(label_text.clone())
                                                         .color(label_color)
-                                                        .size(label_resting_font_size)
-                                                        .line_height(label_resting_line_height);
+                                                        .style(label_resting_style);
                                                 });
                                         }
                                     }
@@ -912,7 +890,7 @@ fn render_text_field(
                 };
 
                 if show_indicator {
-                    layout_primitive()
+                    layout()
                         .modifier(Modifier::new().align(Alignment::BottomStart))
                         .child(move || {
                             horizontal_divider()
@@ -1087,45 +1065,103 @@ fn configure_text_field_menu(
 /// ```
 #[tessera]
 pub fn text_field(
-    #[default(true)] enabled: bool,
-    read_only: bool,
-    modifier: Modifier,
+    enabled: Option<bool>,
+    read_only: Option<bool>,
+    modifier: Option<Modifier>,
     on_change: Option<CallbackWith<String, String>>,
     on_submit: Option<Callback>,
-    #[default(TextFieldProps::default().min_width)] min_width: Option<Dp>,
-    #[default(TextFieldProps::default().min_height)] min_height: Option<Dp>,
-    #[default(TextFieldProps::default().background_color)] background_color: Option<Color>,
-    border_width: Dp,
+    min_width: Option<Dp>,
+    min_height: Option<Dp>,
+    background_color: Option<Color>,
+    border_width: Option<Dp>,
     border_color: Option<Color>,
-    #[default(TextFieldProps::default().shape)] shape: Shape,
-    #[default(TextFieldProps::default().padding)] padding: Dp,
-    #[default(TextFieldProps::default().focus_border_color)] focus_border_color: Option<Color>,
+    shape: Option<Shape>,
+    padding: Option<Dp>,
+    focus_border_color: Option<Color>,
     focus_border_width: Option<Dp>,
-    #[default(TextFieldProps::default().focus_background_color)] focus_background_color: Option<
-        Color,
-    >,
-    #[default(TextFieldProps::default().selection_color)] selection_color: Option<Color>,
-    #[default(TextFieldProps::default().text_color)] text_color: Option<Color>,
-    #[default(TextFieldProps::default().cursor_color)] cursor_color: Option<Color>,
+    focus_background_color: Option<Color>,
+    selection_color: Option<Color>,
+    text_color: Option<Color>,
+    cursor_color: Option<Color>,
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
     #[prop(into)] initial_text: Option<String>,
-    #[default(TextFieldProps::default().font_size)] font_size: Dp,
-    #[default(TextFieldProps::default().line_height)] line_height: Option<Dp>,
+    font_size: Option<Dp>,
+    line_height: Option<Dp>,
     #[prop(into)] label: Option<String>,
     #[prop(into)] placeholder: Option<String>,
     leading_icon: Option<RenderSlot>,
     trailing_icon: Option<RenderSlot>,
     prefix: Option<RenderSlot>,
     suffix: Option<RenderSlot>,
-    #[default(true)] show_indicator: bool,
-    #[prop(skip_setter)] line_limit: TextFieldLineLimit,
-    #[prop(skip_setter)] context_menu: TextFieldContextMenu,
+    show_indicator: Option<bool>,
+    line_limit: Option<TextFieldLineLimit>,
+    context_menu: Option<TextFieldContextMenu>,
     input_transform: Option<CallbackWith<String, String>>,
-    #[prop(skip_setter)] obfuscation_char: Option<char>,
+    obfuscation_char: Option<char>,
     #[prop(skip_setter)] display_transform: Option<DisplayTransform>,
-    #[prop(skip_setter)] controller: Option<State<TextInputController>>,
+    controller: Option<State<TextInputController>>,
 ) {
+    let enabled = enabled.unwrap_or(true);
+    let read_only = read_only.unwrap_or(false);
+    let modifier = modifier.unwrap_or_default();
+    let min_width = if let Some(v) = min_width {
+        Some(v)
+    } else {
+        TextFieldProps::default().min_width
+    };
+    let min_height = if let Some(v) = min_height {
+        Some(v)
+    } else {
+        TextFieldProps::default().min_height
+    };
+    let background_color = if let Some(v) = background_color {
+        Some(v)
+    } else {
+        TextFieldProps::default().background_color
+    };
+    let border_width = border_width.unwrap_or(TextFieldProps::default().border_width);
+    let border_color = if let Some(v) = border_color {
+        Some(v)
+    } else {
+        TextFieldProps::default().border_color
+    };
+    let shape = shape.unwrap_or(TextFieldProps::default().shape);
+    let padding = padding.unwrap_or(TextFieldProps::default().padding);
+    let focus_border_color = if let Some(v) = focus_border_color {
+        Some(v)
+    } else {
+        TextFieldProps::default().focus_border_color
+    };
+    let focus_background_color = if let Some(v) = focus_background_color {
+        Some(v)
+    } else {
+        TextFieldProps::default().focus_background_color
+    };
+    let selection_color = if let Some(v) = selection_color {
+        Some(v)
+    } else {
+        TextFieldProps::default().selection_color
+    };
+    let text_color = if let Some(v) = text_color {
+        Some(v)
+    } else {
+        TextFieldProps::default().text_color
+    };
+    let cursor_color = if let Some(v) = cursor_color {
+        Some(v)
+    } else {
+        TextFieldProps::default().cursor_color
+    };
+    let font_size = font_size.unwrap_or(TextFieldProps::default().font_size);
+    let line_height = if let Some(v) = line_height {
+        Some(v)
+    } else {
+        TextFieldProps::default().line_height
+    };
+    let show_indicator = show_indicator.unwrap_or(true);
+    let line_limit = line_limit.unwrap_or(TextFieldProps::default().line_limit);
+    let context_menu = context_menu.unwrap_or(TextFieldProps::default().context_menu);
     let args = TextFieldProps {
         enabled,
         read_only,
@@ -1284,7 +1320,7 @@ pub fn text_field(
         }
     });
 
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         if menu_policy.enabled {
             let render_args = render_args.clone();
             let editor_args = editor_args.clone();

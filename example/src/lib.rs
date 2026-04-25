@@ -1,9 +1,14 @@
 mod app;
+mod pages;
 pub mod res;
 
-use tessera_ui::{EntryPoint, renderer::TesseraConfig};
+use tessera_ui::{
+    EntryPoint,
+    renderer::{TesseraConfig, WindowConfig},
+};
 
 use app::app;
+use pages::custom_shader::CustomShaderPackage;
 
 #[cfg(target_family = "wasm")]
 use tessera_ui::renderer::WebConfig;
@@ -14,11 +19,17 @@ use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 pub fn run() -> EntryPoint {
     EntryPoint::new(app)
         .config(TesseraConfig {
+            window: WindowConfig {
+                decorations: false,
+                ..Default::default()
+            },
             #[cfg(target_family = "wasm")]
             web: WebConfig::default().with_canvas_id(env!("CARGO_CRATE_NAME")),
             ..Default::default()
         })
         .package(tessera_components::ComponentsPackage)
+        .package(tessera_platform::PlatformPackage)
+        .package(CustomShaderPackage)
 }
 
 #[cfg(target_family = "wasm")]

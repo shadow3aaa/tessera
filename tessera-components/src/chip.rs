@@ -4,13 +4,14 @@
 //!
 //! Present compact actions, filters, or input tokens in dense UIs.
 use tessera_ui::{
-    Callback, Color, Dp, Modifier, accesskit::Role, layout::layout_primitive, tessera, use_context,
+    Callback, Color, Dp, Modifier, accesskit::Role, layout::layout, tessera, use_context,
 };
 
 use crate::{
     alignment::{Alignment, CrossAxisAlignment},
-    icon::{IconContent, icon},
+    icon::icon,
     modifier::{ModifierExt as _, Padding, ShadowArgs},
+    painter::Painter,
     row::row,
     shape_def::Shape,
     spacer::spacer,
@@ -382,8 +383,8 @@ struct ChipResolvedArgs {
     variant: ChipVariant,
     style: ChipStyle,
     label: String,
-    leading_icon: Option<IconContent>,
-    trailing_icon: Option<IconContent>,
+    leading_icon: Option<Painter>,
+    trailing_icon: Option<Painter>,
     selected: bool,
     enabled: bool,
     modifier: Modifier,
@@ -418,7 +419,7 @@ impl ChipBuilder {
     }
 
     /// Sets the leading icon content using any supported icon source.
-    pub fn leading_icon(mut self, icon: impl Into<IconContent>) -> Self {
+    pub fn leading_icon(mut self, icon: impl Into<Painter>) -> Self {
         self.props.leading_icon = Some(icon.into());
         self
     }
@@ -430,7 +431,7 @@ impl ChipBuilder {
     }
 
     /// Sets the trailing icon content using any supported icon source.
-    pub fn trailing_icon(mut self, icon: impl Into<IconContent>) -> Self {
+    pub fn trailing_icon(mut self, icon: impl Into<Painter>) -> Self {
         self.props.trailing_icon = Some(icon.into());
         self
     }
@@ -442,13 +443,11 @@ impl ChipBuilder {
     }
 }
 
-fn render_chip_icon(icon_content: IconContent, tint: Color) {
-    let builder = match icon_content {
-        IconContent::Vector(data) => icon().vector(data),
-        IconContent::Raster(data) => icon().raster(data),
-    };
-
-    builder.size(ChipDefaults::ICON_SIZE).tint(tint);
+fn render_chip_icon(icon_content: Painter, tint: Color) {
+    icon()
+        .painter(icon_content)
+        .size(ChipDefaults::ICON_SIZE)
+        .tint(tint);
 }
 
 /// # chip
@@ -504,12 +503,12 @@ fn render_chip_icon(icon_content: IconContent, tint: Color) {
 pub fn chip(
     variant: Option<ChipVariant>,
     style: Option<ChipStyle>,
-    #[prop(into)] label: String,
-    #[prop(skip_setter)] leading_icon: Option<IconContent>,
-    #[prop(skip_setter)] trailing_icon: Option<IconContent>,
+    #[prop(into)] label: Option<String>,
+    #[prop(skip_setter)] leading_icon: Option<Painter>,
+    #[prop(skip_setter)] trailing_icon: Option<Painter>,
     selected: Option<bool>,
     enabled: Option<bool>,
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     colors: Option<ChipColors>,
     border: Option<ChipBorder>,
     shape: Option<Shape>,
@@ -518,6 +517,8 @@ pub fn chip(
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
 ) {
+    let label = label.unwrap_or_default();
+    let modifier = modifier.unwrap_or_default();
     let args = ChipResolvedArgs {
         variant: variant.unwrap_or_default(),
         style: style.unwrap_or_default(),
@@ -630,7 +631,7 @@ pub fn chip(
         let trailing_icon = trailing_icon.clone();
         let label = label.clone();
         provide_text_style(typography.label_large, move || {
-            layout_primitive()
+            layout()
                 .modifier(Modifier::new().padding(padding))
                 .child(move || {
                     let leading_icon = leading_icon.clone();

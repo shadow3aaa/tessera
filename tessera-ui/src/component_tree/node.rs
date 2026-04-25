@@ -4,10 +4,8 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
 use indextree::NodeId;
-use rayon::prelude::*;
-use rustc_hash::FxBuildHasher;
+use rustc_hash::FxHashMap;
 use tracing::debug;
 use winit::window::CursorIcon;
 
@@ -19,10 +17,11 @@ use crate::{
         FocusDirection, FocusRegistration, FocusRequester, FocusRevealRequest, FocusState,
         FocusTraversalPolicy,
     },
-    layout::{
-        LayoutInput, LayoutOutput, LayoutPolicyDyn, LayoutResult, PlacementInput, RenderPolicyDyn,
+    layout::{LayoutInput, LayoutPolicyDyn, LayoutResult, PlacementScope, RenderPolicyDyn},
+    modifier::{
+        LayoutModifierChild, LayoutModifierInput, LayoutModifierNode, Modifier,
+        OrderedModifierAction,
     },
-    modifier::{LayoutModifierChild, LayoutModifierInput, LayoutModifierNode, Modifier},
     prop::CallbackWith,
     px::{PxPosition, PxSize},
     render_graph::RenderFragment,
@@ -34,8 +33,9 @@ use crate::{
 };
 
 use super::{
-    LayoutContext, LayoutSnapshotEntry, LayoutSnapshotMap,
-    constraint::{Constraint, DimensionValue, ParentConstraint},
+    LayoutContext, LayoutSnapshotEntry,
+    constraint::{Constraint, ParentConstraint},
+    nearest_replay_boundary_instance_key,
 };
 
 #[cfg(feature = "profiling")]
@@ -43,9 +43,18 @@ use crate::profiler::{Phase as ProfilerPhase, ScopeGuard as ProfilerScopeGuard};
 
 /// A ComponentNode is a node in the component tree.
 /// It represents all information about a component.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NodeRole {
+    Composition,
+    Layout,
+}
+
 pub(crate) struct ComponentNode {
     /// Component function's name, for debugging purposes.
     pub(crate) fn_name: String,
+    /// Whether this tree node represents a composition boundary or an explicit
+    /// layout node.
+    pub(crate) role: NodeRole,
     /// Stable logic identifier of this concrete component instance.
     pub(crate) instance_logic_id: u64,
     /// Stable instance identifier for this node in the current frame.
@@ -107,6 +116,12 @@ pub(crate) struct ComponentNodeMetaData {
     /// None if the node is not placed yet.
     pub rel_position: Option<PxPosition>,
     /// The node's start position, relative to the root window.
+    /// Before placement modifiers are applied.
+    /// This will be computed during drawing command's generation.
+    /// None if the node is not drawn yet.
+    pub base_abs_position: Option<PxPosition>,
+    /// The node's start position, relative to the root window.
+    /// After placement modifiers are applied.
     /// This will be computed during drawing command's generation.
     /// None if the node is not drawn yet.
     pub abs_position: Option<PxPosition>,
@@ -136,6 +151,7 @@ impl ComponentNodeMetaData {
             layout_cache_hit: false,
             placement_order: None,
             rel_position: None,
+            base_abs_position: None,
             abs_position: None,
             event_clip_rect: None,
             fragment: RenderFragment::default(),
@@ -163,12 +179,35 @@ impl Default for ComponentNodeMetaData {
     }
 }
 
-fn reset_frame_metadata(node_id: NodeId, component_node_metadatas: &ComponentNodeMetaDatas) {
-    let mut metadata = component_node_metadatas.entry(node_id).or_default();
+pub(crate) fn direct_layout_children(node_id: NodeId, tree: &ComponentNodeTree) -> Vec<NodeId> {
+    fn collect(node_id: NodeId, tree: &ComponentNodeTree, output: &mut Vec<NodeId>) {
+        let Some(node_ref) = tree.get(node_id) else {
+            return;
+        };
+        if node_ref.get().role == NodeRole::Layout {
+            output.push(node_id);
+            return;
+        }
+
+        for child_id in node_id.children(tree) {
+            collect(child_id, tree, output);
+        }
+    }
+
+    let mut children = Vec::new();
+    for child_id in node_id.children(tree) {
+        collect(child_id, tree, &mut children);
+    }
+    children
+}
+
+fn reset_frame_metadata(node_id: NodeId, component_node_metadatas: &mut ComponentNodeMetaDatas) {
+    let metadata = component_node_metadatas.entry_or_default(node_id);
     metadata.computed_data = None;
     metadata.layout_cache_hit = false;
     metadata.placement_order = None;
     metadata.rel_position = None;
+    metadata.base_abs_position = None;
     metadata.abs_position = None;
     metadata.event_clip_rect = None;
     metadata.fragment = RenderFragment::default();
@@ -178,8 +217,54 @@ fn reset_frame_metadata(node_id: NodeId, component_node_metadatas: &ComponentNod
 
 /// A tree of component nodes, using `indextree::Arena` for storage.
 pub(crate) type ComponentNodeTree = indextree::Arena<ComponentNode>;
-/// Contains all component nodes' metadatas, using a thread-safe `DashMap`.
-pub(crate) type ComponentNodeMetaDatas = DashMap<NodeId, ComponentNodeMetaData, FxBuildHasher>;
+
+/// Stores component metadata for a single UI tree.
+#[derive(Default)]
+pub(crate) struct ComponentNodeMetaDatas {
+    entries: FxHashMap<NodeId, ComponentNodeMetaData>,
+}
+
+impl ComponentNodeMetaDatas {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        node_id: NodeId,
+        metadata: ComponentNodeMetaData,
+    ) -> Option<ComponentNodeMetaData> {
+        self.entries.insert(node_id, metadata)
+    }
+
+    pub(crate) fn remove(&mut self, node_id: &NodeId) -> Option<ComponentNodeMetaData> {
+        self.entries.remove(node_id)
+    }
+
+    pub(crate) fn get(&self, node_id: &NodeId) -> Option<&ComponentNodeMetaData> {
+        self.entries.get(node_id)
+    }
+
+    pub(crate) fn get_mut(&mut self, node_id: &NodeId) -> Option<&mut ComponentNodeMetaData> {
+        self.entries.get_mut(node_id)
+    }
+
+    pub(crate) fn entry_or_default(&mut self, node_id: NodeId) -> &mut ComponentNodeMetaData {
+        self.entries.entry(node_id).or_default()
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn with_entries<R>(
+        &self,
+        f: impl FnOnce(&FxHashMap<NodeId, ComponentNodeMetaData>) -> R,
+    ) -> R {
+        f(&self.entries)
+    }
+}
 
 /// Represents errors that can occur during node measurement.
 #[derive(Debug, Clone, PartialEq)]
@@ -245,7 +330,7 @@ pub struct PointerInput<'a> {
     /// The current state of the keyboard modifiers at the time of the event.
     pub key_modifiers: winit::keyboard::ModifiersState,
     pub(crate) ime_request: &'a mut Option<ImeRequest>,
-    pub(crate) window_action: &'a mut Option<WindowAction>,
+    pub(crate) request_window_drag: &'a mut bool,
 }
 
 impl PointerInput<'_> {
@@ -263,6 +348,11 @@ impl PointerInput<'_> {
         })
     }
 
+    /// Returns the absolute cursor position in window coordinates.
+    pub fn cursor_position_abs(&self) -> Option<PxPosition> {
+        *self.cursor_position_abs
+    }
+
     /// Blocks pointer input to other components.
     pub fn block_cursor(&mut self) {
         self.cursor_position_abs.take();
@@ -274,33 +364,9 @@ impl PointerInput<'_> {
         self.block_cursor();
     }
 
-    fn set_window_action(&mut self, action: WindowAction) {
-        *self.window_action = Some(action);
-    }
-
     /// Begins a system drag move for the current window.
     pub fn drag_window(&mut self) {
-        self.set_window_action(WindowAction::DragWindow);
-    }
-
-    /// Requests that the current window be minimized.
-    pub fn minimize_window(&mut self) {
-        self.set_window_action(WindowAction::Minimize);
-    }
-
-    /// Requests that the current window be maximized.
-    pub fn maximize_window(&mut self) {
-        self.set_window_action(WindowAction::Maximize);
-    }
-
-    /// Requests that the current window toggle maximized state.
-    pub fn toggle_maximize_window(&mut self) {
-        self.set_window_action(WindowAction::ToggleMaximize);
-    }
-
-    /// Requests that the current window close.
-    pub fn close_window(&mut self) {
-        self.set_window_action(WindowAction::Close);
+        *self.request_window_drag = true;
     }
 
     /// Returns the IME session bridge for the current frame.
@@ -380,23 +446,8 @@ pub(crate) struct WindowRequests {
     /// (which is processed later in the state handling pass) will overwrite
     /// previous requests.
     pub ime_request: Option<ImeRequest>,
-    /// A window action request for the current frame.
-    pub window_action: Option<WindowAction>,
-}
-
-/// Window actions that components can request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowAction {
-    /// Begin a system drag move for the window.
-    DragWindow,
-    /// Minimize the window.
-    Minimize,
-    /// Maximize the window.
-    Maximize,
-    /// Toggle maximized state.
-    ToggleMaximize,
-    /// Request application close.
-    Close,
+    /// Whether a node requested a native window drag for the current frame.
+    pub request_window_drag: bool,
 }
 
 /// Frame-local IME bridge used by input handlers to publish text input state.
@@ -477,7 +528,7 @@ fn apply_layout_placements(
     placements: &[(u64, PxPosition)],
     tree: &ComponentNodeTree,
     children: &[NodeId],
-    component_node_metadatas: &ComponentNodeMetaDatas,
+    component_node_metadatas: &mut ComponentNodeMetaDatas,
 ) {
     if placements.is_empty() || children.is_empty() {
         return;
@@ -504,23 +555,22 @@ fn restore_cached_subtree_metadata(
     node_id: NodeId,
     rel_position: Option<PxPosition>,
     tree: &ComponentNodeTree,
-    component_node_metadatas: &ComponentNodeMetaDatas,
-    snapshots: &LayoutSnapshotMap,
+    component_node_metadatas: &mut ComponentNodeMetaDatas,
+    layout_ctx: &LayoutContext<'_>,
 ) -> bool {
     let Some(node) = tree.get(node_id) else {
         return false;
     };
     let instance_key = node.get().instance_key;
-    let Some(entry) = snapshots.get(&instance_key) else {
+    let Some(entry) = layout_ctx.snapshot(instance_key) else {
         return false;
     };
 
     let size = entry.layout_result.size;
     let placements = entry.layout_result.placements.clone();
-    drop(entry);
 
     {
-        let mut metadata = component_node_metadatas.entry(node_id).or_default();
+        let metadata = component_node_metadatas.entry_or_default(node_id);
         metadata.computed_data = Some(size);
         metadata.layout_cache_hit = true;
         if let Some(position) = rel_position {
@@ -546,8 +596,7 @@ fn restore_cached_subtree_metadata(
         let (child_rel_position, child_placement_order) = child_layout.unwrap_or((None, None));
         if let Some(placement_order) = child_placement_order {
             component_node_metadatas
-                .entry(child_id)
-                .or_default()
+                .entry_or_default(child_id)
                 .placement_order = Some(placement_order);
         }
         if !restore_cached_subtree_metadata(
@@ -555,7 +604,7 @@ fn restore_cached_subtree_metadata(
             child_rel_position,
             tree,
             component_node_metadatas,
-            snapshots,
+            layout_ctx,
         ) {
             return false;
         }
@@ -574,9 +623,8 @@ struct MeasuredNodeLayout {
 struct MeasureLayoutContext<'a, 'ctx> {
     tree: &'a ComponentNodeTree,
     children: &'a [NodeId],
-    component_node_metadatas: &'a ComponentNodeMetaDatas,
+    component_node_metadatas: *mut ComponentNodeMetaDatas,
     layout_ctx: Option<&'a LayoutContext<'ctx>>,
-    resolve_instance_key: &'a dyn Fn(NodeId) -> u64,
 }
 
 fn measure_base_layout(
@@ -591,11 +639,11 @@ fn measure_base_layout(
         layout_ctx.component_node_metadatas,
         layout_ctx.layout_ctx,
     );
-    let mut output = LayoutOutput::new(layout_ctx.resolve_instance_key);
-    let size = layout_policy.measure_dyn(&input, &mut output)?;
+    let scope = input.measure_scope();
+    let layout_result = layout_policy.measure_dyn(&scope)?;
     Ok(MeasuredNodeLayout {
-        size,
-        placements: output.finish(),
+        size: layout_result.size,
+        placements: layout_result.placements,
         measured_children: input.take_measured_children(),
     })
 }
@@ -613,6 +661,7 @@ fn measure_with_layout_modifiers(
     struct ModifierChildRunner<'a, 'b> {
         next: &'b mut dyn FnMut(&Constraint) -> Result<MeasuredNodeLayout, MeasurementError>,
         last: Option<MeasuredNodeLayout>,
+        placements: Vec<(u64, PxPosition)>,
         _marker: std::marker::PhantomData<&'a ()>,
     }
 
@@ -624,13 +673,14 @@ fn measure_with_layout_modifiers(
             Ok(size)
         }
 
-        fn place(&mut self, position: PxPosition, output: &mut LayoutOutput<'_>) {
+        fn place(&mut self, position: PxPosition) {
             let measured = self
                 .last
                 .as_ref()
                 .expect("layout modifier child must be measured before placement");
             for (instance_key, child_position) in &measured.placements {
-                output.place_instance_key(*instance_key, position + *child_position);
+                self.placements
+                    .push((*instance_key, position + *child_position));
             }
         }
     }
@@ -650,19 +700,19 @@ fn measure_with_layout_modifiers(
     let modifier_input = LayoutModifierInput {
         layout_input: &input,
     };
-    let mut output = LayoutOutput::new(layout_ctx.resolve_instance_key);
     let mut child = ModifierChildRunner {
         next: &mut next,
         last: None,
+        placements: Vec::new(),
         _marker: std::marker::PhantomData,
     };
-    let size = head.measure(&modifier_input, &mut child, &mut output)?.size;
+    let size = head.measure(&modifier_input, &mut child)?.size;
     if let Some(measured) = child.last.as_ref() {
         input.extend_measured_children(measured.measured_children.clone());
     }
     Ok(MeasuredNodeLayout {
         size,
-        placements: output.finish(),
+        placements: child.placements,
         measured_children: input.take_measured_children(),
     })
 }
@@ -674,7 +724,6 @@ fn relayout_base_layout(
     cached_child_sizes: &[ComputedData],
     constraint: &Constraint,
     cached_size: ComputedData,
-    resolve_instance_key: &dyn Fn(NodeId) -> u64,
 ) -> Option<Vec<(u64, PxPosition)>> {
     if cached_child_sizes.len() != children.len() {
         return None;
@@ -685,30 +734,22 @@ fn relayout_base_layout(
         .copied()
         .zip(cached_child_sizes.iter().copied())
         .collect();
-    let input = PlacementInput::new(
+    let scope = PlacementScope::new(
         tree,
         ParentConstraint::new(constraint),
         children,
         &child_sizes,
         cached_size,
     );
-    let mut output = LayoutOutput::new(resolve_instance_key);
-    if !layout_policy.place_children_dyn(&input, &mut output) {
-        return None;
-    }
-    Some(output.finish())
+    layout_policy.place_children_dyn(&scope)
 }
 
 /// Measures a single node recursively, returning its size or an error.
-///
-/// See [`measure_nodes`] for concurrent measurement of multiple nodes.
-/// Which is very recommended for most cases. You should only use this function
-/// when your're very sure that you only need to measure a single node.
 pub(crate) fn measure_node(
     node_id: NodeId,
     parent_constraint: &Constraint,
     tree: &ComponentNodeTree,
-    component_node_metadatas: &ComponentNodeMetaDatas,
+    component_node_metadatas: &mut ComponentNodeMetaDatas,
     layout_ctx: Option<&LayoutContext<'_>>,
 ) -> Result<ComputedData, MeasurementError> {
     let node_data_ref = tree
@@ -723,7 +764,7 @@ pub(crate) fn measure_node(
         Some(node_data.fn_name.as_str()),
     ));
 
-    let children: Vec<_> = node_id.children(tree).collect(); // No .as_ref() needed for &Arena
+    let children = direct_layout_children(node_id, tree);
     let timer = Instant::now();
 
     debug!(
@@ -740,25 +781,23 @@ pub(crate) fn measure_node(
         node_data.instance_logic_id,
         node_data.fn_name.as_str(),
     );
-    let _instance_ctx_guard = push_current_component_instance_key(node_data.instance_key);
+    let replay_boundary_instance_key = nearest_replay_boundary_instance_key(node_id, tree);
+    let _instance_ctx_guard = push_current_component_instance_key(replay_boundary_instance_key);
     let _phase_guard = push_phase(RuntimePhase::Measure);
 
-    let resolve_instance_key = |child_id: NodeId| {
-        if let Some(child) = tree.get(child_id) {
-            child.get().instance_key
-        } else {
-            debug_assert!(
-                false,
-                "Child node must exist when resolving layout placements"
-            );
-            0
-        }
-    };
     let layout_policy = &node_data.layout_policy;
-    let layout_modifiers = node_data.modifier.layout_nodes();
+    let layout_modifiers: Vec<_> = node_data
+        .modifier
+        .ordered_actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            OrderedModifierAction::Layout(node) => Some(node.node()),
+            _ => None,
+        })
+        .collect();
     if let Some(layout_ctx) = layout_ctx {
-        layout_ctx.diagnostics.inc_measure_node_calls();
-        if let Some(entry) = layout_ctx.snapshots.get(&node_data.instance_key) {
+        layout_ctx.inc_measure_node_calls();
+        if let Some(entry) = layout_ctx.snapshot(node_data.instance_key) {
             let same_constraint = entry.constraint_key == *parent_constraint;
             let node_self_measure_dirty = layout_ctx
                 .measure_self_nodes
@@ -779,7 +818,6 @@ pub(crate) fn measure_node(
                 let cached_result = entry.layout_result.clone();
                 let cached_child_constraints = entry.child_constraints.clone();
                 let cached_child_sizes = entry.child_sizes.clone();
-                drop(entry);
 
                 if !node_effective_dirty
                     && restore_cached_subtree_metadata(
@@ -787,7 +825,7 @@ pub(crate) fn measure_node(
                         None,
                         tree,
                         component_node_metadatas,
-                        layout_ctx.snapshots,
+                        layout_ctx,
                     )
                 {
                     apply_layout_placements(
@@ -796,7 +834,7 @@ pub(crate) fn measure_node(
                         &children,
                         component_node_metadatas,
                     );
-                    layout_ctx.diagnostics.inc_cache_hit_direct();
+                    layout_ctx.inc_cache_hit_direct();
                     return Ok(cached_result.size);
                 }
 
@@ -817,34 +855,22 @@ pub(crate) fn measure_node(
                     })
                     .collect();
 
-                let nodes_to_measure = dirty_children
-                    .iter()
-                    .map(|(_, child_id, constraint)| (*child_id, *constraint))
-                    .collect();
-                let measured = measure_nodes(
-                    nodes_to_measure,
-                    tree,
-                    component_node_metadatas,
-                    Some(layout_ctx),
-                );
                 let mut child_size_changed = false;
                 for (index, child_id, _constraint) in &dirty_children {
-                    let Some(result) = measured.get(child_id) else {
-                        layout_ctx.diagnostics.inc_cache_miss_no_entry();
-                        return Err(MeasurementError::NodeNotFoundInTree);
-                    };
-                    match result {
-                        Ok(size) => {
-                            if *size != cached_child_sizes[*index] {
-                                child_size_changed = true;
-                                break;
-                            }
-                        }
-                        Err(err) => return Err(err.clone()),
+                    let size = measure_node(
+                        *child_id,
+                        &cached_child_constraints[*index],
+                        tree,
+                        component_node_metadatas,
+                        Some(layout_ctx),
+                    )?;
+                    if size != cached_child_sizes[*index] {
+                        child_size_changed = true;
+                        break;
                     }
                 }
                 if child_size_changed {
-                    layout_ctx.diagnostics.inc_cache_miss_child_size();
+                    layout_ctx.inc_cache_miss_child_size();
                 } else {
                     let mut restored = true;
                     for child_id in &children {
@@ -863,7 +889,7 @@ pub(crate) fn measure_node(
                             None,
                             tree,
                             component_node_metadatas,
-                            layout_ctx.snapshots,
+                            layout_ctx,
                         ) {
                             restored = false;
                             break;
@@ -879,11 +905,10 @@ pub(crate) fn measure_node(
                                 &cached_child_sizes,
                                 parent_constraint,
                                 cached_result.size,
-                                &resolve_instance_key,
                             ) {
                                 Some(placements) => placements,
                                 None => {
-                                    layout_ctx.diagnostics.inc_cache_miss_dirty_self();
+                                    layout_ctx.inc_cache_miss_dirty_self();
                                     // This node can reuse measurement but not placements; fall back
                                     // to a full measure+place pass below.
                                     Vec::new()
@@ -901,12 +926,12 @@ pub(crate) fn measure_node(
                                 &children,
                                 component_node_metadatas,
                             );
-                            if let Some(mut metadata) = component_node_metadatas.get_mut(&node_id) {
+                            if let Some(metadata) = component_node_metadatas.get_mut(&node_id) {
                                 metadata.computed_data = Some(cached_result.size);
                                 metadata.layout_cache_hit = true;
                             }
                             if node_self_placement_dirty {
-                                layout_ctx.snapshots.insert(
+                                layout_ctx.insert_snapshot(
                                     node_data.instance_key,
                                     LayoutSnapshotEntry {
                                         constraint_key: *parent_constraint,
@@ -919,23 +944,23 @@ pub(crate) fn measure_node(
                                     },
                                 );
                             }
-                            layout_ctx.diagnostics.inc_cache_hit_boundary();
+                            layout_ctx.inc_cache_hit_boundary();
                             return Ok(cached_result.size);
                         }
                     }
                 }
             }
             if !same_constraint {
-                layout_ctx.diagnostics.inc_cache_miss_constraint();
+                layout_ctx.inc_cache_miss_constraint();
             } else if node_self_measure_dirty || node_self_placement_dirty {
-                layout_ctx.diagnostics.inc_cache_miss_dirty_self();
+                layout_ctx.inc_cache_miss_dirty_self();
             } else if node_effective_dirty {
-                layout_ctx.diagnostics.inc_cache_miss_child_size();
+                layout_ctx.inc_cache_miss_child_size();
             } else {
-                layout_ctx.diagnostics.inc_cache_miss_no_entry();
+                layout_ctx.inc_cache_miss_no_entry();
             }
         } else {
-            layout_ctx.diagnostics.inc_cache_miss_no_entry();
+            layout_ctx.inc_cache_miss_no_entry();
         }
     }
 
@@ -945,7 +970,6 @@ pub(crate) fn measure_node(
         children: &children,
         component_node_metadatas,
         layout_ctx,
-        resolve_instance_key: &resolve_instance_key,
     };
     let measured = measure_with_layout_modifiers(
         &layout_modifiers,
@@ -959,8 +983,7 @@ pub(crate) fn measure_node(
     apply_layout_placements(&placements, tree, &children, component_node_metadatas);
 
     component_node_metadatas
-        .entry(node_id)
-        .or_default()
+        .entry_or_default(node_id)
         .computed_data = Some(size);
 
     #[cfg(feature = "profiling")]
@@ -986,7 +1009,7 @@ pub(crate) fn measure_node(
         }
         if cacheable {
             let layout_result = LayoutResult { size, placements };
-            layout_ctx.snapshots.insert(
+            layout_ctx.insert_snapshot(
                 node_data.instance_key,
                 LayoutSnapshotEntry {
                     constraint_key: *parent_constraint,
@@ -995,10 +1018,10 @@ pub(crate) fn measure_node(
                     child_sizes,
                 },
             );
-            layout_ctx.diagnostics.inc_cache_store_count();
+            layout_ctx.inc_cache_store_count();
         } else {
-            layout_ctx.snapshots.remove(&node_data.instance_key);
-            layout_ctx.diagnostics.inc_cache_drop_non_cacheable_count();
+            layout_ctx.remove_snapshot(node_data.instance_key);
+            layout_ctx.inc_cache_drop_non_cacheable_count();
         }
     }
 
@@ -1022,40 +1045,11 @@ pub(crate) fn place_node(
     node: indextree::NodeId,
     rel_position: PxPosition,
     placement_order: u64,
-    component_node_metadatas: &ComponentNodeMetaDatas,
+    component_node_metadatas: &mut ComponentNodeMetaDatas,
 ) {
-    let mut metadata = component_node_metadatas.entry(node).or_default();
+    let metadata = component_node_metadatas.entry_or_default(node);
     metadata.rel_position = Some(rel_position);
     metadata.placement_order = Some(placement_order);
-}
-
-/// Concurrently measures multiple nodes using Rayon for parallelism.
-pub(crate) fn measure_nodes(
-    nodes_to_measure: Vec<(NodeId, Constraint)>,
-    tree: &ComponentNodeTree,
-    component_node_metadatas: &ComponentNodeMetaDatas,
-    layout_ctx: Option<&LayoutContext<'_>>,
-) -> HashMap<NodeId, Result<ComputedData, MeasurementError>> {
-    if nodes_to_measure.is_empty() {
-        return HashMap::new();
-    }
-    // metadata must be reseted and initialized for each node to measure.
-    for (node_id, _) in &nodes_to_measure {
-        reset_frame_metadata(*node_id, component_node_metadatas);
-    }
-    nodes_to_measure
-        .into_par_iter()
-        .map(|(node_id, parent_constraint)| {
-            let result = measure_node(
-                node_id,
-                &parent_constraint,
-                tree,
-                component_node_metadatas,
-                layout_ctx,
-            );
-            (node_id, result)
-        })
-        .collect::<HashMap<NodeId, Result<ComputedData, MeasurementError>>>()
 }
 
 /// Layout information computed at the measure stage, representing the size of a
@@ -1091,20 +1085,10 @@ impl ComputedData {
         height: Px(0),
     };
 
-    /// Calculates a "minimum" size based on a constraint.
-    /// For Fixed, it's the fixed value. For Wrap/Fill, it's their 'min' if
-    /// Some, else 0.
+    /// Calculates the minimum size guaranteed by a constraint interval.
     pub fn min_from_constraint(constraint: &Constraint) -> Self {
-        let width = match constraint.width {
-            DimensionValue::Fixed(w) => w,
-            DimensionValue::Wrap { min, .. } => min.unwrap_or(Px(0)),
-            DimensionValue::Fill { min, .. } => min.unwrap_or(Px(0)),
-        };
-        let height = match constraint.height {
-            DimensionValue::Fixed(h) => h,
-            DimensionValue::Wrap { min, .. } => min.unwrap_or(Px(0)),
-            DimensionValue::Fill { min, .. } => min.unwrap_or(Px(0)),
-        };
+        let width = constraint.width.min;
+        let height = constraint.height.min;
         Self { width, height }
     }
 

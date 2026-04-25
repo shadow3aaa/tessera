@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 
 use tessera_ui::{
-    CallbackWith, ComputedData, Dp, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError,
-    Modifier, Px, PxPosition, RenderSlot, current_frame_nanos, layout::layout_primitive,
+    CallbackWith, ComputedData, Dp, LayoutPolicy, LayoutResult, MeasurementError, Modifier, Px,
+    PxPosition, RenderSlot, current_frame_nanos,
+    layout::{MeasureScope, layout},
     receive_frame_nanos, remember, tessera, use_context,
 };
 
@@ -70,9 +71,13 @@ impl ButtonGroupsBuilder {
         F: Fn() + Send + Sync + 'static,
         C: Fn(bool) + Send + Sync + 'static,
     {
-        self.props.child_closures.push(RenderSlot::new(child));
+        self.props
+            .child_closures
+            .get_or_insert_with(Vec::new)
+            .push(RenderSlot::new(child));
         self.props
             .on_click_closures
+            .get_or_insert_with(Vec::new)
             .push(CallbackWith::new(on_click));
         self
     }
@@ -83,8 +88,14 @@ impl ButtonGroupsBuilder {
         child: impl Into<RenderSlot>,
         on_click: impl Into<CallbackWith<bool>>,
     ) -> Self {
-        self.props.child_closures.push(child.into());
-        self.props.on_click_closures.push(on_click.into());
+        self.props
+            .child_closures
+            .get_or_insert_with(Vec::new)
+            .push(child.into());
+        self.props
+            .on_click_closures
+            .get_or_insert_with(Vec::new)
+            .push(on_click.into());
         self
     }
 }
@@ -118,10 +129,10 @@ impl ButtonGroupsLayout {
         };
         let active_button_shape = match style {
             ButtonGroupsStyle::Standard => Shape::rounded_rectangle(Dp(16.0)),
-            ButtonGroupsStyle::Connected => Shape::capsule(),
+            ButtonGroupsStyle::Connected => Shape::CAPSULE,
         };
         let inactive_button_shape = match style {
-            ButtonGroupsStyle::Standard => Shape::capsule(),
+            ButtonGroupsStyle::Standard => Shape::CAPSULE,
             ButtonGroupsStyle::Connected => Shape::rounded_rectangle(Dp(16.0)),
         };
         let inactive_button_shape_start = match style {
@@ -209,12 +220,17 @@ impl ButtonGroupsState {
 /// ```
 #[tessera]
 pub fn button_groups(
-    size: ButtonGroupsSize,
-    style: ButtonGroupsStyle,
-    selection_mode: ButtonGroupsSelectionMode,
-    #[prop(skip_setter)] child_closures: Vec<RenderSlot>,
-    #[prop(skip_setter)] on_click_closures: Vec<CallbackWith<bool>>,
+    size: Option<ButtonGroupsSize>,
+    style: Option<ButtonGroupsStyle>,
+    selection_mode: Option<ButtonGroupsSelectionMode>,
+    #[prop(skip_setter)] child_closures: Option<Vec<RenderSlot>>,
+    #[prop(skip_setter)] on_click_closures: Option<Vec<CallbackWith<bool>>>,
 ) {
+    let size = size.unwrap_or_default();
+    let style = style.unwrap_or_default();
+    let selection_mode = selection_mode.unwrap_or_default();
+    let child_closures = child_closures.unwrap_or_default();
+    let on_click_closures = on_click_closures.unwrap_or_default();
     let state = remember(ButtonGroupsState::default);
     let layout = ButtonGroupsLayout::new(size, style);
     let child_len = child_closures.len();
@@ -241,7 +257,7 @@ pub fn button_groups(
                             });
                         })
                         .shape(item_layout.active_button_shape)
-                        .with_child(move || {
+                        .child(move || {
                             elastic_container()
                                 .state(state)
                                 .index(index)
@@ -280,7 +296,7 @@ pub fn button_groups(
                         })
                         .color(scheme.secondary_container)
                         .shape(shape)
-                        .with_child(move || {
+                        .child(move || {
                             elastic_container()
                                 .state(state)
                                 .index(index)
@@ -355,10 +371,11 @@ impl ElasticState {
 #[tessera]
 fn elastic_container(
     state: Option<tessera_ui::State<ButtonGroupsState>>,
-    index: usize,
+    index: Option<usize>,
     child: Option<RenderSlot>,
 ) {
     let state = state.expect("elastic_container requires state");
+    let index = index.unwrap_or(0);
     let child = child.expect("elastic_container requires child content");
     let frame_tick = remember(|| 0_u64);
     let _ = frame_tick.with(|tick| *tick);
@@ -393,7 +410,7 @@ fn elastic_container(
         });
     }
 
-    layout_primitive()
+    layout()
         .layout_policy(ElasticContainerLayout { progress })
         .child(move || {
             child.render();
@@ -406,19 +423,17 @@ struct ElasticContainerLayout {
 }
 
 impl LayoutPolicy for ElasticContainerLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let child_id = input.children_ids()[0];
-        let child_size = input.measure_child_in_parent_constraint(child_id)?;
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let child = input.children()[0];
+        let child_constraint = input.parent_constraint().without_min();
+        let child_size = child.measure(&child_constraint)?;
         let additional_width = child_size.width.mul_f32(0.15 * self.progress);
-        output.place_child(child_id, PxPosition::new(additional_width / 2, Px::ZERO));
+        result.place_child(child, PxPosition::new(additional_width / 2, Px::ZERO));
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: child_size.width + additional_width,
             height: child_size.height,
-        })
+        }))
     }
 }

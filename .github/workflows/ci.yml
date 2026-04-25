@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
@@ -32,13 +34,15 @@ jobs:
       - name: Install rust-script
         run: cargo install rust-script
       - name: Check formatting
-        run: cargo fmt --all -- --check && rust-script scripts/check-imports.rs .
+        run: rust-script scripts/check-imports.rs --check .
 
   check_macos:
     name: Check macOS
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install stable
         run: rustup toolchain install stable --profile minimal
@@ -54,6 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
@@ -74,6 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: aarch64-linux-android

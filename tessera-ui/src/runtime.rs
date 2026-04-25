@@ -466,13 +466,18 @@ impl<T> RenderSlotWithCell<T> {
 
 #[derive(Default)]
 struct LayoutDirtyTracker {
-    previous_layout_policies_by_node: HashMap<u64, Box<dyn LayoutPolicyDyn>>,
-    frame_layout_policies_by_node: HashMap<u64, Box<dyn LayoutPolicyDyn>>,
+    previous_layout_inputs_by_node: HashMap<u64, LayoutInputSnapshot>,
+    frame_layout_inputs_by_node: HashMap<u64, LayoutInputSnapshot>,
     pending_measure_self_dirty_nodes: HashSet<u64>,
     ready_measure_self_dirty_nodes: HashSet<u64>,
     pending_placement_self_dirty_nodes: HashSet<u64>,
     ready_placement_self_dirty_nodes: HashSet<u64>,
     previous_children_by_node: HashMap<u64, Vec<u64>>,
+}
+
+struct LayoutInputSnapshot {
+    policy: Box<dyn LayoutPolicyDyn>,
+    modifier: Modifier,
 }
 
 #[derive(Default)]
@@ -667,7 +672,7 @@ pub(crate) fn clear_redraw_waker() {
     with_redraw_waker_mut(|waker| *waker = None);
 }
 
-pub(crate) fn current_component_instance_key_from_scope() -> Option<u64> {
+pub(crate) fn current_replay_boundary_instance_key_from_scope() -> Option<u64> {
     with_execution_context(|context| context.current_component_instance_stack.last().copied())
 }
 
@@ -682,7 +687,7 @@ fn with_persistent_focus_handle_store_mut<R>(
 }
 
 fn current_persistent_focus_handle_key<K: Hash>(slot_key: K) -> PersistentFocusHandleKey {
-    let Some(instance_key) = current_component_instance_key_from_scope() else {
+    let Some(instance_key) = current_replay_boundary_instance_key_from_scope() else {
         panic!("persistent focus handles must be requested during a component build");
     };
     let slot_hash = hash_components(&[&slot_key]);
@@ -855,7 +860,7 @@ fn consume_pending_build_invalidation(instance_key: u64) -> bool {
     with_build_invalidation_tracker_mut(|tracker| tracker.dirty_instance_keys.remove(&instance_key))
 }
 
-pub(crate) fn record_component_invalidation_for_instance_key(instance_key: u64) {
+pub(crate) fn record_replay_boundary_invalidation_for_instance_key(instance_key: u64) {
     let inserted = with_build_invalidation_tracker_mut(|tracker| {
         tracker.dirty_instance_keys.insert(instance_key)
     });
@@ -868,7 +873,7 @@ fn track_state_read_dependency(slot: SlotHandle, generation: u64) {
     if !matches!(current_phase(), Some(RuntimePhase::Build)) {
         return;
     }
-    let Some(reader_instance_key) = current_component_instance_key_from_scope() else {
+    let Some(reader_instance_key) = current_replay_boundary_instance_key_from_scope() else {
         return;
     };
 
@@ -909,7 +914,7 @@ fn track_focus_dependency(kind: FocusReadDependencyKind) {
     if !matches!(current_phase(), Some(RuntimePhase::Build)) {
         return;
     }
-    let Some(reader_instance_key) = current_component_instance_key_from_scope() else {
+    let Some(reader_instance_key) = current_replay_boundary_instance_key_from_scope() else {
         return;
     };
 
@@ -966,7 +971,7 @@ pub(crate) fn track_render_slot_read_dependency(handle: FunctorHandle) {
     if !matches!(current_phase(), Some(RuntimePhase::Build)) {
         return;
     }
-    let Some(reader_instance_key) = current_component_instance_key_from_scope() else {
+    let Some(reader_instance_key) = current_replay_boundary_instance_key_from_scope() else {
         return;
     };
 
@@ -1265,7 +1270,7 @@ where
     let frame_nanos_state = remember(current_frame_nanos);
     let _ = frame_nanos_state.get();
 
-    let owner_instance_key = current_component_instance_key_from_scope()
+    let owner_instance_key = current_replay_boundary_instance_key_from_scope()
         .unwrap_or_else(|| panic!("receive_frame_nanos requires an active component node context"));
     let key = compute_frame_nanos_receiver_key();
 
@@ -1316,30 +1321,44 @@ fn with_layout_dirty_tracker_mut<R>(f: impl FnOnce(&mut LayoutDirtyTracker) -> R
     RUNTIME_GLOBALS.with(|globals| f(&mut globals.layout_dirty_tracker.borrow_mut()))
 }
 
-fn record_layout_policy_dirty(instance_key: u64, layout_policy: &dyn LayoutPolicyDyn) {
+fn record_layout_policy_dirty(
+    instance_key: u64,
+    layout_policy: &dyn LayoutPolicyDyn,
+    modifier: &Modifier,
+) {
     if current_phase() != Some(RuntimePhase::Build) {
         return;
     }
     with_layout_dirty_tracker_mut(|tracker| {
-        let (measure_changed, placement_changed, next_layout_policy) = match tracker
-            .previous_layout_policies_by_node
-            .remove(&instance_key)
-        {
-            Some(previous) => {
-                let measure_changed = !previous.dyn_measure_eq(layout_policy);
-                let placement_changed = !previous.dyn_placement_eq(layout_policy);
-                if !measure_changed && !placement_changed {
-                    (false, false, previous)
-                } else {
-                    (
-                        measure_changed,
-                        placement_changed,
-                        layout_policy.clone_box(),
-                    )
+        let (measure_changed, placement_changed, next_layout_inputs) =
+            match tracker.previous_layout_inputs_by_node.remove(&instance_key) {
+                Some(previous) => {
+                    let measure_changed = !previous.policy.dyn_measure_eq(layout_policy)
+                        || !previous.modifier.layout_measure_eq(modifier);
+                    let placement_changed = !previous.policy.dyn_placement_eq(layout_policy)
+                        || !previous.modifier.layout_placement_eq(modifier);
+                    if !measure_changed && !placement_changed {
+                        (false, false, previous)
+                    } else {
+                        (
+                            measure_changed,
+                            placement_changed,
+                            LayoutInputSnapshot {
+                                policy: layout_policy.clone_box(),
+                                modifier: modifier.clone(),
+                            },
+                        )
+                    }
                 }
-            }
-            None => (true, true, layout_policy.clone_box()),
-        };
+                None => (
+                    true,
+                    true,
+                    LayoutInputSnapshot {
+                        policy: layout_policy.clone_box(),
+                        modifier: modifier.clone(),
+                    },
+                ),
+            };
         if measure_changed {
             tracker
                 .pending_measure_self_dirty_nodes
@@ -1350,14 +1369,14 @@ fn record_layout_policy_dirty(instance_key: u64, layout_policy: &dyn LayoutPolic
                 .insert(instance_key);
         }
         tracker
-            .frame_layout_policies_by_node
-            .insert(instance_key, next_layout_policy);
+            .frame_layout_inputs_by_node
+            .insert(instance_key, next_layout_inputs);
     });
 }
 
 pub(crate) fn begin_frame_layout_dirty_tracking() {
     with_layout_dirty_tracker_mut(|tracker| {
-        tracker.frame_layout_policies_by_node.clear();
+        tracker.frame_layout_inputs_by_node.clear();
         tracker.pending_measure_self_dirty_nodes.clear();
         tracker.pending_placement_self_dirty_nodes.clear();
     });
@@ -1369,8 +1388,8 @@ pub(crate) fn finalize_frame_layout_dirty_tracking() {
             std::mem::take(&mut tracker.pending_measure_self_dirty_nodes);
         tracker.ready_placement_self_dirty_nodes =
             std::mem::take(&mut tracker.pending_placement_self_dirty_nodes);
-        tracker.previous_layout_policies_by_node =
-            std::mem::take(&mut tracker.frame_layout_policies_by_node);
+        tracker.previous_layout_inputs_by_node =
+            std::mem::take(&mut tracker.frame_layout_inputs_by_node);
     });
 }
 
@@ -1582,7 +1601,7 @@ where
 
         let subscribers = state_read_subscribers(self.slot, self.generation);
         for instance_key in subscribers {
-            record_component_invalidation_for_instance_key(instance_key);
+            record_replay_boundary_invalidation_for_instance_key(instance_key);
         }
         result
     }
@@ -1793,7 +1812,7 @@ impl TesseraRuntime {
 
     pub(crate) fn set_current_accessibility(&mut self, accessibility: Option<AccessibilityNode>) {
         if let Some(node_id) = current_node_id()
-            && let Some(mut metadata) = self.component_tree.metadatas().get_mut(&node_id)
+            && let Some(metadata) = self.component_tree.metadatas_mut().get_mut(&node_id)
         {
             metadata.accessibility = accessibility;
         } else {
@@ -1809,7 +1828,7 @@ impl TesseraRuntime {
         handler: Option<AccessibilityActionHandler>,
     ) {
         if let Some(node_id) = current_node_id()
-            && let Some(mut metadata) = self.component_tree.metadatas().get_mut(&node_id)
+            && let Some(metadata) = self.component_tree.metadatas_mut().get_mut(&node_id)
         {
             metadata.accessibility_action_handler = handler;
         } else {
@@ -2002,7 +2021,11 @@ impl TesseraRuntime {
 
     pub(crate) fn finalize_current_layout_policy_dirty(&mut self) {
         if let Some(node) = self.component_tree.current_node() {
-            record_layout_policy_dirty(node.instance_key, node.layout_policy.as_ref());
+            record_layout_policy_dirty(
+                node.instance_key,
+                node.layout_policy.as_ref(),
+                &node.modifier,
+            );
         } else {
             debug_assert!(
                 false,
@@ -2675,7 +2698,7 @@ where
     F: Fn() + Send + Sync + 'static,
 {
     let render = Arc::new(render) as Arc<dyn Fn() + Send + Sync>;
-    let creator_instance_key = current_component_instance_key_from_scope()
+    let creator_instance_key = current_replay_boundary_instance_key_from_scope()
         .unwrap_or_else(|| panic!("RenderSlot handles must be created during a component build"));
     let (cell, handle) = remember_functor_cell_with_key((), {
         let render = Arc::clone(&render);
@@ -2683,8 +2706,8 @@ where
     });
     cell.update(render);
     for instance_key in render_slot_read_subscribers(handle) {
-        if instance_key != creator_instance_key {
-            record_component_invalidation_for_instance_key(instance_key);
+        if instance_key != creator_instance_key && !is_instance_key_build_dirty(instance_key) {
+            record_replay_boundary_invalidation_for_instance_key(instance_key);
         }
     }
     handle
@@ -2701,17 +2724,18 @@ where
     F: Fn(T) + Send + Sync + 'static,
 {
     let render = Arc::new(render) as Arc<dyn Fn(T) + Send + Sync>;
-    let creator_instance_key = current_component_instance_key_from_scope().unwrap_or_else(|| {
-        panic!("RenderSlotWith handles must be created during a component build")
-    });
+    let creator_instance_key =
+        current_replay_boundary_instance_key_from_scope().unwrap_or_else(|| {
+            panic!("RenderSlotWith handles must be created during a component build")
+        });
     let (cell, handle) = remember_functor_cell_with_key((), {
         let render = Arc::clone(&render);
         move || RenderSlotWithCell::new(render)
     });
     cell.update(render);
     for instance_key in render_slot_read_subscribers(handle) {
-        if instance_key != creator_instance_key {
-            record_component_invalidation_for_instance_key(instance_key);
+        if instance_key != creator_instance_key && !is_instance_key_build_dirty(instance_key) {
+            record_replay_boundary_invalidation_for_instance_key(instance_key);
         }
     }
     handle
@@ -3163,15 +3187,73 @@ where
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
     use super::*;
     use crate::execution_context::{
         reset_execution_context, with_execution_context, with_execution_context_mut,
     };
-    use crate::layout::{LayoutInput, LayoutOutput, LayoutPolicy};
-    use crate::prop::{Callback, RenderSlot};
+    use crate::layout::{LayoutPolicy, MeasureScope};
+    use crate::modifier::{LayoutModifierChild, LayoutModifierInput, LayoutModifierNode};
+    use crate::prop::{
+        Callback, CallbackWith, ComponentReplayData, RenderSlot, make_component_runner,
+    };
+    use crate::tessera;
+
+    #[tessera(crate)]
+    fn required_value_component(value: Option<usize>, on_value: Option<CallbackWith<usize>>) {
+        let value = value.expect("missing required prop `value` in `required_value_component`");
+        if let Some(on_value) = on_value {
+            on_value.call(value);
+        }
+    }
+
+    #[tessera(crate)]
+    fn optional_value_component(
+        value: Option<usize>,
+        on_value: Option<CallbackWith<Option<usize>>>,
+    ) {
+        if let Some(on_value) = on_value {
+            on_value.call(value);
+        }
+    }
+
+    #[tessera(crate)]
+    fn defaulted_value_component(value: Option<usize>, on_value: Option<CallbackWith<usize>>) {
+        let value = value.unwrap_or(7);
+        if let Some(on_value) = on_value {
+            on_value.call(value);
+        }
+    }
+
+    fn panic_message(err: Box<dyn std::any::Any + Send>) -> String {
+        match err.downcast::<String>() {
+            Ok(message) => *message,
+            Err(err) => match err.downcast::<&'static str>() {
+                Ok(message) => (*message).to_string(),
+                Err(_) => "<non-string panic>".to_string(),
+            },
+        }
+    }
+
+    fn seed_previous_replay_snapshot(instance_key: u64) {
+        let replay = ComponentReplayData::new(make_component_runner::<()>(|_| {}), &());
+        with_component_replay_tracker_mut(|tracker| {
+            tracker.previous_nodes.insert(
+                instance_key,
+                ReplayNodeSnapshot {
+                    instance_key,
+                    parent_instance_key: None,
+                    instance_logic_id: 0,
+                    group_path: Vec::new(),
+                    instance_key_override: None,
+                    fn_name: "test_component".to_string(),
+                    replay,
+                },
+            );
+        });
+    }
 
     fn with_test_component_scope<R>(component_type_id: u64, f: impl FnOnce() -> R) -> R {
         reset_execution_context();
@@ -3186,7 +3268,7 @@ mod tests {
     #[test]
     fn frame_receiver_uses_component_scope_instance_key() {
         let _instance_guard = push_current_component_instance_key(7);
-        assert_eq!(current_component_instance_key_from_scope(), Some(7));
+        assert_eq!(current_replay_boundary_instance_key_from_scope(), Some(7));
     }
 
     #[test]
@@ -3280,10 +3362,9 @@ mod tests {
     impl LayoutPolicy for DirtySplitPolicy {
         fn measure(
             &self,
-            _input: &LayoutInput<'_>,
-            _output: &mut LayoutOutput<'_>,
-        ) -> Result<crate::ComputedData, crate::MeasurementError> {
-            Ok(crate::ComputedData::ZERO)
+            _input: &MeasureScope<'_>,
+        ) -> Result<crate::LayoutResult, crate::MeasurementError> {
+            Ok(crate::LayoutResult::new(crate::ComputedData::ZERO))
         }
 
         fn measure_eq(&self, other: &Self) -> bool {
@@ -3292,6 +3373,26 @@ mod tests {
 
         fn placement_eq(&self, other: &Self) -> bool {
             self.placement_key == other.placement_key
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    struct DirtyMeasureModifierNode {
+        width: u32,
+    }
+
+    impl LayoutModifierNode for DirtyMeasureModifierNode {
+        fn measure(
+            &self,
+            _input: &LayoutModifierInput<'_>,
+            child: &mut dyn LayoutModifierChild,
+        ) -> Result<crate::LayoutModifierOutput, crate::MeasurementError> {
+            let size = child.measure(&crate::Constraint::exact(
+                crate::Px::new(self.width as i32),
+                crate::Px::new(10),
+            ))?;
+            child.place(crate::PxPosition::ZERO);
+            Ok(crate::LayoutModifierOutput { size })
         }
     }
 
@@ -3308,6 +3409,7 @@ mod tests {
                     measure_key: 0,
                     placement_key: 0,
                 },
+                &Modifier::new(),
             );
         }
         finalize_frame_layout_dirty_tracking();
@@ -3324,6 +3426,7 @@ mod tests {
                     measure_key: 0,
                     placement_key: 1,
                 },
+                &Modifier::new(),
             );
         }
         finalize_frame_layout_dirty_tracking();
@@ -3340,6 +3443,46 @@ mod tests {
                     measure_key: 1,
                     placement_key: 1,
                 },
+                &Modifier::new(),
+            );
+        }
+        finalize_frame_layout_dirty_tracking();
+        let dirty = take_layout_dirty_nodes();
+        assert!(dirty.measure_self_nodes.contains(&1));
+        assert!(!dirty.placement_self_nodes.contains(&1));
+    }
+
+    #[test]
+    fn layout_dirty_tracking_marks_measure_when_layout_modifier_changes() {
+        reset_layout_dirty_tracking();
+
+        begin_frame_layout_dirty_tracking();
+        {
+            let _phase_guard = push_phase(RuntimePhase::Build);
+            let modifier = Modifier::new().push_layout(DirtyMeasureModifierNode { width: 10 });
+            record_layout_policy_dirty(
+                1,
+                &DirtySplitPolicy {
+                    measure_key: 0,
+                    placement_key: 0,
+                },
+                &modifier,
+            );
+        }
+        finalize_frame_layout_dirty_tracking();
+        let _ = take_layout_dirty_nodes();
+
+        begin_frame_layout_dirty_tracking();
+        {
+            let _phase_guard = push_phase(RuntimePhase::Build);
+            let modifier = Modifier::new().push_layout(DirtyMeasureModifierNode { width: 20 });
+            record_layout_policy_dirty(
+                1,
+                &DirtySplitPolicy {
+                    measure_key: 0,
+                    placement_key: 0,
+                },
+                &modifier,
             );
         }
         finalize_frame_layout_dirty_tracking();
@@ -3474,20 +3617,90 @@ mod tests {
     }
 
     #[test]
+    fn tessera_panics_when_required_prop_is_missing() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_test_component_scope(11013, || {
+                required_value_component();
+            });
+        }));
+
+        let message = panic_message(result.expect_err("missing required prop should panic"));
+        assert!(message.contains("missing required prop `value`"));
+        assert!(message.contains("required_value_component"));
+    }
+
+    #[test]
+    fn tessera_uses_none_for_omitted_option_props() {
+        let observed = Arc::new(AtomicUsize::new(99));
+
+        with_test_component_scope(11014, || {
+            let observed = Arc::clone(&observed);
+            optional_value_component().on_value(move |value: Option<usize>| {
+                observed.store(
+                    value.map_or(0, |next| next.saturating_add(1)),
+                    Ordering::SeqCst,
+                );
+            });
+        });
+
+        assert_eq!(observed.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn tessera_uses_function_body_default_for_omitted_option_props() {
+        let observed = Arc::new(AtomicUsize::new(0));
+
+        with_test_component_scope(11015, || {
+            let observed = Arc::clone(&observed);
+            defaulted_value_component().on_value(move |value: usize| {
+                observed.store(value, Ordering::SeqCst);
+            });
+        });
+
+        assert_eq!(observed.load(Ordering::SeqCst), 7);
+    }
+
+    #[test]
+    fn tessera_accepts_non_default_required_props_when_provided() {
+        let observed = Arc::new(AtomicUsize::new(0));
+
+        with_test_component_scope(11016, || {
+            let observed = Arc::clone(&observed);
+            required_value_component()
+                .value(13)
+                .on_value(move |value: usize| {
+                    observed.store(value, Ordering::SeqCst);
+                });
+        });
+
+        assert_eq!(observed.load(Ordering::SeqCst), 13);
+    }
+
+    #[test]
     fn render_slot_update_invalidates_reader_instance() {
         reset_slots();
+        reset_component_replay_tracking();
         reset_render_slot_read_dependencies();
         reset_build_invalidations();
 
-        begin_recompose_slot_epoch();
-        let first = with_test_component_scope(11002, || RenderSlot::new(|| {}));
+        let reader_boundary_key = Arc::new(AtomicU64::new(0));
 
-        let reader_instance_key = with_test_component_scope(11003, || {
-            let instance_key =
-                current_component_instance_key_from_scope().expect("reader must have instance key");
-            first.render();
-            instance_key
+        begin_recompose_slot_epoch();
+        let first = with_test_component_scope(11002, || {
+            let reader_boundary_key = Arc::clone(&reader_boundary_key);
+            RenderSlot::new(move || {
+                let instance_key = current_replay_boundary_instance_key_from_scope()
+                    .expect("slot render must run inside replay boundary");
+                reader_boundary_key.store(instance_key, Ordering::SeqCst);
+            })
         });
+
+        with_test_component_scope(11003, || {
+            first.render();
+        });
+        let reader_instance_key = reader_boundary_key.load(Ordering::SeqCst);
+        assert!(reader_instance_key != 0);
+        seed_previous_replay_snapshot(reader_instance_key);
 
         assert!(!has_pending_build_invalidations());
 
@@ -3501,6 +3714,51 @@ mod tests {
         let mut expected = HashSet::default();
         expected.insert(reader_instance_key);
         assert_eq!(invalidations.dirty_instance_keys, expected);
+    }
+
+    #[test]
+    fn render_slot_update_skips_reader_already_dirty_in_current_build() {
+        reset_slots();
+        reset_component_replay_tracking();
+        reset_render_slot_read_dependencies();
+        reset_build_invalidations();
+        reset_execution_context();
+
+        let reader_boundary_key = Arc::new(AtomicU64::new(0));
+
+        begin_recompose_slot_epoch();
+        let first = with_test_component_scope(12002, || {
+            let reader_boundary_key = Arc::clone(&reader_boundary_key);
+            RenderSlot::new(move || {
+                let instance_key = current_replay_boundary_instance_key_from_scope()
+                    .expect("slot render must run inside replay boundary");
+                reader_boundary_key.store(instance_key, Ordering::SeqCst);
+            })
+        });
+
+        with_test_component_scope(12003, || {
+            first.render();
+        });
+        let reader_instance_key = reader_boundary_key.load(Ordering::SeqCst);
+        assert!(reader_instance_key != 0);
+        seed_previous_replay_snapshot(reader_instance_key);
+
+        assert!(!has_pending_build_invalidations());
+
+        begin_recompose_slot_epoch();
+        let mut dirty = HashSet::default();
+        dirty.insert(reader_instance_key);
+        with_build_dirty_instance_keys(&dirty, || {
+            let mut arena = crate::Arena::<()>::new();
+            let node_id = arena.new_node(());
+            let _phase_guard = push_phase(RuntimePhase::Build);
+            let _node_guard = push_current_node(node_id, 12002, "test_component");
+            let _instance_guard = push_current_component_instance_key(current_instance_key());
+            let second = RenderSlot::new(|| {});
+            assert!(first == second);
+        });
+
+        assert!(!has_pending_build_invalidations());
     }
 
     #[test]

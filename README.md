@@ -29,13 +29,15 @@ Tessera is a cross-platform UI library focused on performance and extensibility.
 - Constraint-based layout system
 - Achieve any visual effect (native support for custom shaders)
 - Standalone basic component library (including `text_input`, `scrollable`, and more)
-- Parallel layout support
+- Handle-based layout and measurement API
 - Cross-platform support(TODO for mobile and platform-specific features)
 - Modern performance profiling system
 
 Tessera is an experimental framework. If you encounter any issues, please feel free to [submit an issue](https://github.com/tessera-ui/tessera/issues).
 
 ## Overview
+
+- [Try the Web Demo](https://tessera-ui.github.io/tessera/example/)
 
 Tessera uses a declarative programming paradigm inspired by modern UI frameworks such as React and Compose.
 

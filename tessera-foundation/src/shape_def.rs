@@ -32,6 +32,15 @@ impl RoundedCorner {
         g2_k_value: 3.0,
     };
 
+    /// Creates a rounded corner with the specified radius and a default G2
+    /// k value.
+    pub const fn new(radius: Dp) -> Self {
+        RoundedCorner::Manual {
+            radius,
+            g2_k_value: 3.0,
+        }
+    }
+
     /// Helper to create a manual corner.
     pub const fn manual(radius: Dp, g2_k_value: f32) -> Self {
         Self::Manual { radius, g2_k_value }
@@ -131,15 +140,13 @@ impl Shape {
         }
     }
 
-    /// A helper to create a uniform capsule on all corners.
-    pub const fn capsule() -> Self {
-        Shape::RoundedRectangle {
-            top_left: RoundedCorner::Capsule,
-            top_right: RoundedCorner::Capsule,
-            bottom_right: RoundedCorner::Capsule,
-            bottom_left: RoundedCorner::Capsule,
-        }
-    }
+    /// A uniform capsule on all corners.
+    pub const CAPSULE: Self = Shape::RoundedRectangle {
+        top_left: RoundedCorner::Capsule,
+        top_right: RoundedCorner::Capsule,
+        bottom_right: RoundedCorner::Capsule,
+        bottom_left: RoundedCorner::Capsule,
+    };
 
     /// Resolves a shape into pixel radii and per-corner G2 parameters for a
     /// given size.

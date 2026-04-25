@@ -5,9 +5,10 @@
 //! Highlight counts or status markers on top of icons and other UI elements.
 
 use tessera_ui::{
-    Color, ComputedData, Constraint, DimensionValue, Dp, LayoutInput, LayoutOutput, LayoutPolicy,
+    AxisConstraint, Color, ComputedData, Constraint, Dp, LayoutPolicy, LayoutResult,
     MeasurementError, Px, PxPosition, PxSize, RenderInput, RenderPolicy, RenderSlot,
-    layout::layout_primitive, provide_context, tessera, use_context,
+    layout::{MeasureScope, layout},
+    provide_context, tessera, use_context,
 };
 
 use crate::{
@@ -18,91 +19,44 @@ use crate::{
     theme::{ContentColor, MaterialTheme, content_color_for, provide_text_style},
 };
 
-fn clamp_wrap(min: Option<Px>, max: Option<Px>, measure: Px) -> Px {
-    min.unwrap_or(Px(0))
-        .max(measure)
-        .min(max.unwrap_or(Px::MAX))
+fn resolve_dimension(axis: AxisConstraint, measure: Px) -> Px {
+    axis.clamp(measure)
 }
 
-fn fill_value(min: Option<Px>, max: Option<Px>, measure: Px) -> Px {
-    max.expect("Seems that you are trying to fill an infinite dimension, which is not allowed")
-        .max(measure)
-        .max(min.unwrap_or(Px(0)))
+fn dimension_max(axis: AxisConstraint) -> Option<Px> {
+    axis.resolve_max()
 }
 
-fn resolve_dimension(dim: DimensionValue, measure: Px) -> Px {
-    match dim {
-        DimensionValue::Fixed(v) => v,
-        DimensionValue::Wrap { min, max } => clamp_wrap(min, max, measure),
-        DimensionValue::Fill { min, max } => fill_value(min, max, measure),
-    }
-}
-
-fn dimension_max(dim: DimensionValue) -> Option<Px> {
-    match dim {
-        DimensionValue::Fixed(v) => Some(v),
-        DimensionValue::Wrap { max, .. } | DimensionValue::Fill { max, .. } => max,
-    }
-}
-
-fn relax_min_constraint(dim: DimensionValue) -> DimensionValue {
-    match dim {
-        DimensionValue::Fixed(v) => DimensionValue::Wrap {
-            min: Some(Px(0)),
-            max: Some(v),
-        },
-        DimensionValue::Wrap { max, .. } => DimensionValue::Wrap {
-            min: Some(Px(0)),
-            max,
-        },
-        DimensionValue::Fill { max, .. } => DimensionValue::Fill {
-            min: Some(Px(0)),
-            max,
-        },
-    }
+fn relax_min_constraint(axis: AxisConstraint) -> AxisConstraint {
+    axis.without_min()
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct BadgedBoxLayout;
 
 impl LayoutPolicy for BadgedBoxLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
         debug_assert_eq!(
-            input.children_ids().len(),
+            children.len(),
             2,
             "badged_box expects exactly two children: anchor and badge",
         );
 
-        let parent_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
-
+        let parent_constraint = input.parent_constraint().without_min();
         let badge_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            relax_min_constraint(input.parent_constraint().height()),
+            relax_min_constraint(parent_constraint.width),
+            relax_min_constraint(parent_constraint.height),
         );
 
-        let anchor_id = input.children_ids()[0];
-        let badge_id = input.children_ids()[1];
+        let anchor = children[0];
+        let badge = children[1];
 
-        let to_measure = vec![(badge_id, badge_constraint), (anchor_id, parent_constraint)];
+        let badge_data = badge.measure(&badge_constraint)?;
+        let anchor_size = anchor.measure(&parent_constraint)?;
 
-        let results = input.measure_children(to_measure)?;
-        let anchor = results
-            .get(&anchor_id)
-            .copied()
-            .expect("badged_box anchor must be measured");
-        let badge_data = results
-            .get(&badge_id)
-            .copied()
-            .expect("badged_box badge must be measured");
-
-        output.place_child(anchor_id, PxPosition::new(Px(0), Px(0)));
+        result.place_child(anchor, PxPosition::new(Px(0), Px(0)));
 
         let badge_size_px = BadgeDefaults::SIZE.to_px();
         let has_content = badge_data.width > badge_size_px;
@@ -121,15 +75,15 @@ impl LayoutPolicy for BadgedBoxLayout {
         }
         .to_px();
 
-        let badge_x = anchor.width - horizontal_offset;
+        let badge_x = anchor_size.width - horizontal_offset;
         let badge_y = -badge_data.height + vertical_offset;
 
-        output.place_child(badge_id, PxPosition::new(badge_x, badge_y));
+        result.place_child(badge, PxPosition::new(badge_x, badge_y));
 
-        Ok(ComputedData {
-            width: anchor.width,
-            height: anchor.height,
-        })
+        Ok(result.with_size(ComputedData {
+            width: anchor_size.width,
+            height: anchor_size.height,
+        }))
     }
 }
 
@@ -139,33 +93,28 @@ struct BadgeLayout {
 }
 
 impl LayoutPolicy for BadgeLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
         let size_px = BadgeDefaults::SIZE.to_px();
         let intrinsic = Constraint::new(
-            DimensionValue::Wrap {
-                min: Some(size_px),
-                max: None,
-            },
-            DimensionValue::Wrap {
-                min: Some(size_px),
-                max: None,
-            },
+            AxisConstraint::new(size_px, None),
+            AxisConstraint::new(size_px, None),
         );
-        let effective = intrinsic.merge(input.parent_constraint());
+        let effective = Constraint::new(
+            intrinsic.width.intersect(input.parent_constraint().width()),
+            intrinsic
+                .height
+                .intersect(input.parent_constraint().height()),
+        );
 
         let width = resolve_dimension(effective.width, size_px);
         let height = resolve_dimension(effective.height, size_px);
 
-        Ok(ComputedData { width, height })
+        Ok(LayoutResult::new(ComputedData { width, height }))
     }
 }
 
 impl RenderPolicy for BadgeLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         let mut metadata = input.metadata_mut();
         let size = metadata
             .computed_data()
@@ -196,47 +145,38 @@ struct BadgeWithContentLayout {
 }
 
 impl LayoutPolicy for BadgeWithContentLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
         debug_assert_eq!(
-            input.children_ids().len(),
+            children.len(),
             1,
             "badge_with_content expects a single row child",
         );
 
         let min_size_px = BadgeDefaults::LARGE_SIZE.to_px();
         let intrinsic = Constraint::new(
-            DimensionValue::Wrap {
-                min: Some(min_size_px),
-                max: None,
-            },
-            DimensionValue::Wrap {
-                min: Some(min_size_px),
-                max: None,
-            },
+            AxisConstraint::new(min_size_px, None),
+            AxisConstraint::new(min_size_px, None),
         );
-        let effective = intrinsic.merge(input.parent_constraint());
+        let effective = Constraint::new(
+            intrinsic.width.intersect(input.parent_constraint().width()),
+            intrinsic
+                .height
+                .intersect(input.parent_constraint().height()),
+        );
 
         let max_width =
             dimension_max(effective.width).map(|v| (v - self.padding_px * 2).max(Px(0)));
         let max_height = dimension_max(effective.height);
 
         let child_constraint = Constraint::new(
-            DimensionValue::Wrap {
-                min: None,
-                max: max_width,
-            },
-            DimensionValue::Wrap {
-                min: None,
-                max: max_height,
-            },
+            AxisConstraint::new(Px::ZERO, max_width),
+            AxisConstraint::new(Px::ZERO, max_height),
         );
 
-        let row_id = input.children_ids()[0];
-        let row_data = input.measure_child(row_id, &child_constraint)?;
+        let row = children[0];
+        let row_data = row.measure(&child_constraint)?;
 
         let measured_width = (row_data.width + self.padding_px * 2).max(min_size_px);
         let measured_height = row_data.height.max(min_size_px);
@@ -246,14 +186,14 @@ impl LayoutPolicy for BadgeWithContentLayout {
 
         let x = (width - row_data.width).max(Px(0)) / 2;
         let y = (height - row_data.height).max(Px(0)) / 2;
-        output.place_child(row_id, PxPosition::new(x, y));
+        result.place_child(row, PxPosition::new(x, y));
 
-        Ok(ComputedData { width, height })
+        Ok(result.with_size(ComputedData { width, height }))
     }
 }
 
 impl RenderPolicy for BadgeWithContentLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         let mut metadata = input.metadata_mut();
         let size = metadata
             .computed_data()
@@ -287,7 +227,7 @@ impl BadgeDefaults {
     pub const LARGE_SIZE: Dp = Dp(16.0);
 
     /// Default badge shape.
-    pub const SHAPE: Shape = Shape::capsule();
+    pub const SHAPE: Shape = Shape::CAPSULE;
 
     /// Horizontal padding for badges with content.
     pub const WITH_CONTENT_HORIZONTAL_PADDING: Dp = Dp(4.0);
@@ -333,12 +273,10 @@ impl BadgeDefaults {
 /// ```
 #[tessera]
 pub fn badged_box(badge: Option<RenderSlot>, content: Option<RenderSlot>) {
-    layout_primitive()
-        .layout_policy(BadgedBoxLayout)
-        .child(move || {
-            content.unwrap_or_else(RenderSlot::empty).render();
-            badge.unwrap_or_else(RenderSlot::empty).render();
-        });
+    layout().layout_policy(BadgedBoxLayout).child(move || {
+        content.unwrap_or_else(RenderSlot::empty).render();
+        badge.unwrap_or_else(RenderSlot::empty).render();
+    });
 }
 
 /// # badge
@@ -376,9 +314,7 @@ pub fn badge(container_color: Option<Color>, content_color: Option<Color>) {
     let _ = content_color;
     let container_color = container_color.unwrap_or_else(BadgeDefaults::container_color);
     let policy = BadgeLayout { container_color };
-    layout_primitive()
-        .layout_policy(policy)
-        .render_policy(policy);
+    layout().layout_policy(policy).render_policy(policy);
 }
 
 /// # badge_with_content
@@ -442,7 +378,7 @@ pub fn badge_with_content(
         container_color,
         padding_px,
     };
-    layout_primitive()
+    layout()
         .layout_policy(policy)
         .render_policy(policy)
         .child(move || {

@@ -5,16 +5,20 @@
 //! Switch between views or filters with a connected control.
 
 use tessera_ui::{
-    Callback, Color, ComputedData, Constraint, DimensionValue, Dp, FocusState,
-    FocusTraversalPolicy, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError, Modifier, Px,
-    PxPosition, RenderSlot, accesskit::Role, layout::layout_primitive,
-    modifier::FocusModifierExt as _, provide_context, tessera, use_context,
+    AxisConstraint, Callback, Color, ComputedData, Constraint, Dp, FocusState,
+    FocusTraversalPolicy, LayoutPolicy, LayoutResult, MeasurementError, Modifier, Px, PxPosition,
+    RenderSlot,
+    accesskit::Role,
+    layout::{MeasureScope, layout},
+    modifier::FocusModifierExt as _,
+    provide_context, tessera, use_context,
 };
 
 use crate::{
     alignment::{Alignment, CrossAxisAlignment},
-    icon::{IconContent, icon as icon_component},
+    icon::icon as icon_component,
     modifier::{ModifierExt as _, Padding},
+    painter::Painter,
     row::row,
     shape_def::{RoundedCorner, Shape},
     spacer::spacer,
@@ -103,7 +107,7 @@ impl SegmentedButtonDefaults {
 
     /// Default shape for segmented buttons.
     pub fn shape() -> Shape {
-        Shape::capsule()
+        Shape::CAPSULE
     }
 
     /// Build the item shape for the button at `index` with `count` items.
@@ -177,10 +181,6 @@ impl SegmentedButtonDefaults {
     }
 }
 
-fn default_segmented_button_row_modifier() -> Modifier {
-    Modifier::new().constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP))
-}
-
 /// # segmented_button
 ///
 /// Render a segmented button item with optional icon and label.
@@ -211,7 +211,7 @@ fn default_segmented_button_row_modifier() -> Modifier {
 ///     SegmentedButtonDefaults, segmented_button, single_choice_segmented_button_row,
 /// };
 /// use tessera_components::theme::{MaterialTheme, material_theme};
-/// use tessera_ui::{remember, tessera};
+/// use tessera_ui::{LayoutResult, remember, tessera};
 ///
 /// #[tessera]
 /// fn demo() {
@@ -248,10 +248,10 @@ fn default_segmented_button_row_modifier() -> Modifier {
 /// ```
 #[tessera]
 pub fn segmented_button(
-    selected: bool,
+    selected: Option<bool>,
     enabled: Option<bool>,
-    #[prop(into)] label: String,
-    #[prop(into)] icon: Option<IconContent>,
+    #[prop(into)] label: Option<String>,
+    #[prop(into)] icon: Option<Painter>,
     modifier: Option<Modifier>,
     shape: Option<Shape>,
     colors: Option<SegmentedButtonColors>,
@@ -261,6 +261,8 @@ pub fn segmented_button(
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
 ) {
+    let selected = selected.unwrap_or(false);
+    let label = label.unwrap_or_default();
     let enabled = enabled.unwrap_or(true);
     let modifier = modifier.unwrap_or_default();
     let shape = shape.unwrap_or_else(SegmentedButtonDefaults::shape);
@@ -326,14 +328,14 @@ pub fn segmented_button(
         button = button.accessibility_description(description);
     }
 
-    button.with_child(move || {
+    button.child(move || {
         let leading_icon = icon.clone();
         let padding = content_padding;
         let label_outer = label.clone();
         provide_text_style(typography.label_large, move || {
             let leading_icon = leading_icon.clone();
             let label_outer = label_outer.clone();
-            layout_primitive()
+            layout()
                 .modifier(Modifier::new().padding(padding))
                 .child(move || {
                     let leading_icon = leading_icon.clone();
@@ -345,18 +347,9 @@ pub fn segmented_button(
 
                             if let Some(icon_content) = leading_icon.clone() {
                                 has_content = true;
-                                match icon_content.clone() {
-                                    IconContent::Vector(data) => {
-                                        icon_component()
-                                            .vector(data)
-                                            .size(SegmentedButtonDefaults::ICON_SIZE);
-                                    }
-                                    IconContent::Raster(data) => {
-                                        icon_component()
-                                            .raster(data)
-                                            .size(SegmentedButtonDefaults::ICON_SIZE);
-                                    }
-                                }
+                                icon_component()
+                                    .painter(icon_content)
+                                    .size(SegmentedButtonDefaults::ICON_SIZE);
                             }
 
                             if !label.is_empty() {
@@ -453,9 +446,9 @@ pub fn single_choice_segmented_button_row(
     let modifier = modifier
         .focus_group()
         .focus_traversal_policy(FocusTraversalPolicy::horizontal().wrap(true));
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let content = content;
-        layout_primitive()
+        layout()
             .layout_policy(layout_policy.clone())
             .child(move || {
                 let content = content;
@@ -547,9 +540,9 @@ pub fn multi_choice_segmented_button_row(
     let modifier = modifier
         .focus_group()
         .focus_traversal_policy(FocusTraversalPolicy::horizontal().wrap(true));
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let content = content;
-        layout_primitive()
+        layout()
             .layout_policy(layout_policy.clone())
             .child(move || {
                 let content = content;
@@ -572,7 +565,7 @@ fn segmented_button_row_parts(
     equal_width: Option<bool>,
     content: Option<RenderSlot>,
 ) -> (Modifier, SegmentedButtonRowLayout, RenderSlot) {
-    let modifier = modifier.unwrap_or_else(default_segmented_button_row_modifier);
+    let modifier = modifier.unwrap_or_default();
     let content = content.unwrap_or_else(RenderSlot::empty);
     let overlap = Px::from(overlap.unwrap_or(SegmentedButtonDefaults::BORDER_WIDTH)).max(Px::ZERO);
     let cross_axis_alignment = cross_axis_alignment.unwrap_or(CrossAxisAlignment::Center);
@@ -594,64 +587,41 @@ struct SegmentedButtonRowLayout {
 }
 
 impl LayoutPolicy for SegmentedButtonRowLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let child_ids = input.children_ids();
-        if child_ids.is_empty() {
-            return Ok(ComputedData::ZERO);
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        if children.is_empty() {
+            return Ok(result.with_size(ComputedData::ZERO));
         }
 
-        let row_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
+        let row_constraint = *input.parent_constraint().as_ref();
         let child_constraint = Constraint::new(
-            DimensionValue::Wrap {
-                min: None,
-                max: row_constraint.width.get_max(),
-            },
+            AxisConstraint::new(Px::ZERO, row_constraint.width.resolve_max()),
             row_constraint.height,
         );
 
-        let children_to_measure: Vec<_> = child_ids
-            .iter()
-            .map(|&child_id| (child_id, child_constraint))
-            .collect();
-        let mut children_sizes = vec![None; child_ids.len()];
+        let mut children_sizes = vec![None; children.len()];
         let mut total_width = Px::ZERO;
         let mut max_width = Px::ZERO;
         let mut max_height = Px::ZERO;
-        let results = input.measure_children(children_to_measure)?;
-
-        for (index, &child_id) in child_ids.iter().enumerate() {
-            if let Some(child_result) = results.get(&child_id) {
-                children_sizes[index] = Some(*child_result);
-                total_width += child_result.width;
-                max_width = max_width.max(child_result.width);
-                max_height = max_height.max(child_result.height);
-            }
+        for (index, &child) in children.iter().enumerate() {
+            let child_result = child.measure(&child_constraint)?;
+            children_sizes[index] = Some(child_result.size());
+            total_width += child_result.width;
+            max_width = max_width.max(child_result.width);
+            max_height = max_height.max(child_result.height);
         }
 
         if self.equal_width && max_width > Px::ZERO {
-            let equal_constraint =
-                Constraint::new(DimensionValue::Fixed(max_width), row_constraint.height);
-            let children_to_measure: Vec<_> = child_ids
-                .iter()
-                .map(|&child_id| (child_id, equal_constraint))
-                .collect();
-            let results = input.measure_children(children_to_measure)?;
+            let equal_constraint = Constraint::new(max_width, row_constraint.height);
             total_width = Px::ZERO;
             max_height = Px::ZERO;
 
-            for (index, &child_id) in child_ids.iter().enumerate() {
-                if let Some(child_result) = results.get(&child_id) {
-                    children_sizes[index] = Some(*child_result);
-                    total_width += child_result.width;
-                    max_height = max_height.max(child_result.height);
-                }
+            for (index, &child) in children.iter().enumerate() {
+                let child_result = child.measure(&equal_constraint)?;
+                children_sizes[index] = Some(child_result.size());
+                total_width += child_result.width;
+                max_height = max_height.max(child_result.height);
             }
         }
 
@@ -660,13 +630,13 @@ impl LayoutPolicy for SegmentedButtonRowLayout {
             .filter_map(|size| size.map(|size| size.width))
             .min()
             .unwrap_or(Px::ZERO);
-        let overlap = if child_ids.len() > 1 {
+        let overlap = if children.len() > 1 {
             self.overlap.min(min_child_width)
         } else {
             Px::ZERO
         };
-        let total_width_with_overlap = if child_ids.len() > 1 {
-            total_width - overlap * (child_ids.len() as i32 - 1)
+        let total_width_with_overlap = if children.len() > 1 {
+            total_width - overlap * (children.len() as i32 - 1)
         } else {
             total_width
         };
@@ -677,84 +647,38 @@ impl LayoutPolicy for SegmentedButtonRowLayout {
         let mut current_x = Px::ZERO;
         for (index, child_size_opt) in children_sizes.iter().enumerate() {
             if let Some(child_size) = child_size_opt {
-                let child_id = child_ids[index];
+                let child = children[index];
                 let y_offset = calculate_cross_axis_offset(
                     child_size,
                     final_height,
                     self.cross_axis_alignment,
                 );
-                output.place_child(child_id, PxPosition::new(current_x, y_offset));
+                result.place_child(child, PxPosition::new(current_x, y_offset));
                 current_x += child_size.width;
-                if index < child_ids.len() - 1 {
+                if index < children.len() - 1 {
                     current_x -= overlap;
                 }
             }
         }
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: final_width,
             height: final_height,
-        })
+        }))
     }
 }
 
 fn calculate_final_row_width(
-    row_effective_constraint: &Constraint,
+    row_parent_constraint: &Constraint,
     total_children_measured_width: Px,
 ) -> Px {
-    match row_effective_constraint.width {
-        DimensionValue::Fixed(w) => w,
-        DimensionValue::Fill { min, max } => {
-            if let Some(max) = max {
-                let w = max;
-                if let Some(min) = min { w.max(min) } else { w }
-            } else {
-                panic!(
-                    "Fill width without max constraint is not supported in segmented button rows."
-                );
-            }
-        }
-        DimensionValue::Wrap { min, max } => {
-            let mut w = total_children_measured_width;
-            if let Some(min_w) = min {
-                w = w.max(min_w);
-            }
-            if let Some(max_w) = max {
-                w = w.min(max_w);
-            }
-            w
-        }
-    }
+    row_parent_constraint
+        .width
+        .clamp(total_children_measured_width)
 }
 
-fn calculate_final_row_height(row_effective_constraint: &Constraint, max_child_height: Px) -> Px {
-    match row_effective_constraint.height {
-        DimensionValue::Fixed(h) => h,
-        DimensionValue::Fill { min, max } => {
-            if let Some(max_h) = max {
-                let h = max_h;
-                if let Some(min_h) = min {
-                    h.max(min_h)
-                } else {
-                    h
-                }
-            } else {
-                panic!(
-                    "Fill height without max constraint is not supported in segmented button rows."
-                );
-            }
-        }
-        DimensionValue::Wrap { min, max } => {
-            let mut h = max_child_height;
-            if let Some(min_h) = min {
-                h = h.max(min_h);
-            }
-            if let Some(max_h) = max {
-                h = h.min(max_h);
-            }
-            h
-        }
-    }
+fn calculate_final_row_height(row_parent_constraint: &Constraint, max_child_height: Px) -> Px {
+    row_parent_constraint.height.clamp(max_child_height)
 }
 
 fn calculate_cross_axis_offset(

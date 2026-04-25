@@ -157,10 +157,19 @@ impl RenderCore {
         window_transparent: bool,
     ) -> Self {
         // Looking for adapters
-        let instance: wgpu::Instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        #[cfg(not(target_os = "windows"))]
+        {
+            instance_desc.backends = wgpu::Backends::all();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            instance_desc.backends = wgpu::Backends::DX12;
+            instance_desc.backend_options.dx12.presentation_system =
+                wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        }
+        info!("Using WGPU instance config: {instance_desc:#?}");
+        let instance: wgpu::Instance = wgpu::Instance::new(instance_desc);
         // Create a surface
         let surface = match instance.create_surface(window.clone()) {
             Ok(surface) => surface,
@@ -171,6 +180,8 @@ impl RenderCore {
         };
         // Looking for a compatible adapter
         let adapter = Self::request_adapter_for_surface(&instance, &surface).await;
+        let adapter_info = adapter.get_info();
+        info!("Using WGPU adapter: {adapter_info:#?}");
         // Create a device and queue
         let (device, queue) = Self::request_device_and_queue_for_adapter(&adapter).await;
         // Create surface configuration
@@ -199,7 +210,7 @@ impl RenderCore {
         surface.configure(&device, &config);
 
         // Create pipeline cache if supported
-        let pipeline_cache = initialize_cache(&device, &adapter.get_info());
+        let pipeline_cache = initialize_cache(&device, &adapter_info);
 
         // Create MSAA Target
         let (msaa_texture, msaa_view) = Self::make_msaa_resources(&device, sample_count, &config);
@@ -255,7 +266,7 @@ impl RenderCore {
 
         let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Blit Pipeline Layout"),
-            bind_group_layouts: &[&blit_bind_group_layout],
+            bind_group_layouts: &[Some(&blit_bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -367,7 +378,7 @@ impl RenderCore {
         let compute = ComputeState {
             target_a: compute_target_a,
             target_b: compute_target_b,
-            resource_manager: Arc::new(RwLock::new(ComputeResourceManager::new())),
+            resource_manager: ComputeResourceManager::new(),
         };
 
         let blit = BlitState {
@@ -381,6 +392,7 @@ impl RenderCore {
 
         Self {
             window,
+            instance,
             device,
             surface,
             queue,
@@ -389,7 +401,7 @@ impl RenderCore {
             size_changed: false,
             pipelines,
             pipeline_cache,
-            adapter_info: adapter.get_info(),
+            adapter_info,
             targets,
             compute,
             blit,
@@ -473,6 +485,23 @@ impl RenderCore {
     }
 
     pub(crate) fn resize_surface(&mut self) {
+        if self.size.width > 0 && self.size.height > 0 {
+            self.config.width = self.size.width;
+            self.config.height = self.size.height;
+            self.surface.configure(&self.device, &self.config);
+            self.rebuild_pass_targets();
+        }
+    }
+
+    pub(crate) fn recreate_surface(&mut self) {
+        let surface = match self.instance.create_surface(self.window.clone()) {
+            Ok(surface) => surface,
+            Err(err) => {
+                error!("Failed to recreate surface: {err:?}");
+                return;
+            }
+        };
+        self.surface = surface;
         if self.size.width > 0 && self.size.height > 0 {
             self.config.width = self.size.width;
             self.config.height = self.size.height;

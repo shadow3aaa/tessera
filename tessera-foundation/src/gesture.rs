@@ -1,24 +1,32 @@
-//! Gesture recognizers for pointer-driven interactions.
+//! Pointer gesture recognizers for tap, drag, long-press, and scroll.
 //!
 //! ## Usage
 //!
-//! Use these recognizers to derive tap, drag, long-press, and scroll behavior.
+//! Use recognizers to derive reusable pointer interaction behavior in shared
+//! modifiers and components.
 
 use std::time::Duration;
 
 use tessera_ui::{
     CursorEventContent, GestureState, PointerChange, PointerEventPass, PointerId,
-    PressKeyEventType, Px, PxPosition, ScrollEventContent, ScrollEventSource, time::Instant,
+    PressKeyEventType, Px, PxPosition, ScrollDeltaUnit, ScrollEventContent, ScrollEventSource,
+    time::Instant,
 };
 
 const DEFAULT_SLOP_PX: f32 = 8.0;
 
+/// Configuration for tap gesture recognition.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TapSettings {
+pub struct TapSettings {
+    /// Mouse button or press key that starts the gesture.
     pub button: PressKeyEventType,
+    /// Maximum pointer travel before the tap is canceled.
     pub slop_px: f32,
+    /// Whether to consume the press event immediately.
     pub consume_on_press: bool,
+    /// Whether to consume the release event.
     pub consume_on_release: bool,
+    /// Whether to consume the completed tap event.
     pub consume_on_tap: bool,
 }
 
@@ -34,17 +42,24 @@ impl Default for TapSettings {
     }
 }
 
+/// Per-update tap recognition output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) struct TapResult {
+pub struct TapResult {
+    /// Whether a press started this update.
     pub pressed: bool,
+    /// Whether a release happened this update.
     pub released: bool,
+    /// Whether a full tap gesture completed this update.
     pub tapped: bool,
+    /// Timestamp for the press, when present.
     pub press_timestamp: Option<Instant>,
+    /// Timestamp for the release, when present.
     pub release_timestamp: Option<Instant>,
 }
 
+/// Stateful tap gesture recognizer.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TapRecognizer {
+pub struct TapRecognizer {
     settings: TapSettings,
     active_pointer: Option<PointerId>,
     press_position: Option<PxPosition>,
@@ -52,7 +67,8 @@ pub(crate) struct TapRecognizer {
 }
 
 impl TapRecognizer {
-    pub(crate) fn new(settings: TapSettings) -> Self {
+    /// Creates a tap recognizer with custom settings.
+    pub fn new(settings: TapSettings) -> Self {
         Self {
             settings,
             active_pointer: None,
@@ -61,7 +77,8 @@ impl TapRecognizer {
         }
     }
 
-    pub(crate) fn update(
+    /// Updates the recognizer with the current pointer pass and events.
+    pub fn update(
         &mut self,
         pass: PointerEventPass,
         pointer_changes: &mut [PointerChange],
@@ -78,16 +95,16 @@ impl TapRecognizer {
                 continue;
             }
             match change.content {
-                CursorEventContent::Pressed(button) if button == self.settings.button => {
-                    if within_bounds {
-                        self.active_pointer = Some(change.pointer_id);
-                        self.press_position = cursor_position;
-                        self.canceled = false;
-                        result.pressed = true;
-                        result.press_timestamp = Some(change.timestamp);
-                        if self.settings.consume_on_press {
-                            change.consume();
-                        }
+                CursorEventContent::Pressed(button)
+                    if button == self.settings.button && within_bounds =>
+                {
+                    self.active_pointer = Some(change.pointer_id);
+                    self.press_position = cursor_position;
+                    self.canceled = false;
+                    result.pressed = true;
+                    result.press_timestamp = Some(change.timestamp);
+                    if self.settings.consume_on_press {
+                        change.consume();
                     }
                 }
                 CursorEventContent::Moved(_) => {
@@ -99,10 +116,8 @@ impl TapRecognizer {
                         self.canceled = true;
                     }
                 }
-                CursorEventContent::Scroll(_) => {
-                    if Some(change.pointer_id) == self.active_pointer {
-                        self.canceled = true;
-                    }
+                CursorEventContent::Scroll(_) if Some(change.pointer_id) == self.active_pointer => {
+                    self.canceled = true;
                 }
                 CursorEventContent::Released(button) if button == self.settings.button => {
                     if Some(change.pointer_id) != self.active_pointer {
@@ -141,10 +156,14 @@ impl Default for TapRecognizer {
     }
 }
 
+/// Configuration for drag gesture recognition.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct DragSettings {
+pub struct DragSettings {
+    /// Minimum pointer travel required to start dragging.
     pub slop_px: f32,
+    /// Whether drag events should be consumed after dragging starts.
     pub consume_when_dragging: bool,
+    /// Optional axis lock for drag movement.
     pub axis: Option<DragAxis>,
 }
 
@@ -158,23 +177,33 @@ impl Default for DragSettings {
     }
 }
 
+/// Axis constraint for drag gesture recognition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DragAxis {
+pub enum DragAxis {
+    /// Horizontal-only dragging.
     Horizontal,
+    /// Vertical-only dragging.
     Vertical,
 }
 
+/// Per-update drag recognition output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) struct DragResult {
+pub struct DragResult {
+    /// Whether dragging started this update.
     pub started: bool,
+    /// Whether a drag delta was produced this update.
     pub updated: bool,
+    /// Whether dragging ended this update.
     pub ended: bool,
+    /// Horizontal drag delta for this update.
     pub delta_x: Px,
+    /// Vertical drag delta for this update.
     pub delta_y: Px,
 }
 
+/// Stateful drag gesture recognizer.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct DragRecognizer {
+pub struct DragRecognizer {
     settings: DragSettings,
     active_pointer: Option<PointerId>,
     start_position: Option<PxPosition>,
@@ -183,7 +212,8 @@ pub(crate) struct DragRecognizer {
 }
 
 impl DragRecognizer {
-    pub(crate) fn new(settings: DragSettings) -> Self {
+    /// Creates a drag recognizer with custom settings.
+    pub fn new(settings: DragSettings) -> Self {
         Self {
             settings,
             active_pointer: None,
@@ -193,7 +223,8 @@ impl DragRecognizer {
         }
     }
 
-    pub(crate) fn update(
+    /// Updates the recognizer with the current pointer pass and events.
+    pub fn update(
         &mut self,
         pass: PointerEventPass,
         pointer_changes: &mut [PointerChange],
@@ -210,13 +241,11 @@ impl DragRecognizer {
                 continue;
             }
             match change.content {
-                CursorEventContent::Pressed(PressKeyEventType::Left) => {
-                    if within_bounds {
-                        self.active_pointer = Some(change.pointer_id);
-                        self.start_position = cursor_position;
-                        self.last_position = cursor_position;
-                        self.dragging = false;
-                    }
+                CursorEventContent::Pressed(PressKeyEventType::Left) if within_bounds => {
+                    self.active_pointer = Some(change.pointer_id);
+                    self.start_position = cursor_position;
+                    self.last_position = cursor_position;
+                    self.dragging = false;
                 }
                 CursorEventContent::Moved(_) => {
                     if Some(change.pointer_id) != self.active_pointer {
@@ -284,6 +313,16 @@ impl DragRecognizer {
         result
     }
 
+    /// Replaces the recognizer settings while preserving active gesture state.
+    pub fn set_settings(&mut self, settings: DragSettings) {
+        self.settings = settings;
+    }
+
+    /// Returns whether dragging is currently active.
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
     fn reset(&mut self) {
         self.active_pointer = None;
         self.start_position = None;
@@ -298,10 +337,14 @@ impl Default for DragRecognizer {
     }
 }
 
+/// Configuration for long-press gesture recognition.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct LongPressSettings {
+pub struct LongPressSettings {
+    /// Minimum press duration before the gesture triggers.
     pub threshold: Duration,
+    /// Maximum pointer travel before the press is canceled.
     pub slop_px: f32,
+    /// Whether to consume the triggering event.
     pub consume_on_trigger: bool,
 }
 
@@ -315,14 +358,18 @@ impl Default for LongPressSettings {
     }
 }
 
+/// Per-update long-press recognition output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) struct LongPressResult {
+pub struct LongPressResult {
+    /// Whether the long press triggered this update.
     pub triggered: bool,
+    /// Whether the pointer was released this update.
     pub released: bool,
 }
 
+/// Stateful long-press gesture recognizer.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct LongPressRecognizer {
+pub struct LongPressRecognizer {
     settings: LongPressSettings,
     active_pointer: Option<PointerId>,
     press_position: Option<PxPosition>,
@@ -332,7 +379,8 @@ pub(crate) struct LongPressRecognizer {
 }
 
 impl LongPressRecognizer {
-    pub(crate) fn new(settings: LongPressSettings) -> Self {
+    /// Creates a long-press recognizer with custom settings.
+    pub fn new(settings: LongPressSettings) -> Self {
         Self {
             settings,
             active_pointer: None,
@@ -343,7 +391,8 @@ impl LongPressRecognizer {
         }
     }
 
-    pub(crate) fn update(
+    /// Updates the recognizer with the current pointer pass and events.
+    pub fn update(
         &mut self,
         pass: PointerEventPass,
         pointer_changes: &mut [PointerChange],
@@ -360,14 +409,12 @@ impl LongPressRecognizer {
                 continue;
             }
             match change.content {
-                CursorEventContent::Pressed(PressKeyEventType::Left) => {
-                    if within_bounds {
-                        self.active_pointer = Some(change.pointer_id);
-                        self.press_position = cursor_position;
-                        self.press_time = Some(change.timestamp);
-                        self.canceled = false;
-                        self.triggered = false;
-                    }
+                CursorEventContent::Pressed(PressKeyEventType::Left) if within_bounds => {
+                    self.active_pointer = Some(change.pointer_id);
+                    self.press_position = cursor_position;
+                    self.press_time = Some(change.timestamp);
+                    self.canceled = false;
+                    self.triggered = false;
                 }
                 CursorEventContent::Moved(_) => {
                     if Some(change.pointer_id) != self.active_pointer {
@@ -383,10 +430,8 @@ impl LongPressRecognizer {
                     }
                     self.try_trigger(change.timestamp, within_bounds, change, &mut result);
                 }
-                CursorEventContent::Scroll(_) => {
-                    if Some(change.pointer_id) == self.active_pointer {
-                        self.canceled = true;
-                    }
+                CursorEventContent::Scroll(_) if Some(change.pointer_id) == self.active_pointer => {
+                    self.canceled = true;
                 }
                 CursorEventContent::Released(PressKeyEventType::Left) => {
                     if Some(change.pointer_id) != self.active_pointer {
@@ -439,17 +484,26 @@ impl Default for LongPressRecognizer {
     }
 }
 
+/// Configuration for scroll gesture aggregation.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub(crate) struct ScrollSettings {
+pub struct ScrollSettings {
+    /// Whether to consume scroll events after they are aggregated.
     pub consume: bool,
 }
 
+/// Aggregated scroll recognition output.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ScrollResult {
+pub struct ScrollResult {
+    /// Number of scroll events observed in this update.
     pub event_count: usize,
+    /// Total horizontal scroll delta.
     pub delta_x: f32,
+    /// Total vertical scroll delta.
     pub delta_y: f32,
+    /// Source of the first observed scroll event.
     pub source: Option<ScrollEventSource>,
+    /// Delta unit of the first observed scroll event.
+    pub unit: Option<ScrollDeltaUnit>,
 }
 
 impl Default for ScrollResult {
@@ -459,33 +513,43 @@ impl Default for ScrollResult {
             delta_x: 0.0,
             delta_y: 0.0,
             source: None,
+            unit: None,
         }
     }
 }
 
 impl ScrollResult {
-    pub(crate) fn has_scroll(&self) -> bool {
+    /// Returns whether any scroll event was observed in this update.
+    pub fn has_scroll(&self) -> bool {
         self.event_count > 0
     }
 }
 
+/// Metadata for a single scroll event routed through
+/// `ScrollRecognizer::for_each`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ScrollChangeContext {
+pub struct ScrollChangeContext {
+    /// Pointer id that produced the scroll event.
     pub pointer_id: PointerId,
+    /// Timestamp of the scroll event.
     pub timestamp: Instant,
 }
 
+/// Stateful scroll event recognizer and aggregator.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ScrollRecognizer {
+pub struct ScrollRecognizer {
     settings: ScrollSettings,
 }
 
 impl ScrollRecognizer {
-    pub(crate) fn new(settings: ScrollSettings) -> Self {
+    /// Creates a scroll recognizer with custom settings.
+    pub fn new(settings: ScrollSettings) -> Self {
         Self { settings }
     }
 
-    pub(crate) fn for_each(
+    /// Aggregates scroll events and allows each one to be handled before
+    /// optional consumption.
+    pub fn for_each(
         &mut self,
         pass: PointerEventPass,
         pointer_changes: &mut [PointerChange],
@@ -505,6 +569,9 @@ impl ScrollRecognizer {
             };
             if result.source.is_none() {
                 result.source = Some(scroll.source);
+            }
+            if result.unit.is_none() {
+                result.unit = Some(scroll.unit);
             }
             result.event_count += 1;
             result.delta_x += scroll.delta_x;
@@ -527,7 +594,8 @@ impl ScrollRecognizer {
         result
     }
 
-    pub(crate) fn update(
+    /// Aggregates scroll events and optionally consumes them.
+    pub fn update(
         &mut self,
         pass: PointerEventPass,
         pointer_changes: &mut [PointerChange],
@@ -546,6 +614,9 @@ impl ScrollRecognizer {
             };
             if result.source.is_none() {
                 result.source = Some(scroll.source);
+            }
+            if result.unit.is_none() {
+                result.unit = Some(scroll.unit);
             }
             result.event_count += 1;
             result.delta_x += scroll.delta_x;

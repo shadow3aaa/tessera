@@ -105,31 +105,6 @@ impl CheckboxController {
     }
 }
 
-impl CheckboxInnerBuilder {
-    fn on_toggle_option_shared(mut self, on_toggle: Option<CallbackWith<bool, ()>>) -> Self {
-        self.props.on_toggle = on_toggle;
-        self
-    }
-
-    fn accessibility_label_option(mut self, accessibility_label: Option<String>) -> Self {
-        self.props.accessibility_label = accessibility_label;
-        self
-    }
-
-    fn accessibility_description_option(
-        mut self,
-        accessibility_description: Option<String>,
-    ) -> Self {
-        self.props.accessibility_description = accessibility_description;
-        self
-    }
-
-    fn controller_option(mut self, controller: Option<State<CheckboxController>>) -> Self {
-        self.props.controller = controller;
-        self
-    }
-}
-
 // Animation duration for the checkmark stroke (milliseconds)
 const CHECKMARK_ANIMATION_DURATION: Duration = Duration::from_millis(200);
 
@@ -230,22 +205,25 @@ impl CheckmarkState {
 /// ```
 #[tessera]
 pub fn checkbox(
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     on_toggle: Option<CallbackWith<bool, ()>>,
-    checked: bool,
+    checked: Option<bool>,
     size: Option<Dp>,
     color: Option<Color>,
     checked_color: Option<Color>,
     checkmark_color: Option<Color>,
     checkmark_stroke_width: Option<f32>,
     shape: Option<Shape>,
-    disabled: bool,
+    disabled: Option<bool>,
     disabled_color: Option<Color>,
     disabled_checkmark_color: Option<Color>,
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
     #[prop(skip_setter)] controller: Option<State<CheckboxController>>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let checked = checked.unwrap_or(false);
+    let disabled = disabled.unwrap_or(false);
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -264,9 +242,8 @@ pub fn checkbox(
     let disabled_checkmark_color = disabled_checkmark_color.unwrap_or(scheme.surface);
     let controller = controller.unwrap_or_else(|| remember(|| CheckboxController::new(checked)));
 
-    checkbox_inner()
+    let mut builder = checkbox_inner()
         .modifier(modifier)
-        .on_toggle_option_shared(on_toggle)
         .size(size)
         .color(color)
         .checked_color(checked_color)
@@ -276,28 +253,46 @@ pub fn checkbox(
         .disabled(disabled)
         .disabled_color(disabled_color)
         .disabled_checkmark_color(disabled_checkmark_color)
-        .accessibility_label_option(accessibility_label)
-        .accessibility_description_option(accessibility_description)
-        .controller_option(Some(controller));
+        .controller(controller);
+    if let Some(on_toggle) = on_toggle {
+        builder = builder.on_toggle_shared(on_toggle);
+    }
+    if let Some(accessibility_label) = accessibility_label {
+        builder = builder.accessibility_label(accessibility_label);
+    }
+    if let Some(accessibility_description) = accessibility_description {
+        builder = builder.accessibility_description(accessibility_description);
+    }
+    drop(builder);
 }
 
 #[tessera]
 fn checkbox_inner(
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     on_toggle: Option<CallbackWith<bool, ()>>,
-    size: Dp,
-    color: Color,
-    checked_color: Color,
-    checkmark_color: Color,
-    checkmark_stroke_width: f32,
-    shape: Shape,
-    disabled: bool,
-    disabled_color: Color,
-    disabled_checkmark_color: Color,
+    size: Option<Dp>,
+    color: Option<Color>,
+    checked_color: Option<Color>,
+    checkmark_color: Option<Color>,
+    checkmark_stroke_width: Option<f32>,
+    shape: Option<Shape>,
+    disabled: Option<bool>,
+    disabled_color: Option<Color>,
+    disabled_checkmark_color: Option<Color>,
     accessibility_label: Option<String>,
     accessibility_description: Option<String>,
     controller: Option<State<CheckboxController>>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let size = size.unwrap_or(CheckboxDefaults::GLYPH_SIZE);
+    let color = color.unwrap_or(Color::TRANSPARENT);
+    let checked_color = checked_color.unwrap_or(Color::TRANSPARENT);
+    let checkmark_color = checkmark_color.unwrap_or(Color::TRANSPARENT);
+    let checkmark_stroke_width = checkmark_stroke_width.unwrap_or(2.5);
+    let shape = shape.unwrap_or(Shape::CAPSULE);
+    let disabled = disabled.unwrap_or(false);
+    let disabled_color = disabled_color.unwrap_or(Color::TRANSPARENT);
+    let disabled_checkmark_color = disabled_checkmark_color.unwrap_or(Color::TRANSPARENT);
     let controller = controller.expect("checkbox_inner requires controller to be set");
     if controller.with(|c| c.is_animating()) {
         receive_frame_nanos(move |frame_nanos| {
@@ -390,7 +385,7 @@ fn checkbox_inner(
                 .modifier(Modifier::new().size(size, size))
                 .shape(shape)
                 .style(checkbox_style)
-                .with_child(move || {
+                .child(move || {
                     render_checkmark.render();
                 });
         })
@@ -410,7 +405,7 @@ fn checkbox_inner(
     let render_state_layer = {
         RenderSlot::new(move || {
             if let Some(state) = interaction_state {
-                surface()
+                let mut builder = surface()
                     .modifier(Modifier::new().size(
                         CheckboxDefaults::STATE_LAYER_SIZE,
                         CheckboxDefaults::STATE_LAYER_SIZE,
@@ -423,13 +418,13 @@ fn checkbox_inner(
                     .ripple_bounded(false)
                     .ripple_radius(Dp(CheckboxDefaults::STATE_LAYER_SIZE.0 / 2.0))
                     .ripple_color(state_layer_base)
-                    .ripple_state_internal(ripple_state)
-                    .interaction_state(state)
-                    .with_child(move || {
-                        render_checkbox_container.render();
-                    });
+                    .interaction_state(state);
+                builder.set_ripple_state(ripple_state);
+                builder.child(move || {
+                    render_checkbox_container.render();
+                });
             } else {
-                surface()
+                let mut builder = surface()
                     .modifier(Modifier::new().size(
                         CheckboxDefaults::STATE_LAYER_SIZE,
                         CheckboxDefaults::STATE_LAYER_SIZE,
@@ -441,11 +436,11 @@ fn checkbox_inner(
                     })
                     .ripple_bounded(false)
                     .ripple_radius(Dp(CheckboxDefaults::STATE_LAYER_SIZE.0 / 2.0))
-                    .ripple_color(state_layer_base)
-                    .ripple_state_internal(ripple_state)
-                    .with_child(move || {
-                        render_checkbox_container.render();
-                    });
+                    .ripple_color(state_layer_base);
+                builder.set_ripple_state(ripple_state);
+                builder.child(move || {
+                    render_checkbox_container.render();
+                });
             }
         })
     };
@@ -492,4 +487,51 @@ fn checkbox_inner(
         .children(move || {
             render_state_layer.render();
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CHECKMARK_ANIMATION_DURATION, CheckboxController};
+
+    #[test]
+    fn checkbox_controller_animates_to_checked_state() {
+        let mut controller = CheckboxController::new(false);
+
+        controller.toggle();
+
+        assert!(controller.is_checked());
+        assert!(controller.is_animating());
+        assert_eq!(controller.progress(), 0.0);
+
+        let half_nanos = (CHECKMARK_ANIMATION_DURATION.as_nanos() / 2) as u64;
+        controller.update_progress(half_nanos);
+        let mid = controller.progress();
+        assert!(mid > 0.0 && mid < 1.0, "mid animation progress was {mid}");
+        assert!(controller.is_animating());
+
+        controller.update_progress(CHECKMARK_ANIMATION_DURATION.as_nanos() as u64);
+        assert_eq!(controller.progress(), 1.0);
+        assert!(!controller.is_animating());
+    }
+
+    #[test]
+    fn checkbox_controller_animates_to_unchecked_state() {
+        let mut controller = CheckboxController::new(true);
+
+        controller.toggle();
+
+        assert!(!controller.is_checked());
+        assert!(controller.is_animating());
+        assert_eq!(controller.progress(), 1.0);
+
+        let half_nanos = (CHECKMARK_ANIMATION_DURATION.as_nanos() / 2) as u64;
+        controller.update_progress(half_nanos);
+        let mid = controller.progress();
+        assert!(mid > 0.0 && mid < 1.0, "mid animation progress was {mid}");
+        assert!(controller.is_animating());
+
+        controller.update_progress(CHECKMARK_ANIMATION_DURATION.as_nanos() as u64);
+        assert_eq!(controller.progress(), 0.0);
+        assert!(!controller.is_animating());
+    }
 }

@@ -4,8 +4,10 @@
 //!
 //! Highlight selected text ranges or focusable regions inside editors.
 use tessera_ui::{
-    Color, ComputedData, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError, Px,
-    RenderInput, RenderPolicy, layout::layout_primitive, tessera,
+    Color, ComputedData, LayoutPolicy, LayoutResult, MeasurementError, Px, RenderInput,
+    RenderPolicy,
+    layout::{MeasureScope, layout},
+    tessera,
 };
 
 use crate::pipelines::shape::command::ShapeCommand;
@@ -27,15 +29,16 @@ use crate::pipelines::shape::command::ShapeCommand;
 /// - `color`: The fill color of the rectangle, including alpha for transparency
 ///   (`Color`).
 #[tessera]
-pub fn selection_highlight_rect(width: Px, height: Px, color: Color) {
+pub fn selection_highlight_rect(width: Option<Px>, height: Option<Px>, color: Option<Color>) {
+    let width = width.unwrap_or(Px::ZERO);
+    let height = height.unwrap_or(Px::ZERO);
+    let color = color.unwrap_or(Color::TRANSPARENT);
     let policy = SelectionHighlightLayout {
         width,
         height,
         color,
     };
-    layout_primitive()
-        .layout_policy(policy.clone())
-        .render_policy(policy);
+    layout().layout_policy(policy.clone()).render_policy(policy);
 }
 #[derive(Clone, PartialEq)]
 struct SelectionHighlightLayout {
@@ -45,20 +48,16 @@ struct SelectionHighlightLayout {
 }
 
 impl LayoutPolicy for SelectionHighlightLayout {
-    fn measure(
-        &self,
-        _input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        Ok(ComputedData {
+    fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        Ok(LayoutResult::new(ComputedData {
             width: self.width,
             height: self.height,
-        })
+        }))
     }
 }
 
 impl RenderPolicy for SelectionHighlightLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         let drawable = ShapeCommand::Rect {
             color: self.color,
             corner_radii: glam::Vec4::ZERO.into(),

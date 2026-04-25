@@ -4,9 +4,8 @@
 //!
 //! Use to indicate the completion of a task or a specific value in a range.
 use tessera_ui::{
-    Color, ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Modifier, Px,
-    PxPosition,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, layout_primitive},
+    Color, ComputedData, Constraint, Dp, LayoutResult, MeasurementError, Modifier, Px, PxPosition,
+    layout::{LayoutPolicy, MeasureScope, layout},
     tessera,
 };
 
@@ -31,51 +30,26 @@ fn capsule_shape_for_height(height: Dp) -> Shape {
     }
 }
 
-#[allow(missing_docs)]
-impl GlassProgressBuilder {
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    pub fn height(mut self, height: Dp) -> Self {
-        self.props.height = Some(height);
-        self
-    }
-
-    pub fn track_tint_color(mut self, track_tint_color: Color) -> Self {
-        self.props.track_tint_color = Some(track_tint_color);
-        self
-    }
-
-    pub fn progress_tint_color(mut self, progress_tint_color: Color) -> Self {
-        self.props.progress_tint_color = Some(progress_tint_color);
-        self
-    }
-
-    pub fn blur_radius(mut self, blur_radius: Dp) -> Self {
-        self.props.blur_radius = Some(blur_radius);
-        self
-    }
-
-    pub fn track_border_width(mut self, track_border_width: Dp) -> Self {
-        self.props.track_border_width = Some(track_border_width);
-        self
-    }
-}
-
 #[tessera]
-fn glass_progress_fill(value: f32, tint_color: Color, blur_radius: Dp, shape: Shape) {
+fn glass_progress_fill(
+    value: Option<f32>,
+    tint_color: Option<Color>,
+    blur_radius: Option<Dp>,
+    shape: Option<Shape>,
+) {
+    let value = value.unwrap_or(0.0);
+    let tint_color = tint_color.unwrap_or(Color::TRANSPARENT);
+    let blur_radius = blur_radius.unwrap_or(Dp(0.0));
+    let shape = shape.unwrap_or(Shape::CAPSULE);
     let value = value.clamp(0.0, 1.0);
-    layout_primitive()
+    layout()
         .layout_policy(GlassProgressFillLayout { value })
         .child(move || {
             fluid_glass()
                 .tint_color(tint_color)
                 .blur_radius(blur_radius)
                 .shape(shape)
-                .refraction_amount(0.0)
-                .with_child(|| {});
+                .child(|| {});
         });
 }
 
@@ -85,44 +59,34 @@ struct GlassProgressFillLayout {
 }
 
 impl LayoutPolicy for GlassProgressFillLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let available_width = match input.parent_constraint().width() {
-            DimensionValue::Fixed(px) => px,
-            DimensionValue::Wrap { max, .. } => max.unwrap_or(Px(0)),
-            DimensionValue::Fill { max, .. } => max.expect(
-                "Seems that you are trying to fill an infinite width, which is not allowed",
-            ),
-        };
-        let available_height = match input.parent_constraint().height() {
-            DimensionValue::Fixed(px) => px,
-            DimensionValue::Wrap { max, .. } => max.unwrap_or(Px(0)),
-            DimensionValue::Fill { max, .. } => max.expect(
-                "Seems that you are trying to fill an infinite height, which is not allowed",
-            ),
-        };
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let available_width = input
+            .parent_constraint()
+            .width()
+            .resolve_max()
+            .unwrap_or(Px(0));
+        let available_height = input
+            .parent_constraint()
+            .height()
+            .resolve_max()
+            .unwrap_or(Px(0));
 
         let width_px = Px((available_width.to_f32() * self.value).round() as i32);
-        let child_id = input
-            .children_ids()
+        let child = input
+            .children()
             .first()
             .copied()
             .expect("progress fill child should exist");
 
-        let child_constraint = Constraint::new(
-            DimensionValue::Fixed(width_px),
-            DimensionValue::Fixed(available_height),
-        );
-        input.measure_child(child_id, &child_constraint)?;
-        output.place_child(child_id, PxPosition::new(Px(0), Px(0)));
+        let child_constraint = Constraint::exact(width_px, available_height);
+        child.measure(&child_constraint)?;
+        result.place_child(child, PxPosition::new(Px(0), Px(0)));
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: width_px,
             height: available_height,
-        })
+        }))
     }
 }
 
@@ -160,14 +124,15 @@ impl LayoutPolicy for GlassProgressFillLayout {
 /// ```
 #[tessera]
 pub fn glass_progress(
-    value: f32,
-    #[prop(skip_setter)] modifier: Option<Modifier>,
-    #[prop(skip_setter)] height: Option<Dp>,
-    #[prop(skip_setter)] track_tint_color: Option<Color>,
-    #[prop(skip_setter)] progress_tint_color: Option<Color>,
-    #[prop(skip_setter)] blur_radius: Option<Dp>,
-    #[prop(skip_setter)] track_border_width: Option<Dp>,
+    value: Option<f32>,
+    modifier: Option<Modifier>,
+    height: Option<Dp>,
+    track_tint_color: Option<Color>,
+    progress_tint_color: Option<Color>,
+    blur_radius: Option<Dp>,
+    track_border_width: Option<Dp>,
 ) {
+    let value = value.unwrap_or(0.0);
     let modifier = modifier.unwrap_or_else(default_progress_modifier);
     let height = height.unwrap_or(Dp(12.0));
     let track_tint_color = track_tint_color.unwrap_or(Color::new(0.3, 0.3, 0.3, 0.15));
@@ -175,7 +140,7 @@ pub fn glass_progress(
     let blur_radius = blur_radius.unwrap_or(Dp(8.0));
     let track_border_width = track_border_width.unwrap_or(Dp(1.0));
     let height_px = height.to_px();
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(GlassProgressLayout { height: height_px })
         .child(move || {
@@ -188,7 +153,7 @@ pub fn glass_progress(
                 .shape(capsule_shape_for_height(height))
                 .border(GlassBorder::new(track_border_width.into()))
                 .padding(track_border_width)
-                .with_child(move || {
+                .child(move || {
                     glass_progress_fill()
                         .value(value)
                         .tint_color(progress_tint_color)
@@ -204,22 +169,16 @@ struct GlassProgressLayout {
 }
 
 impl LayoutPolicy for GlassProgressLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let track_id = input
-            .children_ids()
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let track = input
+            .children()
             .first()
             .copied()
             .expect("track should exist");
-        let constraint = Constraint::new(
-            input.parent_constraint().width(),
-            DimensionValue::Fixed(self.height),
-        );
-        let track_measurement = input.measure_child(track_id, &constraint)?;
-        output.place_child(track_id, PxPosition::new(Px(0), Px(0)));
-        Ok(track_measurement)
+        let constraint = Constraint::new(input.parent_constraint().width(), self.height);
+        let track_measurement = track.measure(&constraint)?;
+        result.place_child(track, PxPosition::new(Px(0), Px(0)));
+        Ok(result.with_size(track_measurement.size()))
     }
 }

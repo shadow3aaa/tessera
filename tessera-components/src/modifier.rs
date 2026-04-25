@@ -10,13 +10,14 @@ mod visual;
 
 use tessera_foundation::modifier::ModifierExt as FoundationModifierExt;
 use tessera_ui::{
-    Callback, CallbackWith, Color, DimensionValue, Dp, Modifier, WindowAction,
+    AxisConstraint, Callback, CallbackWith, Color, Dp, Modifier,
     modifier::ModifierCapabilityExt as _, use_context,
 };
 
 pub use tessera_foundation::modifier::{
-    ClickableArgs, InteractionState, MinimumInteractiveComponentEnforcement, Padding,
-    PointerEventContext, SelectableArgs, SemanticsArgs, ToggleableArgs,
+    ClickableArgs, DragDelta, DraggableArgs, InteractionState,
+    MinimumInteractiveComponentEnforcement, Padding, PointerEventContext, SelectableArgs,
+    SemanticsArgs, ToggleableArgs,
 };
 
 pub(crate) use tessera_foundation::modifier::{AlignmentParentData, WeightParentData};
@@ -25,7 +26,7 @@ use crate::{alignment::Alignment, shape_def::Shape};
 
 use interaction::{
     apply_block_touch_propagation_modifier, apply_clickable_modifier, apply_selectable_modifier,
-    apply_toggleable_modifier, apply_window_action_modifier, apply_window_drag_region_modifier,
+    apply_toggleable_modifier, apply_window_drag_region_modifier,
 };
 use visual::{AlphaModifierNode, BackgroundModifierNode, BorderModifierNode, ClipModifierNode};
 
@@ -87,8 +88,8 @@ pub trait ModifierExt {
         max_height: Option<Dp>,
     ) -> Modifier;
 
-    /// Applies explicit width/height `DimensionValue` constraints.
-    fn constrain(self, width: Option<DimensionValue>, height: Option<DimensionValue>) -> Modifier;
+    /// Applies explicit width/height interval constraints.
+    fn constrain(self, width: Option<AxisConstraint>, height: Option<AxisConstraint>) -> Modifier;
 
     /// Fills the available width within parent bounds.
     fn fill_max_width(self) -> Modifier;
@@ -107,6 +108,14 @@ pub trait ModifierExt {
 
     /// Provides alignment parent data for layered boxed layouts.
     fn align(self, alignment: Alignment) -> Modifier;
+
+    /// Emits drag deltas for free-form dragging.
+    fn draggable<C>(self, on_drag_delta: C) -> Modifier
+    where
+        C: Into<CallbackWith<DragDelta, ()>>;
+
+    /// Emits drag deltas with custom drag configuration.
+    fn draggable_with(self, args: DraggableArgs) -> Modifier;
 
     /// Prevents cursor events from propagating to components behind this
     /// subtree.
@@ -145,9 +154,6 @@ pub trait ModifierExt {
 
     /// Marks this subtree as a draggable window region.
     fn window_drag_region(self) -> Modifier;
-
-    /// Requests a window action when tapped.
-    fn window_action(self, action: WindowAction) -> Modifier;
 }
 
 impl ModifierExt for Modifier {
@@ -234,7 +240,7 @@ impl ModifierExt for Modifier {
         FoundationModifierExt::size_in(self, min_width, max_width, min_height, max_height)
     }
 
-    fn constrain(self, width: Option<DimensionValue>, height: Option<DimensionValue>) -> Modifier {
+    fn constrain(self, width: Option<AxisConstraint>, height: Option<AxisConstraint>) -> Modifier {
         FoundationModifierExt::constrain(self, width, height)
     }
 
@@ -267,6 +273,17 @@ impl ModifierExt for Modifier {
 
     fn align(self, alignment: Alignment) -> Modifier {
         FoundationModifierExt::align(self, alignment)
+    }
+
+    fn draggable<C>(self, on_drag_delta: C) -> Modifier
+    where
+        C: Into<CallbackWith<DragDelta, ()>>,
+    {
+        FoundationModifierExt::draggable(self, on_drag_delta)
+    }
+
+    fn draggable_with(self, args: DraggableArgs) -> Modifier {
+        FoundationModifierExt::draggable_with(self, args)
     }
 
     fn block_touch_propagation(self) -> Modifier {
@@ -328,9 +345,5 @@ impl ModifierExt for Modifier {
 
     fn window_drag_region(self) -> Modifier {
         apply_window_drag_region_modifier(self)
-    }
-
-    fn window_action(self, action: WindowAction) -> Modifier {
-        apply_window_action_modifier(self, action)
     }
 }

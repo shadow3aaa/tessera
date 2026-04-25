@@ -4,38 +4,16 @@
 //!
 //! Use to create layered UIs, overlays, or composite controls.
 use tessera_ui::{
-    ComputedData, Constraint, DimensionValue, LayoutInput, LayoutOutput, LayoutPolicy,
-    MeasurementError, Modifier, Px, PxPosition, RenderSlot, layout::layout_primitive, tessera,
+    AxisConstraint, ComputedData, LayoutPolicy, LayoutResult, MeasurementError, Modifier, Px,
+    PxPosition, RenderSlot,
+    layout::{MeasureScope, layout},
+    tessera,
 };
 
 use crate::alignment::Alignment;
 
-fn resolve_final_dimension(dv: DimensionValue, largest_child: Px) -> Px {
-    match dv {
-        DimensionValue::Fixed(v) => v,
-        DimensionValue::Fill { min, max } => {
-            let Some(max) = max else {
-                panic!(
-                    "Seems that you are trying to fill an infinite dimension, which is not allowed\nboxed constraint = {dv:?}"
-                );
-            };
-            let mut v = max.max(largest_child);
-            if let Some(min_v) = min {
-                v = v.max(min_v);
-            }
-            v
-        }
-        DimensionValue::Wrap { min, max } => {
-            let mut v = largest_child;
-            if let Some(min_v) = min {
-                v = v.max(min_v);
-            }
-            if let Some(max_v) = max {
-                v = v.min(max_v);
-            }
-            v
-        }
-    }
+fn resolve_final_dimension(axis: AxisConstraint, largest_child: Px) -> Px {
+    axis.clamp(largest_child)
 }
 
 fn center_axis(container: Px, child: Px) -> Px {
@@ -102,8 +80,15 @@ fn compute_child_offset(
 /// # component();
 /// ```
 #[tessera]
-pub fn boxed(alignment: Alignment, modifier: Modifier, children: RenderSlot) {
-    layout_primitive()
+pub fn boxed(
+    alignment: Option<Alignment>,
+    modifier: Option<Modifier>,
+    children: Option<RenderSlot>,
+) {
+    let alignment = alignment.unwrap_or_default();
+    let modifier = modifier.unwrap_or_default();
+    let children = children.unwrap_or_else(RenderSlot::empty);
+    layout()
         .modifier(modifier)
         .layout_policy(BoxedLayout { alignment })
         .child(move || {
@@ -117,50 +102,37 @@ struct BoxedLayout {
 }
 
 impl LayoutPolicy for BoxedLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let child_alignments = collect_child_alignments(input);
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let child_alignments = collect_child_alignments(&children);
         let n = child_alignments.len();
         debug_assert_eq!(
-            input.children_ids().len(),
+            children.len(),
             n,
             "Mismatch between children defined in scope and runtime children count"
         );
 
-        let effective_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
+        let parent_constraint = *input.parent_constraint().as_ref();
+        let child_constraint = input.parent_constraint().without_min();
 
         let mut max_child_width = Px(0);
         let mut max_child_height = Px(0);
         let mut children_sizes = vec![None; n];
 
-        let children_to_measure: Vec<_> = input
-            .children_ids()
-            .iter()
-            .map(|&child_id| (child_id, effective_constraint))
-            .collect();
-
-        let children_results = input.measure_children(children_to_measure)?;
-
-        for (i, &child_id) in input.children_ids().iter().enumerate().take(n) {
-            if let Some(child_result) = children_results.get(&child_id) {
-                max_child_width = max_child_width.max(child_result.width);
-                max_child_height = max_child_height.max(child_result.height);
-                children_sizes[i] = Some(*child_result);
-            }
+        for (i, child) in children.iter().enumerate().take(n) {
+            let child_result = child.measure(&child_constraint)?;
+            max_child_width = max_child_width.max(child_result.width);
+            max_child_height = max_child_height.max(child_result.height);
+            children_sizes[i] = Some(child_result);
         }
 
-        let final_width = resolve_final_dimension(effective_constraint.width, max_child_width);
-        let final_height = resolve_final_dimension(effective_constraint.height, max_child_height);
+        let final_width = resolve_final_dimension(parent_constraint.width, max_child_width);
+        let final_height = resolve_final_dimension(parent_constraint.height, max_child_height);
 
         for (i, child_size_opt) in children_sizes.iter().enumerate() {
             if let Some(child_size) = child_size_opt {
-                let child_id = input.children_ids()[i];
+                let child_id = children[i];
                 let child_alignment = child_alignments[i].unwrap_or(self.alignment);
                 let (x, y) = compute_child_offset(
                     child_alignment,
@@ -169,24 +141,25 @@ impl LayoutPolicy for BoxedLayout {
                     child_size.width,
                     child_size.height,
                 );
-                output.place_child(child_id, PxPosition::new(x, y));
+                result.place_child(child_id, PxPosition::new(x, y));
             }
         }
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: final_width,
             height: final_height,
-        })
+        }))
     }
 }
 
-fn collect_child_alignments(input: &LayoutInput<'_>) -> Vec<Option<Alignment>> {
-    input
-        .children_ids()
+fn collect_child_alignments(
+    children: &[tessera_ui::layout::LayoutChild<'_>],
+) -> Vec<Option<Alignment>> {
+    children
         .iter()
-        .map(|&child_id| {
-            input
-                .child_parent_data::<crate::modifier::AlignmentParentData>(child_id)
+        .map(|child| {
+            child
+                .parent_data::<crate::modifier::AlignmentParentData>()
                 .map(|data| data.alignment)
         })
         .collect()
@@ -195,8 +168,10 @@ fn collect_child_alignments(input: &LayoutInput<'_>) -> Vec<Option<Alignment>> {
 #[cfg(test)]
 mod tests {
     use tessera_ui::{
-        ComputedData, DimensionValue, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError,
-        Modifier, NoopRenderPolicy, Px, layout::layout_primitive, tessera,
+        AxisConstraint, ComputedData, LayoutPolicy, LayoutResult, MeasurementError, Modifier,
+        NoopRenderPolicy, Px,
+        layout::{MeasureScope, layout},
+        tessera,
     };
 
     use crate::{
@@ -213,21 +188,21 @@ mod tests {
     }
 
     impl LayoutPolicy for FixedTestLayout {
-        fn measure(
-            &self,
-            _input: &LayoutInput<'_>,
-            _output: &mut LayoutOutput<'_>,
-        ) -> Result<ComputedData, MeasurementError> {
-            Ok(ComputedData {
+        fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+            Ok(LayoutResult::new(ComputedData {
                 width: Px::new(self.width),
                 height: Px::new(self.height),
-            })
+            }))
         }
     }
 
     #[tessera]
-    fn fixed_test_box(tag: String, width: i32, height: i32) {
-        layout_primitive()
+    fn fixed_test_box(tag: Option<String>, width: Option<i32>, height: Option<i32>) {
+        let tag = tag.unwrap_or_default();
+        let width = width.unwrap_or_default();
+        let height = height.unwrap_or_default();
+
+        layout()
             .layout_policy(FixedTestLayout { width, height })
             .render_policy(NoopRenderPolicy)
             .modifier(Modifier::new().semantics(SemanticsArgs {
@@ -237,16 +212,37 @@ mod tests {
     }
 
     #[tessera]
+    fn forwarded_modifier_test_box(
+        modifier: Option<Modifier>,
+        tag: Option<String>,
+        width: Option<i32>,
+        height: Option<i32>,
+    ) {
+        let modifier = modifier.unwrap_or_default();
+        let tag = tag.unwrap_or_default();
+        let width = width.unwrap_or_default();
+        let height = height.unwrap_or_default();
+
+        layout()
+            .layout_policy(FixedTestLayout { width, height })
+            .render_policy(NoopRenderPolicy)
+            .modifier(modifier.then(Modifier::new().semantics(SemanticsArgs {
+                test_tag: Some(tag),
+                ..Default::default()
+            })));
+    }
+
+    #[tessera]
     fn boxed_layout_case() {
         boxed()
             .alignment(Alignment::TopStart)
             .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(Px::new(100))),
-                Some(DimensionValue::Fixed(Px::new(80))),
+                Some(AxisConstraint::exact(Px::new(100))),
+                Some(AxisConstraint::exact(Px::new(80))),
             ))
             .children(|| {
                 boxed_start_box();
-                layout_primitive()
+                layout()
                     .modifier(Modifier::new().align(Alignment::BottomEnd))
                     .child(|| {
                         boxed_end_box();
@@ -275,12 +271,29 @@ mod tests {
         boxed()
             .alignment(Alignment::Center)
             .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(Px::new(100))),
-                Some(DimensionValue::Fixed(Px::new(80))),
+                Some(AxisConstraint::exact(Px::new(100))),
+                Some(AxisConstraint::exact(Px::new(80))),
             ))
             .children(|| {
                 fixed_test_box()
                     .tag("boxed_center".to_string())
+                    .width(20)
+                    .height(10);
+            });
+    }
+
+    #[tessera]
+    fn boxed_forwarded_parent_data_case() {
+        boxed()
+            .alignment(Alignment::TopStart)
+            .modifier(Modifier::new().constrain(
+                Some(AxisConstraint::exact(Px::new(100))),
+                Some(AxisConstraint::exact(Px::new(80))),
+            ))
+            .children(|| {
+                forwarded_modifier_test_box()
+                    .modifier(Modifier::new().align(Alignment::Center))
+                    .tag("boxed_forwarded".to_string())
                     .width(20)
                     .height(10);
             });
@@ -309,6 +322,19 @@ mod tests {
             },
             expect: {
                 node("boxed_center").position(40, 35).size(20, 10);
+            }
+        }
+    }
+
+    #[test]
+    fn boxed_honors_alignment_on_wrapped_children() {
+        tessera_ui::assert_layout! {
+            viewport: (120, 100),
+            content: {
+                boxed_forwarded_parent_data_case();
+            },
+            expect: {
+                node("boxed_forwarded").position(40, 35).size(20, 10);
             }
         }
     }

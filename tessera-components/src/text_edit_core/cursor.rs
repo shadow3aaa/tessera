@@ -4,8 +4,10 @@
 //!
 //! Show insertion point feedback inside text editing components.
 use tessera_ui::{
-    Color, ComputedData, Dp, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError, Px,
-    RenderInput, RenderPolicy, layout::layout_primitive, tessera,
+    Color, ComputedData, Dp, LayoutPolicy, LayoutResult, MeasurementError, Px, RenderInput,
+    RenderPolicy,
+    layout::{MeasureScope, layout},
+    tessera,
 };
 
 use crate::pipelines::shape::command::ShapeCommand;
@@ -21,20 +23,16 @@ struct CursorLayout {
 }
 
 impl LayoutPolicy for CursorLayout {
-    fn measure(
-        &self,
-        _input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        Ok(ComputedData {
+    fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        Ok(LayoutResult::new(ComputedData {
             width: CURSOR_WIDRH.into(),
             height: self.height,
-        })
+        }))
     }
 }
 
 impl RenderPolicy for CursorLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         if !self.visible {
             return;
         }
@@ -67,11 +65,15 @@ impl RenderPolicy for CursorLayout {
 /// * `current_frame_nanos` - Current frame timestamp used to sample visibility
 #[tessera]
 fn cursor_visual(
-    height_px: Px,
-    blink_start_frame_nanos: u64,
-    current_frame_nanos: u64,
-    color: Color,
+    height_px: Option<Px>,
+    blink_start_frame_nanos: Option<u64>,
+    current_frame_nanos: Option<u64>,
+    color: Option<Color>,
 ) {
+    let height_px = height_px.unwrap_or(Px::ZERO);
+    let blink_start_frame_nanos = blink_start_frame_nanos.unwrap_or(0);
+    let current_frame_nanos = current_frame_nanos.unwrap_or(0);
+    let color = color.unwrap_or(Color::TRANSPARENT);
     let elapsed_nanos = current_frame_nanos.saturating_sub(blink_start_frame_nanos);
     let visible = elapsed_nanos % 1_000_000_000 < 500_000_000;
 
@@ -80,9 +82,7 @@ fn cursor_visual(
         visible,
         color,
     };
-    layout_primitive()
-        .layout_policy(policy.clone())
-        .render_policy(policy);
+    layout().layout_policy(policy.clone()).render_policy(policy);
 }
 
 pub(super) fn cursor(

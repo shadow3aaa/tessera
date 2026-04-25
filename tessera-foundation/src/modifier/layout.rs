@@ -8,9 +8,9 @@
 use std::{any::TypeId, sync::Arc};
 
 use tessera_ui::{
-    ComputedData, Constraint, DimensionValue, Dp, LayoutModifierChild, LayoutModifierInput,
-    LayoutModifierNode, LayoutModifierOutput, LayoutOutput, MeasurementError, ParentDataMap,
-    ParentDataModifierNode, Px, PxPosition,
+    AxisConstraint, ComputedData, Constraint, Dp, LayoutModifierChild, LayoutModifierInput,
+    LayoutModifierNode, LayoutModifierOutput, MeasurementError, ParentDataMap,
+    ParentDataModifierNode, PlacementModifierNode, Px, PxPosition,
 };
 
 use crate::alignment::Alignment;
@@ -124,26 +124,40 @@ impl Padding {
     }
 }
 
-fn subtract_opt_px(value: Option<Px>, subtract: Px) -> Option<Px> {
-    value.map(|v| (v - subtract).max(Px(0)))
+pub(crate) fn shrink_dimension(dimension: AxisConstraint, before: Px, after: Px) -> AxisConstraint {
+    let subtract = before + after;
+    let min = (dimension.min - subtract).max(Px::ZERO);
+    let max = dimension.max.map(|value| (value - subtract).max(Px::ZERO));
+    AxisConstraint::new(min, max)
 }
 
-pub(crate) fn shrink_dimension(dimension: DimensionValue, before: Px, after: Px) -> DimensionValue {
-    let subtract = before + after;
-    match dimension {
-        DimensionValue::Fixed(value) => DimensionValue::Fixed((value - subtract).max(Px(0))),
-        DimensionValue::Wrap { min, max } => DimensionValue::Wrap {
-            min: subtract_opt_px(min, subtract),
-            max: subtract_opt_px(max, subtract),
-        },
-        DimensionValue::Fill { min, max } => DimensionValue::Fill {
-            min: subtract_opt_px(min, subtract),
-            max: subtract_opt_px(max, subtract),
-        },
+fn resolve_axis_constraint(
+    parent: AxisConstraint,
+    override_axis: Option<AxisConstraint>,
+    fill_parent_max: bool,
+) -> AxisConstraint {
+    if fill_parent_max {
+        return match parent.max {
+            Some(max) => AxisConstraint::exact(max),
+            None => parent,
+        };
+    }
+
+    match override_axis {
+        None => parent,
+        Some(axis) => AxisConstraint::new(
+            axis.min,
+            match (axis.max, parent.max) {
+                (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+                (Some(lhs), None) => Some(lhs),
+                (None, Some(rhs)) => Some(rhs),
+                (None, None) => None,
+            },
+        ),
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct PaddingModifierNode {
     pub padding: Padding,
 }
@@ -153,7 +167,6 @@ impl LayoutModifierNode for PaddingModifierNode {
         &self,
         input: &LayoutModifierInput<'_>,
         child: &mut dyn LayoutModifierChild,
-        output: &mut LayoutOutput<'_>,
     ) -> Result<LayoutModifierOutput, MeasurementError> {
         let left_px: Px = self.padding.left.into();
         let top_px: Px = self.padding.top.into();
@@ -169,7 +182,7 @@ impl LayoutModifierNode for PaddingModifierNode {
             shrink_dimension(parent_constraint.height, top_px, bottom_px),
         );
         let child_size = child.measure(&constraint)?;
-        child.place(PxPosition::new(left_px, top_px), output);
+        child.place(PxPosition::new(left_px, top_px));
         Ok(LayoutModifierOutput {
             size: ComputedData {
                 width: child_size.width + left_px + right_px,
@@ -179,33 +192,24 @@ impl LayoutModifierNode for PaddingModifierNode {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct OffsetModifierNode {
     pub x: Dp,
     pub y: Dp,
 }
 
-impl LayoutModifierNode for OffsetModifierNode {
-    fn measure(
-        &self,
-        input: &LayoutModifierInput<'_>,
-        child: &mut dyn LayoutModifierChild,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<LayoutModifierOutput, MeasurementError> {
-        let parent_constraint = Constraint::new(
-            input.layout_input.parent_constraint().width(),
-            input.layout_input.parent_constraint().height(),
-        );
-        let child_size = child.measure(&parent_constraint)?;
-        child.place(PxPosition::new(self.x.into(), self.y.into()), output);
-        Ok(LayoutModifierOutput { size: child_size })
+impl PlacementModifierNode for OffsetModifierNode {
+    fn transform_position(&self, position: PxPosition) -> PxPosition {
+        position.offset(self.x.into(), self.y.into())
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct ConstraintModifierNode {
-    pub width_override: Option<DimensionValue>,
-    pub height_override: Option<DimensionValue>,
+    pub width_override: Option<AxisConstraint>,
+    pub height_override: Option<AxisConstraint>,
+    pub fill_width: bool,
+    pub fill_height: bool,
 }
 
 impl LayoutModifierNode for ConstraintModifierNode {
@@ -213,39 +217,46 @@ impl LayoutModifierNode for ConstraintModifierNode {
         &self,
         input: &LayoutModifierInput<'_>,
         child: &mut dyn LayoutModifierChild,
-        output: &mut LayoutOutput<'_>,
     ) -> Result<LayoutModifierOutput, MeasurementError> {
         let parent_width = input.layout_input.parent_constraint().width();
         let parent_height = input.layout_input.parent_constraint().height();
         let constraint = Constraint::new(
-            self.width_override.unwrap_or(parent_width),
-            self.height_override.unwrap_or(parent_height),
-        )
-        .merge(input.layout_input.parent_constraint());
+            resolve_axis_constraint(parent_width, self.width_override, self.fill_width),
+            resolve_axis_constraint(parent_height, self.height_override, self.fill_height),
+        );
         let child_size = child.measure(&constraint)?;
-        child.place(PxPosition::ZERO, output);
+        child.place(PxPosition::ZERO);
         Ok(LayoutModifierOutput { size: child_size })
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub(crate) struct MinimumInteractiveModifierNode;
 
 impl LayoutModifierNode for MinimumInteractiveModifierNode {
     fn measure(
         &self,
-        _input: &LayoutModifierInput<'_>,
+        input: &LayoutModifierInput<'_>,
         child: &mut dyn LayoutModifierChild,
-        output: &mut LayoutOutput<'_>,
     ) -> Result<LayoutModifierOutput, MeasurementError> {
         const MIN_SIZE: Dp = Dp(48.0);
-        let child_size = child.measure(&Constraint::NONE)?;
+        let parent_constraint = Constraint::new(
+            input.layout_input.parent_constraint().width(),
+            input.layout_input.parent_constraint().height(),
+        );
+        let child_constraint = Constraint::new(
+            parent_constraint.width.without_min(),
+            parent_constraint.height.without_min(),
+        );
+        let child_size = child.measure(&child_constraint)?;
         let min_px: Px = MIN_SIZE.into();
-        let width = child_size.width.max(min_px);
-        let height = child_size.height.max(min_px);
+        let width = parent_constraint.width.clamp(child_size.width.max(min_px));
+        let height = parent_constraint
+            .height
+            .clamp(child_size.height.max(min_px));
         let x = ((width - child_size.width) / 2).max(Px(0));
         let y = ((height - child_size.height) / 2).max(Px(0));
-        child.place(PxPosition::new(x, y), output);
+        child.place(PxPosition::new(x, y));
         Ok(LayoutModifierOutput {
             size: ComputedData { width, height },
         })

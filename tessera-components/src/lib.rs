@@ -53,7 +53,13 @@
 //! # }
 //! # component();
 //! ```
-#![deny(missing_docs, clippy::unwrap_used)]
+#![deny(
+    missing_docs,
+    clippy::unwrap_used,
+    rustdoc::broken_intra_doc_links,
+    rustdoc::invalid_rust_codeblocks,
+    rustdoc::invalid_html_tags
+)]
 
 mod animation;
 pub mod app_bar;
@@ -74,7 +80,6 @@ pub mod floating_action_button;
 pub mod flow_column;
 pub mod flow_row;
 pub mod fluid_glass;
-mod gesture_recognizer;
 pub mod glass_button;
 pub mod glass_progress;
 pub mod glass_slider;
@@ -96,6 +101,7 @@ pub mod navigation_rail;
 mod nested_scroll;
 mod padding_utils;
 pub mod pager;
+pub mod painter;
 pub mod pipelines;
 pub mod pos_misc;
 pub mod progress;

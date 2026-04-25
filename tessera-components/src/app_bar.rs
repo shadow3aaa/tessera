@@ -4,13 +4,11 @@
 //!
 //! Use for screen titles, navigation affordances, and primary actions at the
 //! top of a view.
-use tessera_ui::{
-    Color, Dp, Modifier, RenderSlot, WindowAction, provide_context, tessera, use_context,
-};
+use tessera_ui::{Color, Dp, Modifier, RenderSlot, provide_context, tessera, use_context};
 
 use crate::{
     alignment::{Alignment, CrossAxisAlignment, MainAxisAlignment},
-    icon::{IconContent, icon},
+    icon_button::icon_button,
     material_icons::filled,
     modifier::{ModifierExt as _, Padding},
     row::row,
@@ -60,90 +58,6 @@ impl AppBarDefaults {
     }
 }
 
-impl WindowControlButtonBuilder {
-    /// Sets the icon content using any supported icon source.
-    pub fn icon(mut self, icon: impl Into<IconContent>) -> Self {
-        self.props.icon = Some(icon.into());
-        self
-    }
-}
-
-fn render_window_control_icon(content: IconContent, tint: Color) {
-    let builder = match content {
-        IconContent::Vector(data) => icon().vector(data),
-        IconContent::Raster(data) => icon().raster(data),
-    };
-
-    builder.size(Dp(18.0)).tint(tint);
-}
-
-/// # window_control_button
-///
-/// Render a desktop window control button for minimize, maximize, and close
-/// actions.
-///
-/// ## Usage
-///
-/// Use in custom desktop title bars or top app bars for undecorated windows.
-///
-/// ## Parameters
-///
-/// - `modifier` — modifier chain applied before the default button size and
-///   window action.
-/// - `action` — optional window action requested when the button is activated.
-/// - `icon` — optional icon content shown at the center of the button.
-/// - `tint` — optional icon tint override.
-///
-/// ## Examples
-/// ```rust
-/// # use tessera_ui::tessera;
-/// # #[tessera]
-/// # fn component() {
-/// use tessera_components::{app_bar::window_control_button, material_icons::filled};
-/// # use tessera_components::theme::{MaterialTheme, material_theme};
-/// use tessera_ui::WindowAction;
-///
-/// # material_theme()
-/// #     .theme(|| MaterialTheme::default())
-/// #     .child(|| {
-/// window_control_button()
-///     .action(WindowAction::Close)
-///     .icon(filled::CLOSE_SVG);
-/// #     });
-/// # }
-/// # component();
-/// ```
-#[tessera]
-pub fn window_control_button(
-    modifier: Modifier,
-    action: Option<WindowAction>,
-    #[prop(skip_setter)] icon: Option<IconContent>,
-    tint: Option<Color>,
-) {
-    let scheme = use_context::<MaterialTheme>()
-        .expect("MaterialTheme must be provided")
-        .get()
-        .color_scheme;
-    let action = action.expect("window_control_button action must be provided");
-    let icon = icon.expect("window_control_button icon must be provided");
-    let tint = tint.unwrap_or_else(|| match action {
-        WindowAction::Close => scheme.error,
-        WindowAction::DragWindow
-        | WindowAction::Minimize
-        | WindowAction::Maximize
-        | WindowAction::ToggleMaximize => scheme.on_surface_variant,
-    });
-
-    surface()
-        .modifier(modifier.size(Dp(40.0), Dp(32.0)).window_action(action))
-        .style(Color::TRANSPARENT.into())
-        .content_color(tint)
-        .content_alignment(Alignment::Center)
-        .with_child(move || {
-            render_window_control_icon(icon.clone(), tint);
-        });
-}
-
 /// # app_bar
 ///
 /// Render a container row for app-level navigation and actions.
@@ -184,7 +98,7 @@ pub fn window_control_button(
 /// ```
 #[tessera]
 pub fn app_bar(
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     container_color: Option<Color>,
     content_color: Option<Color>,
     elevation: Option<Dp>,
@@ -193,6 +107,7 @@ pub fn app_bar(
     cross_axis_alignment: Option<CrossAxisAlignment>,
     content: Option<RenderSlot>,
 ) {
+    let modifier = modifier.unwrap_or_default();
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -217,7 +132,7 @@ pub fn app_bar(
                 .fill_max_width()
                 .height(AppBarDefaults::TOP_APP_BAR_HEIGHT),
         )
-        .with_child(move || {
+        .child(move || {
             let content = content;
             row()
                 .modifier(Modifier::new().fill_max_size().padding(content_padding))
@@ -233,46 +148,52 @@ impl TopAppBarBuilder {
     where
         F: Fn() + Send + Sync + 'static,
     {
-        self.props.actions.push(RenderSlot::new(action));
+        self.props
+            .actions
+            .get_or_insert_with(Vec::new)
+            .push(RenderSlot::new(action));
         self
     }
 
     /// Append a trailing action item using a shared callback.
     pub fn action_shared(mut self, action: impl Into<RenderSlot>) -> Self {
-        self.props.actions.push(action.into());
+        self.props
+            .actions
+            .get_or_insert_with(Vec::new)
+            .push(action.into());
         self
     }
 
     /// Replace the trailing actions with shared callbacks.
     pub fn actions_shared(mut self, actions: Vec<RenderSlot>) -> Self {
-        self.props.actions = actions;
+        self.props.actions = Some(actions);
         self
     }
 
     /// Appends a desktop minimize window control button.
     pub fn window_control_minimize(self) -> Self {
         self.action(|| {
-            window_control_button()
-                .action(WindowAction::Minimize)
-                .icon(filled::MINIMIZE_SVG);
+            icon_button()
+                .icon(filled::MINIMIZE_SVG)
+                .on_click(tessera_platform::window::minimize);
         })
     }
 
     /// Appends a desktop maximize or restore window control button.
     pub fn window_control_toggle_maximize(self) -> Self {
         self.action(|| {
-            window_control_button()
-                .action(WindowAction::ToggleMaximize)
-                .icon(filled::FULLSCREEN_SVG);
+            icon_button()
+                .icon(filled::FULLSCREEN_SVG)
+                .on_click(tessera_platform::window::toggle_maximize);
         })
     }
 
     /// Appends a desktop close window control button.
     pub fn window_control_close(self) -> Self {
         self.action(|| {
-            window_control_button()
-                .action(WindowAction::Close)
-                .icon(filled::CLOSE_SVG);
+            icon_button()
+                .icon(filled::CLOSE_SVG)
+                .on_click(tessera_platform::window::close);
         })
     }
 }
@@ -322,20 +243,24 @@ impl TopAppBarBuilder {
 /// ```
 #[tessera]
 pub fn top_app_bar(
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     container_color: Option<Color>,
     content_color: Option<Color>,
     elevation: Option<Dp>,
     content_padding: Option<Padding>,
-    #[prop(into)] title: String,
-    title_area_modifier: Modifier,
+    #[prop(into)] title: Option<String>,
+    title_area_modifier: Option<Modifier>,
     navigation_icon: Option<RenderSlot>,
-    #[prop(skip_setter)] actions: Vec<RenderSlot>,
+    #[prop(skip_setter)] actions: Option<Vec<RenderSlot>>,
     navigation_icon_color: Option<Color>,
     action_icon_color: Option<Color>,
     title_inset: Option<Dp>,
     actions_spacing: Option<Dp>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let title = title.unwrap_or_default();
+    let title_area_modifier = title_area_modifier.unwrap_or_default();
+    let actions = actions.unwrap_or_default();
     let theme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get();
@@ -368,62 +293,65 @@ pub fn top_app_bar(
             let actions = actions.clone();
             let title_text = title.clone();
             let title_mod = title_area_modifier.clone();
-            row().children(move || {
-                let navigation_icon = navigation_icon;
-                let actions = actions.clone();
-                if let Some(navigation_icon) = navigation_icon {
-                    let nav_color = navigation_icon_color;
-                    provide_context(
-                        || ContentColor { current: nav_color },
-                        || {
-                            navigation_icon.render();
-                        },
-                    );
-                } else if extra_inset.0 > 0.0 {
-                    let spacer_width = extra_inset;
-                    spacer().modifier(Modifier::new().width(spacer_width));
-                }
-
-                let title_text = title_text.clone();
-                let title_mod = title_mod.clone();
-                row()
-                    .modifier(title_mod.fill_max_size().weight(1.0))
-                    .cross_axis_alignment(CrossAxisAlignment::Center)
-                    .children(move || {
-                        if title_text.is_empty() {
-                            spacer().modifier(Modifier::new().fill_max_width());
-                        } else {
-                            let text_value = title_text.clone();
-                            provide_text_style(title_style, move || {
-                                text().content(text_value.clone());
-                            });
-                        }
-                    });
-
-                if !actions.is_empty() {
-                    let actions_len = actions.len();
-                    let spacing = actions_spacing;
-                    let action_color = action_icon_color;
+            row()
+                .cross_axis_alignment(CrossAxisAlignment::Center)
+                .children(move || {
+                    let navigation_icon = navigation_icon;
                     let actions = actions.clone();
-                    provide_context(
-                        || ContentColor {
-                            current: action_color,
-                        },
-                        || {
-                            row()
-                                .cross_axis_alignment(CrossAxisAlignment::Center)
-                                .children(move || {
-                                    for (index, action) in actions.iter().cloned().enumerate() {
-                                        action.render();
-                                        if spacing.0 > 0.0 && index + 1 < actions_len {
-                                            let spacer_width = spacing;
-                                            spacer().modifier(Modifier::new().width(spacer_width));
-                                        }
-                                    }
+                    if let Some(navigation_icon) = navigation_icon {
+                        let nav_color = navigation_icon_color;
+                        provide_context(
+                            || ContentColor { current: nav_color },
+                            || {
+                                navigation_icon.render();
+                            },
+                        );
+                    } else if extra_inset.0 > 0.0 {
+                        let spacer_width = extra_inset;
+                        spacer().modifier(Modifier::new().width(spacer_width));
+                    }
+
+                    let title_text = title_text.clone();
+                    let title_mod = title_mod.clone();
+                    row()
+                        .modifier(title_mod.fill_max_size().weight(1.0))
+                        .cross_axis_alignment(CrossAxisAlignment::Center)
+                        .children(move || {
+                            if title_text.is_empty() {
+                                spacer().modifier(Modifier::new().fill_max_width());
+                            } else {
+                                let text_value = title_text.clone();
+                                provide_text_style(title_style, move || {
+                                    text().content(text_value.clone());
                                 });
-                        },
-                    );
-                }
-            });
+                            }
+                        });
+
+                    if !actions.is_empty() {
+                        let actions_len = actions.len();
+                        let spacing = actions_spacing;
+                        let action_color = action_icon_color;
+                        let actions = actions.clone();
+                        provide_context(
+                            || ContentColor {
+                                current: action_color,
+                            },
+                            || {
+                                row()
+                                    .cross_axis_alignment(CrossAxisAlignment::Center)
+                                    .children(move || {
+                                        for (index, action) in actions.iter().cloned().enumerate() {
+                                            action.render();
+                                            if spacing.0 > 0.0 && index + 1 < actions_len {
+                                                let spacer_width = spacing;
+                                                spacer()
+                                                    .modifier(Modifier::new().width(spacer_width));
+                                            }
+                                        }
+                                    });
+                            },
+                        );
+                    }
+                });
         });
 }

@@ -10,7 +10,7 @@ use std::{
 };
 
 use tessera_ui::{
-    Callback, Color, DimensionValue, Dp, Modifier, RenderSlot, State, provide_context, remember,
+    AxisConstraint, Callback, Color, Dp, Modifier, RenderSlot, State, provide_context, remember,
     tessera, use_context,
 };
 
@@ -24,7 +24,7 @@ use crate::{
     spacer::spacer,
     surface::{SurfaceStyle, surface},
     text::text,
-    theme::{ContentColor, MaterialAlpha, MaterialTheme},
+    theme::{ContentColor, MaterialAlpha, MaterialTheme, TextStyle},
 };
 
 const DATE_COLUMNS: usize = 7;
@@ -453,19 +453,24 @@ struct DatePickerConfig {
 /// ```
 #[tessera]
 pub fn date_picker(
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     initial_selected_date: Option<CalendarDate>,
     initial_displayed_month: Option<YearMonth>,
     year_range: Option<RangeInclusive<i32>>,
     selectable_dates: Option<Arc<dyn SelectableDates>>,
-    display_mode: DatePickerDisplayMode,
-    first_day_of_week: Weekday,
-    show_weekday_labels: bool,
-    show_mode_toggle: bool,
+    display_mode: Option<DatePickerDisplayMode>,
+    first_day_of_week: Option<Weekday>,
+    show_weekday_labels: Option<bool>,
+    show_mode_toggle: Option<bool>,
     #[prop(into)] title: Option<String>,
     #[prop(into)] headline: Option<String>,
     state: Option<State<DatePickerState>>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let display_mode = display_mode.unwrap_or_default();
+    let first_day_of_week = first_day_of_week.unwrap_or_default();
+    let show_weekday_labels = show_weekday_labels.unwrap_or(true);
+    let show_mode_toggle = show_mode_toggle.unwrap_or(true);
     let year_range = year_range.unwrap_or(DatePickerDefaults::YEAR_RANGE);
     let selectable_dates = selectable_dates.unwrap_or_else(DatePickerDefaults::all_dates);
     let state = state.unwrap_or_else(|| {
@@ -537,7 +542,10 @@ fn date_picker_inner(args: DatePickerConfig) {
                                 {
                                     text()
                                         .content(title_text.clone())
-                                        .size(typography.title_small.font_size)
+                                        .style(TextStyle {
+                                            font_size: typography.title_small.font_size,
+                                            line_height: typography.title_small.line_height,
+                                        })
                                         .color(scheme.on_surface_variant);
                                 };
 
@@ -545,7 +553,10 @@ fn date_picker_inner(args: DatePickerConfig) {
                                 {
                                     text()
                                         .content(headline_text.clone())
-                                        .size(typography.headline_small.font_size)
+                                        .style(TextStyle {
+                                            font_size: typography.headline_small.font_size,
+                                            line_height: typography.headline_small.line_height,
+                                        })
                                         .color(scheme.on_surface);
                                 };
                             });
@@ -626,14 +637,18 @@ pub fn date_picker_dialog(
     #[prop(into)] title: Option<String>,
     confirm_button: Option<RenderSlot>,
     dismiss_button: Option<RenderSlot>,
-    picker_modifier: Modifier,
-    picker_first_day_of_week: Weekday,
-    picker_show_weekday_labels: bool,
-    picker_show_mode_toggle: bool,
+    picker_modifier: Option<Modifier>,
+    picker_first_day_of_week: Option<Weekday>,
+    picker_show_weekday_labels: Option<bool>,
+    picker_show_mode_toggle: Option<bool>,
     #[prop(into)] picker_title: Option<String>,
     #[prop(into)] picker_headline: Option<String>,
 ) {
-    let state = state.expect("date_picker_dialog requires state to be set");
+    let state = state.unwrap_or_else(|| remember(DatePickerState::default));
+    let picker_modifier = picker_modifier.unwrap_or_default();
+    let picker_first_day_of_week = picker_first_day_of_week.unwrap_or_default();
+    let picker_show_weekday_labels = picker_show_weekday_labels.unwrap_or(true);
+    let picker_show_mode_toggle = picker_show_mode_toggle.unwrap_or(true);
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -643,11 +658,11 @@ pub fn date_picker_dialog(
 
     column()
         .modifier(Modifier::new().constrain(
-            Some(DimensionValue::Wrap {
-                min: Some(Dp(320.0).into()),
-                max: Some(Dp(560.0).into()),
-            }),
-            Some(DimensionValue::WRAP),
+            Some(AxisConstraint::new(
+                Dp(320.0).into(),
+                Some(Dp(560.0).into()),
+            )),
+            Some(AxisConstraint::NONE),
         ))
         .children(move || {
             if let Some(title) = title.as_ref() {
@@ -1096,7 +1111,7 @@ fn display_mode_toggle(state: State<DatePickerState>) {
         .style(SurfaceStyle::Filled {
             color: scheme.surface_container_high,
         })
-        .shape(Shape::capsule())
+        .shape(Shape::CAPSULE)
         .content_alignment(Alignment::Center)
         .on_click(move || {
             state.with_mut(|s| s.toggle_display_mode());
@@ -1133,7 +1148,7 @@ fn nav_button(label: &'static str, enabled: bool, on_click: Callback) {
         .style(SurfaceStyle::Filled {
             color: scheme.surface_container_low,
         })
-        .shape(Shape::capsule())
+        .shape(Shape::CAPSULE)
         .content_alignment(Alignment::Center)
         .enabled(enabled)
         .on_click(move || {

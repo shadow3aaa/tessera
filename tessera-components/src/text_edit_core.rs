@@ -4,7 +4,7 @@
 //! text editing components, including text buffer management, selection and
 //! cursor handling, rendering logic, and keyboard event mapping. It is designed
 //! to be shared across UI components via the `TextEditorController` wrapper,
-//! enabling consistent and thread-safe access to editor state.
+//! enabling consistent access to editor state.
 //! and efficient text editing experiences.
 //!
 //! Typical use cases include single-line and multi-line text editors, input
@@ -29,11 +29,9 @@ use glyphon::{
 };
 use tessera_platform::clipboard;
 use tessera_ui::{
-    CallbackWith, Color, ComputedData, DimensionValue, Dp, FocusRequester, MeasurementError, Px,
+    CallbackWith, Color, ComputedData, Dp, FocusRequester, LayoutResult, MeasurementError, Px,
     PxPosition, State, current_frame_nanos,
-    layout::{
-        LayoutInput, LayoutOutput, LayoutPolicy, RenderInput, RenderPolicy, layout_primitive,
-    },
+    layout::{LayoutPolicy, MeasureScope, RenderInput, RenderPolicy, layout},
     receive_frame_nanos, tessera,
     time::Instant,
     winit,
@@ -3259,42 +3257,27 @@ impl PartialEq for TextEditLayout {
 }
 
 impl LayoutPolicy for TextEditLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let max_width_pixels: Option<Px> = match input.parent_constraint().width() {
-            DimensionValue::Fixed(w) => Some(w),
-            DimensionValue::Wrap { max, .. } => max,
-            DimensionValue::Fill { max, .. } => max,
-        };
-
-        let max_height_pixels: Option<Px> = match input.parent_constraint().height() {
-            DimensionValue::Fixed(h) => Some(h),
-            DimensionValue::Wrap { max, .. } => max,
-            DimensionValue::Fill { max, .. } => max,
-        };
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let max_width_pixels: Option<Px> = input.parent_constraint().width().resolve_max();
+        let max_height_pixels: Option<Px> = input.parent_constraint().height().resolve_max();
 
         let text_constraint = TextConstraint {
-            max_width: max_width_pixels.map(|px| px.to_f32()),
-            max_height: max_height_pixels.map(|px| px.to_f32()),
+            max_width: max_width_pixels.map(|px: Px| px.to_f32()),
+            max_height: max_height_pixels.map(|px: Px| px.to_f32()),
         };
         let text_data = self
             .controller
             .with_mut(|c| c.text_data(text_constraint.clone()));
 
         let place_rect_children =
-            |rects: &[RectDef],
-             child_offset: usize,
-             input: &LayoutInput<'_>,
-             output: &mut LayoutOutput<'_>| {
+            |rects: &[RectDef], child_offset: usize, result: &mut LayoutResult| {
+                let child_constraint = input.parent_constraint().without_min();
                 for (index, rect_def) in rects.iter().enumerate() {
-                    if let Some(rect_node_id) =
-                        input.children_ids().get(child_offset + index).copied()
-                    {
-                        input.measure_child_in_parent_constraint(rect_node_id)?;
-                        output.place_child(rect_node_id, PxPosition::new(rect_def.x, rect_def.y));
+                    if let Some(rect_node) = children.get(child_offset + index).copied() {
+                        rect_node.measure(&child_constraint)?;
+                        result.place_child(rect_node, PxPosition::new(rect_def.x, rect_def.y));
                     }
                 }
                 Ok::<(), MeasurementError>(())
@@ -3303,21 +3286,19 @@ impl LayoutPolicy for TextEditLayout {
         if let Some((selection_rects, composition_rects, cursor_rect, computed_data)) =
             self.controller.with(|c| c.cached_layout(&text_constraint))
         {
-            place_rect_children(&selection_rects, 0, input, output)?;
-            place_rect_children(&composition_rects, selection_rects.len(), input, output)?;
+            place_rect_children(&selection_rects, 0, &mut result)?;
+            place_rect_children(&composition_rects, selection_rects.len(), &mut result)?;
 
             if let Some(cursor_rect) = cursor_rect {
                 let cursor_node_index = selection_rects.len() + composition_rects.len();
-                if let Some(cursor_node_id) = input.children_ids().get(cursor_node_index).copied() {
-                    input.measure_child_in_parent_constraint(cursor_node_id)?;
-                    output.place_child(
-                        cursor_node_id,
-                        PxPosition::new(cursor_rect.x, cursor_rect.y),
-                    );
+                if let Some(cursor_node) = children.get(cursor_node_index).copied() {
+                    let child_constraint = input.parent_constraint().without_min();
+                    cursor_node.measure(&child_constraint)?;
+                    result.place_child(cursor_node, PxPosition::new(cursor_rect.x, cursor_rect.y));
                 }
             }
 
-            return Ok(computed_data);
+            return Ok(result.with_size(computed_data));
         }
 
         let line_height = self.controller.with(|c| c.line_height());
@@ -3336,8 +3317,8 @@ impl LayoutPolicy for TextEditLayout {
         let selection_rects_len = selection_rects.len();
         let composition_rects_len = composition_rects.len();
 
-        place_rect_children(&selection_rects, 0, input, output)?;
-        place_rect_children(&composition_rects, selection_rects_len, input, output)?;
+        place_rect_children(&selection_rects, 0, &mut result)?;
+        place_rect_children(&composition_rects, selection_rects_len, &mut result)?;
 
         let visible_x1 = max_width_pixels.unwrap_or(Px(i32::MAX));
         let visible_y1 = max_height_pixels.unwrap_or(Px(i32::MAX));
@@ -3382,21 +3363,19 @@ impl LayoutPolicy for TextEditLayout {
 
         if let Some(cursor_rect) = cursor_rect {
             let cursor_node_index = selection_rects_len + composition_rects_len;
-            if let Some(cursor_node_id) = input.children_ids().get(cursor_node_index).copied() {
-                input.measure_child_in_parent_constraint(cursor_node_id)?;
-                output.place_child(
-                    cursor_node_id,
-                    PxPosition::new(cursor_rect.x, cursor_rect.y),
-                );
+            if let Some(cursor_node) = children.get(cursor_node_index).copied() {
+                let child_constraint = input.parent_constraint().without_min();
+                cursor_node.measure(&child_constraint)?;
+                result.place_child(cursor_node, PxPosition::new(cursor_rect.x, cursor_rect.y));
             }
         }
 
-        Ok(computed_data)
+        Ok(result.with_size(computed_data))
     }
 }
 
 impl RenderPolicy for TextEditLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         let mut metadata = input.metadata_mut();
         metadata.set_clips_children(true);
         if let Some(text_data) = self.controller.with(|c| c.current_text_data()) {
@@ -3427,7 +3406,7 @@ pub fn text_edit_core(controller: Option<State<TextEditorController>>) {
         controller,
         layout_version,
     };
-    layout_primitive()
+    layout()
         .layout_policy(policy.clone())
         .render_policy(policy)
         .child(move || {

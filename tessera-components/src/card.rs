@@ -429,7 +429,7 @@ struct CardResolvedArgs {
 /// ```
 #[tessera]
 pub fn card(
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     variant: Option<CardVariant>,
     enabled: Option<bool>,
     on_click: Option<Callback>,
@@ -441,7 +441,7 @@ pub fn card(
     content: Option<RenderSlot>,
 ) {
     let args = CardResolvedArgs {
-        modifier,
+        modifier: modifier.unwrap_or_default(),
         variant: variant.unwrap_or_default(),
         enabled: enabled.unwrap_or(true),
         on_click,
@@ -571,11 +571,6 @@ pub fn card(
 }
 
 impl CardBuilder {
-    /// Creates props from base args and a content render function.
-    pub fn with_content(self, content: impl Fn() + Send + Sync + 'static) -> Self {
-        self.content(content)
-    }
-
     /// Applies the filled card preset.
     pub fn filled(self) -> Self {
         self.variant(CardVariant::Filled)

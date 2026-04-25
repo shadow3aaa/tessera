@@ -7,8 +7,8 @@
 use std::{collections::VecDeque, time::Duration};
 
 use tessera_ui::{
-    Callback, CallbackWith, Color, Dp, Modifier, State, current_frame_nanos,
-    layout::layout_primitive, receive_frame_nanos, tessera, use_context,
+    Callback, CallbackWith, Color, Dp, Modifier, State, current_frame_nanos, layout::layout,
+    receive_frame_nanos, remember, tessera, use_context,
 };
 
 use crate::{
@@ -130,7 +130,7 @@ impl From<SnackbarRequest> for ResolvedSnackbar {
     }
 }
 
-/// Data describing the current snackbar shown by a [`SnackbarHost`].
+/// Data describing the current snackbar shown by [`snackbar_host`].
 #[derive(Clone, PartialEq)]
 pub struct SnackbarData {
     message: String,
@@ -208,14 +208,6 @@ pub struct SnackbarHostState {
     current_started_frame_nanos: Option<u64>,
     next_id: u64,
     last_result: Option<SnackbarResult>,
-}
-
-#[allow(missing_docs)]
-impl SnackbarHostBuilder {
-    pub fn state(mut self, state: State<SnackbarHostState>) -> Self {
-        self.props.state = Some(state);
-        self
-    }
 }
 
 impl SnackbarHostState {
@@ -481,11 +473,11 @@ impl SnackbarDefaults {
 /// ```
 #[tessera]
 pub fn snackbar(
-    modifier: Modifier,
-    #[prop(into)] message: String,
+    modifier: Option<Modifier>,
+    #[prop(into)] message: Option<String>,
     #[prop(into)] action_label: Option<String>,
-    with_dismiss_action: bool,
-    action_on_new_line: bool,
+    with_dismiss_action: Option<bool>,
+    action_on_new_line: Option<bool>,
     shape: Option<Shape>,
     container_color: Option<Color>,
     content_color: Option<Color>,
@@ -495,6 +487,10 @@ pub fn snackbar(
     on_action: Option<Callback>,
     on_dismiss: Option<Callback>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let message = message.unwrap_or_default();
+    let with_dismiss_action = with_dismiss_action.unwrap_or(false);
+    let action_on_new_line = action_on_new_line.unwrap_or(false);
     let theme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get();
@@ -621,11 +617,12 @@ pub fn snackbar(
 /// ```
 #[tessera]
 pub fn snackbar_host(
-    modifier: Modifier,
-    #[prop(skip_setter)] state: Option<State<SnackbarHostState>>,
+    modifier: Option<Modifier>,
+    state: Option<State<SnackbarHostState>>,
     snackbar: Option<CallbackWith<SnackbarData>>,
 ) {
-    let state = state.expect("snackbar_host requires state to be set");
+    let modifier = modifier.unwrap_or_default();
+    let state = state.unwrap_or_else(|| remember(SnackbarHostState::default));
     let snackbar_slot = snackbar;
     let frame_nanos = current_frame_nanos();
     let should_poll = state.with(|host| host.should_poll(frame_nanos));
@@ -656,12 +653,12 @@ pub fn snackbar_host(
     };
     let data = SnackbarData::new(record, state);
 
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let data = data.clone();
         if let Some(snackbar_slot) = snackbar_slot {
             snackbar_slot.call(data.clone());
         } else {
-            layout_primitive()
+            layout()
                 .modifier(Modifier::new().padding(SnackbarDefaults::HOST_PADDING))
                 .child(move || {
                     snackbar_from_data(data.clone());

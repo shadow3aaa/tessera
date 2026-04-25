@@ -4,16 +4,13 @@
 //!
 //! Wrap chips, tags, or button groups across multiple rows.
 use tessera_ui::{
-    ComputedData, Constraint, DimensionValue, Dp, MeasurementError, Modifier, Px, PxPosition,
-    RenderSlot,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, layout_primitive},
+    AxisConstraint, ComputedData, Constraint, Dp, LayoutResult, MeasurementError, Modifier, Px,
+    PxPosition, RenderSlot,
+    layout::{LayoutChild, LayoutPolicy, MeasureScope, layout},
     tessera,
 };
 
-use crate::{
-    alignment::{CrossAxisAlignment, MainAxisAlignment},
-    modifier::ModifierExt as _,
-};
+use crate::alignment::{CrossAxisAlignment, MainAxisAlignment};
 
 /// # flow_row
 ///
@@ -39,7 +36,7 @@ use crate::{
 ///
 /// ```
 /// use tessera_components::{flow_row::flow_row, text::text};
-/// use tessera_ui::{remember, tessera};
+/// use tessera_ui::{LayoutResult, remember, tessera};
 ///
 /// #[tessera]
 /// fn demo() {
@@ -58,23 +55,25 @@ use crate::{
 #[tessera]
 pub fn flow_row(
     modifier: Option<Modifier>,
-    main_axis_alignment: MainAxisAlignment,
-    cross_axis_alignment: CrossAxisAlignment,
-    line_alignment: MainAxisAlignment,
-    item_spacing: Dp,
-    line_spacing: Dp,
+    main_axis_alignment: Option<MainAxisAlignment>,
+    cross_axis_alignment: Option<CrossAxisAlignment>,
+    line_alignment: Option<MainAxisAlignment>,
+    item_spacing: Option<Dp>,
+    line_spacing: Option<Dp>,
     max_items_per_line: Option<usize>,
     max_lines: Option<usize>,
-    children: RenderSlot,
+    children: Option<RenderSlot>,
 ) {
-    let modifier = modifier.unwrap_or_else(|| {
-        Modifier::new().constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP))
-    });
-    let item_spacing = sanitize_spacing(Px::from(item_spacing));
-    let line_spacing = sanitize_spacing(Px::from(line_spacing));
+    let modifier = modifier.unwrap_or_default();
+    let main_axis_alignment = main_axis_alignment.unwrap_or_default();
+    let cross_axis_alignment = cross_axis_alignment.unwrap_or_default();
+    let line_alignment = line_alignment.unwrap_or_default();
+    let item_spacing = sanitize_spacing(Px::from(item_spacing.unwrap_or(Dp(0.0))));
+    let line_spacing = sanitize_spacing(Px::from(line_spacing.unwrap_or(Dp(0.0))));
     let max_items_per_line = max_items_per_line.unwrap_or(usize::MAX);
     let max_lines = max_lines.unwrap_or(usize::MAX);
-    layout_primitive()
+    let children = children.unwrap_or_else(RenderSlot::empty);
+    layout()
         .modifier(modifier)
         .layout_policy(FlowRowLayout {
             main_axis_alignment,
@@ -102,69 +101,49 @@ struct FlowRowLayout {
 }
 
 impl LayoutPolicy for FlowRowLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
         let child_weights = collect_child_weights(input);
         let n = child_weights.len();
-        let children_ids = input.children_ids();
         assert_eq!(
-            children_ids.len(),
+            children.len(),
             n,
             "Mismatch between children defined in scope and runtime children count"
         );
 
-        let flow_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
-        let max_width = flow_constraint.width.get_max();
+        let flow_constraint = *input.parent_constraint().as_ref();
+        let max_width = flow_constraint.width.resolve_max();
 
-        let child_constraint = Constraint::new(
-            DimensionValue::Wrap {
-                min: None,
-                max: max_width,
-            },
-            flow_constraint.height,
-        );
+        let child_constraint =
+            Constraint::new(flow_constraint.width.without_min(), flow_constraint.height);
 
         let use_weighted_remeasure = max_width.is_some();
         let mut unweighted_nodes = Vec::new();
         let mut weighted_nodes = Vec::new();
-        for (idx, &child_id) in children_ids.iter().enumerate().take(n) {
+        for (idx, child_id) in children.iter().enumerate().take(n) {
             let weight = child_weights.get(idx).copied().flatten().unwrap_or(0.0);
             if weight > 0.0 && use_weighted_remeasure {
-                weighted_nodes.push((child_id, child_constraint));
+                weighted_nodes.push((*child_id, child_constraint));
             } else {
-                unweighted_nodes.push((child_id, child_constraint));
+                unweighted_nodes.push((*child_id, child_constraint));
             }
         }
 
-        let unweighted_results = if unweighted_nodes.is_empty() {
-            None
-        } else {
-            Some(input.measure_children(unweighted_nodes)?)
-        };
-        let weighted_results = if weighted_nodes.is_empty() {
-            None
-        } else {
-            Some(input.measure_children_untracked(weighted_nodes)?)
-        };
-
         let mut children_sizes = vec![None; n];
-        for (i, &child_id) in children_ids.iter().enumerate().take(n) {
-            if let Some(results) = &unweighted_results
-                && let Some(child_size) = results.get(&child_id)
+        for (i, child_id) in children.iter().enumerate().take(n) {
+            if let Some((_, constraint)) = unweighted_nodes
+                .iter()
+                .find(|(candidate, _)| candidate == child_id)
             {
-                children_sizes[i] = Some(*child_size);
+                children_sizes[i] = Some(child_id.measure(constraint)?.size());
                 continue;
             }
-            if let Some(results) = &weighted_results
-                && let Some(child_size) = results.get(&child_id)
+            if let Some((_, constraint)) = weighted_nodes
+                .iter()
+                .find(|(candidate, _)| candidate == child_id)
             {
-                children_sizes[i] = Some(*child_size);
+                children_sizes[i] = Some(child_id.measure_untracked(constraint)?.size());
             }
         }
 
@@ -179,7 +158,7 @@ impl LayoutPolicy for FlowRowLayout {
         if let Some(max_width) = max_width {
             apply_weighted_children_row(WeightedRowMeasureInput {
                 input,
-                children_ids,
+                children: &children,
                 flow_constraint: &flow_constraint,
                 lines: &lines,
                 children_sizes: &mut children_sizes,
@@ -198,8 +177,8 @@ impl LayoutPolicy for FlowRowLayout {
             resolve_dimension(flow_constraint.height, content_height, "FlowRow height");
 
         place_flow_row(
-            output,
-            children_ids,
+            &mut result,
+            &children,
             &lines,
             &children_sizes,
             &line_metrics,
@@ -212,20 +191,20 @@ impl LayoutPolicy for FlowRowLayout {
             final_height,
         );
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: final_width,
             height: final_height,
-        })
+        }))
     }
 }
 
-fn collect_child_weights(input: &LayoutInput<'_>) -> Vec<Option<f32>> {
+fn collect_child_weights(input: &MeasureScope<'_>) -> Vec<Option<f32>> {
     input
-        .children_ids()
+        .children()
         .iter()
-        .map(|&child_id| {
-            input
-                .child_parent_data::<crate::modifier::WeightParentData>(child_id)
+        .map(|child_id| {
+            child_id
+                .parent_data::<crate::modifier::WeightParentData>()
                 .map(|data| data.weight)
         })
         .collect()
@@ -294,8 +273,8 @@ fn build_row_lines(
 }
 
 struct WeightedRowMeasureInput<'a, 'b> {
-    input: &'a LayoutInput<'b>,
-    children_ids: &'a [tessera_ui::NodeId],
+    input: &'a MeasureScope<'b>,
+    children: &'a [LayoutChild<'b>],
     flow_constraint: &'a Constraint,
     lines: &'a [Vec<usize>],
     children_sizes: &'a mut [Option<ComputedData>],
@@ -308,8 +287,8 @@ fn apply_weighted_children_row(
     args: WeightedRowMeasureInput<'_, '_>,
 ) -> Result<(), MeasurementError> {
     let WeightedRowMeasureInput {
-        input,
-        children_ids,
+        input: _input,
+        children,
         flow_constraint,
         lines,
         children_sizes,
@@ -362,22 +341,13 @@ fn apply_weighted_children_row(
         return Ok(());
     }
 
-    let weighted_constraints: Vec<_> = allocations
-        .iter()
-        .map(|(idx, allocated)| {
-            (
-                children_ids[*idx],
-                Constraint::new(DimensionValue::Fixed(*allocated), flow_constraint.height),
-            )
-        })
-        .collect();
-    let weighted_results = input.measure_children(weighted_constraints)?;
-
-    for (idx, _) in allocations {
-        let child_id = children_ids[idx];
-        if let Some(child_size) = weighted_results.get(&child_id) {
-            children_sizes[idx] = Some(*child_size);
-        }
+    for &(idx, allocated) in &allocations {
+        let child_id = children[idx];
+        let child_size = child_id.measure(&Constraint::new(
+            AxisConstraint::exact(allocated),
+            flow_constraint.height,
+        ))?;
+        children_sizes[idx] = Some(child_size.size());
     }
 
     Ok(())
@@ -428,8 +398,8 @@ fn compute_row_content_size(line_metrics: &[LineMetric], line_spacing: Px) -> (P
 
 #[allow(clippy::too_many_arguments)]
 fn place_flow_row(
-    output: &mut LayoutOutput<'_>,
-    children_ids: &[tessera_ui::NodeId],
+    result: &mut LayoutResult,
+    children: &[LayoutChild<'_>],
     lines: &[Vec<usize>],
     children_sizes: &[Option<ComputedData>],
     line_metrics: &[LineMetric],
@@ -469,13 +439,13 @@ fn place_flow_row(
         let mut current_x = start_main;
         for (pos, idx) in line.iter().enumerate() {
             if let Some(child_size) = children_sizes[*idx] {
-                let child_id = children_ids[*idx];
+                let child_id = children[*idx];
                 let y_offset = calculate_cross_axis_offset(
                     child_size.height,
                     line_metric.cross,
                     cross_axis_alignment,
                 );
-                output.place_child(child_id, PxPosition::new(current_x, current_y + y_offset));
+                result.place_child(child_id, PxPosition::new(current_x, current_y + y_offset));
                 current_x += child_size.width;
                 if pos + 1 < line.len() {
                     current_x += item_gap;
@@ -539,32 +509,8 @@ fn calculate_cross_axis_offset(
     }
 }
 
-fn resolve_dimension(dim: DimensionValue, content: Px, context: &str) -> Px {
-    match dim {
-        DimensionValue::Fixed(value) => value,
-        DimensionValue::Fill { min, max } => {
-            let Some(max) = max else {
-                panic!(
-                    "Seems that you are using Fill without max constraint, which is not supported in {context}."
-                );
-            };
-            let mut value = max;
-            if let Some(min) = min {
-                value = value.max(min);
-            }
-            value
-        }
-        DimensionValue::Wrap { min, max } => {
-            let mut value = content;
-            if let Some(min) = min {
-                value = value.max(min);
-            }
-            if let Some(max) = max {
-                value = value.min(max);
-            }
-            value
-        }
-    }
+fn resolve_dimension(axis: AxisConstraint, content: Px, _context: &str) -> Px {
+    axis.clamp(content)
 }
 
 fn sanitize_spacing(px: Px) -> Px {
@@ -591,8 +537,10 @@ fn px_from_i64(value: i64) -> Px {
 #[cfg(test)]
 mod tests {
     use tessera_ui::{
-        ComputedData, DimensionValue, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError,
-        Modifier, NoopRenderPolicy, Px, layout::layout_primitive, tessera,
+        AxisConstraint, ComputedData, LayoutPolicy, LayoutResult, MeasurementError, Modifier,
+        NoopRenderPolicy, Px,
+        layout::{MeasureScope, layout},
+        tessera,
     };
 
     use crate::{
@@ -609,21 +557,21 @@ mod tests {
     }
 
     impl LayoutPolicy for FixedTestLayout {
-        fn measure(
-            &self,
-            _input: &LayoutInput<'_>,
-            _output: &mut LayoutOutput<'_>,
-        ) -> Result<ComputedData, MeasurementError> {
-            Ok(ComputedData {
+        fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+            Ok(LayoutResult::new(ComputedData {
                 width: Px::new(self.width),
                 height: Px::new(self.height),
-            })
+            }))
         }
     }
 
     #[tessera]
-    fn fixed_test_box(tag: String, width: i32, height: i32) {
-        layout_primitive()
+    fn fixed_test_box(tag: Option<String>, width: Option<i32>, height: Option<i32>) {
+        let tag = tag.unwrap_or_default();
+        let width = width.unwrap_or_default();
+        let height = height.unwrap_or_default();
+
+        layout()
             .layout_policy(FixedTestLayout { width, height })
             .render_policy(NoopRenderPolicy)
             .modifier(Modifier::new().semantics(SemanticsArgs {
@@ -636,11 +584,8 @@ mod tests {
     fn flow_row_layout_case() {
         flow_row()
             .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(Px::new(60))),
-                Some(DimensionValue::Wrap {
-                    min: None,
-                    max: Some(Px::new(100)),
-                }),
+                Some(AxisConstraint::exact(Px::new(60))),
+                Some(AxisConstraint::new(Px::ZERO, Some(Px::new(100)))),
             ))
             .main_axis_alignment(MainAxisAlignment::Start)
             .cross_axis_alignment(CrossAxisAlignment::Start)

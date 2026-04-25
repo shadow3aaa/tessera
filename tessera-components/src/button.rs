@@ -4,7 +4,7 @@
 //!
 //! Trigger actions, submit forms, or navigate.
 use tessera_ui::{
-    Callback, Color, Dp, Modifier, RenderSlot, accesskit::Role, layout::layout_primitive, tessera,
+    Callback, Color, Dp, Modifier, RenderSlot, accesskit::Role, layout::layout, tessera,
     use_context,
 };
 
@@ -138,7 +138,7 @@ struct ButtonResolvedArgs {
 #[tessera]
 pub fn button(
     enabled: Option<bool>,
-    modifier: Modifier,
+    modifier: Option<Modifier>,
     color: Option<Color>,
     content_color: Option<Color>,
     shape: Option<Shape>,
@@ -162,10 +162,10 @@ pub fn button(
         .color_scheme;
     let button_args = ButtonResolvedArgs {
         enabled: enabled.unwrap_or(true),
-        modifier,
+        modifier: modifier.unwrap_or_default(),
         color: color.unwrap_or(scheme.primary),
         content_color,
-        shape: shape.unwrap_or_else(Shape::capsule),
+        shape: shape.unwrap_or(Shape::CAPSULE),
         padding: padding.unwrap_or(ButtonDefaults::CONTENT_VERTICAL_PADDING),
         on_click,
         ripple_color: ripple_color.unwrap_or(scheme.on_primary),
@@ -192,7 +192,7 @@ pub fn button(
     create_surface_builder(&button_args).child(move || {
         let child = child;
         let modifier = Modifier::new().padding_all(button_args.padding);
-        layout_primitive().modifier(modifier).child(move || {
+        layout().modifier(modifier).child(move || {
             if let Some(child) = child.as_ref() {
                 let child = *child;
                 provide_text_style(typography.label_large, move || child.render());
@@ -280,11 +280,6 @@ fn create_surface_builder(args: &ButtonResolvedArgs) -> crate::surface::SurfaceB
 }
 
 impl ButtonBuilder {
-    /// Creates props from base args and a child render function.
-    pub fn with_child(self, child: impl Fn() + Send + Sync + 'static) -> Self {
-        self.child(child)
-    }
-
     /// Applies the standard "Filled" button preset.
     /// Create a standard "Filled" button (High emphasis).
     /// Uses Primary color for container and OnPrimary for content.

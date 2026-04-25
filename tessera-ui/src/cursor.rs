@@ -64,13 +64,13 @@ impl Default for TouchScrollConfig {
 /// Central state manager for cursor and touch interactions.
 ///
 /// `CursorState` is the main interface for handling all cursor-related events
-/// in the Tessera UI framework. It manages cursor position tracking, event
-/// queuing, and multi-touch support for touch gestures.
+/// in the Tessera UI framework. It manages cursor position tracking, pointer
+/// change queuing, and multi-touch support for touch gestures.
 #[derive(Default)]
 pub struct CursorState {
     /// Current cursor position, if any cursor is active.
     position: Option<PxPosition>,
-    /// Bounded queue of cursor events awaiting processing.
+    /// Bounded queue of pointer changes awaiting processing.
     events: VecDeque<PointerChange>,
     /// Active touch points mapped by their unique touch IDs.
     touch_points: HashMap<u64, TouchPointState>,
@@ -89,7 +89,7 @@ impl CursorState {
         }
     }
 
-    /// Adds a cursor event to the processing queue.
+    /// Adds a pointer change to the processing queue.
     ///
     /// Events are stored in a bounded queue to prevent memory issues during UI
     /// performance problems. If the queue exceeds [`KEEP_EVENTS_COUNT`],
@@ -97,7 +97,7 @@ impl CursorState {
     ///
     /// # Arguments
     ///
-    /// * `event` - The cursor event to add to the queue
+    /// * `event` - The pointer change to add to the queue
     pub fn push_event(&mut self, event: PointerChange) {
         self.events.push_back(event);
 
@@ -120,9 +120,9 @@ impl CursorState {
         self.position = position.into();
     }
 
-    /// Retrieves and clears all pending cursor events.
+    /// Retrieves and clears all pending pointer changes.
     ///
-    /// This method returns all queued cursor events and clears the internal
+    /// This method returns all queued pointer changes and clears the internal
     /// event queue. Events are returned in chronological order (oldest first).
     ///
     /// This is typically called once per frame by the UI framework to process
@@ -249,6 +249,7 @@ impl CursorState {
                     content: CursorEventContent::Scroll(ScrollEventContent {
                         delta_x, // Direct scroll delta for touch move
                         delta_y,
+                        unit: ScrollDeltaUnit::Pixel,
                         source: ScrollEventSource::Touch,
                     }),
                     gesture_state: GestureState::Dragged,
@@ -308,7 +309,7 @@ pub struct PointerChange {
     pub timestamp: Instant,
     /// Pointer identifier for this input stream.
     pub pointer_id: PointerId,
-    /// The specific type and data of this cursor event.
+    /// The specific type and data of this pointer change.
     pub content: CursorEventContent,
     /// Classification of the gesture associated with this event.
     ///
@@ -343,6 +344,8 @@ pub struct ScrollEventContent {
     pub delta_x: f32,
     /// Vertical scroll distance in pixels.
     pub delta_y: f32,
+    /// Unit used by the originating platform event.
+    pub unit: ScrollDeltaUnit,
     /// The input source that produced the scroll event.
     pub source: ScrollEventSource,
 }
@@ -363,9 +366,6 @@ pub enum CursorEventContent {
     /// A scroll action occurred (mouse wheel or touch drag).
     Scroll(ScrollEventContent),
 }
-
-/// Backward-compatible alias for older naming.
-pub type CursorEvent = PointerChange;
 
 /// Describes the high-level gesture classification of a cursor event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -414,9 +414,8 @@ impl CursorEventContent {
     /// Creates a scroll event from winit mouse wheel events.
     ///
     /// This method converts winit's mouse scroll delta into Tessera's scroll
-    /// event format. It handles both line-based scrolling (typical mouse
-    /// wheels) and pixel-based scrolling (trackpads, precision mice) by
-    /// applying appropriate scaling.
+    /// event format while preserving whether the platform reported the value
+    /// in line or pixel units.
     ///
     /// # Arguments
     ///
@@ -424,17 +423,20 @@ impl CursorEventContent {
     ///
     /// # Returns
     ///
-    /// A `CursorEventContent::Scroll` event with scaled delta values.
+    /// A `CursorEventContent::Scroll` event with raw line or pixel delta
+    /// values.
     pub fn from_scroll_event(delta: winit::event::MouseScrollDelta) -> Self {
-        let (delta_x, delta_y) = match delta {
-            winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
-            winit::event::MouseScrollDelta::PixelDelta(delta) => (delta.x as f32, delta.y as f32),
+        let (delta_x, delta_y, unit) = match delta {
+            winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y, ScrollDeltaUnit::Line),
+            winit::event::MouseScrollDelta::PixelDelta(delta) => {
+                (delta.x as f32, delta.y as f32, ScrollDeltaUnit::Pixel)
+            }
         };
 
-        const MOUSE_WHEEL_SPEED_MULTIPLIER: f32 = 50.0;
         Self::Scroll(ScrollEventContent {
-            delta_x: delta_x * MOUSE_WHEEL_SPEED_MULTIPLIER,
-            delta_y: delta_y * MOUSE_WHEEL_SPEED_MULTIPLIER,
+            delta_x,
+            delta_y,
+            unit,
             source: ScrollEventSource::Wheel,
         })
     }
@@ -458,4 +460,13 @@ pub enum ScrollEventSource {
     Touch,
     /// Scroll generated by a mouse wheel or trackpad.
     Wheel,
+}
+
+/// Indicates the unit used by the platform to describe a scroll delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollDeltaUnit {
+    /// Delta is expressed as a logical number of lines or wheel steps.
+    Line,
+    /// Delta is expressed in pixels.
+    Pixel,
 }

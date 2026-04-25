@@ -22,8 +22,10 @@
 //! See [`CheckmarkArgs`] for configuration options and usage examples in the
 //! [`checkmark`] function documentation.
 use tessera_ui::{
-    Color, ComputedData, Dp, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError, Px,
-    RenderInput, RenderPolicy, layout::layout_primitive, tessera,
+    Color, ComputedData, Dp, LayoutPolicy, LayoutResult, MeasurementError, Px, RenderInput,
+    RenderPolicy,
+    layout::{MeasureScope, layout},
+    tessera,
 };
 
 use crate::pipelines::checkmark::command::CheckmarkCommand;
@@ -38,20 +40,16 @@ struct CheckmarkLayout {
 }
 
 impl LayoutPolicy for CheckmarkLayout {
-    fn measure(
-        &self,
-        _input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        Ok(ComputedData {
+    fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        Ok(LayoutResult::new(ComputedData {
             width: self.size,
             height: self.size,
-        })
+        }))
     }
 }
 
 impl RenderPolicy for CheckmarkLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         let command = CheckmarkCommand::new()
             .with_color(self.color)
             .with_stroke_width(self.stroke_width)
@@ -106,7 +104,5 @@ pub fn checkmark(
         progress,
         padding,
     };
-    layout_primitive()
-        .layout_policy(policy.clone())
-        .render_policy(policy);
+    layout().layout_policy(policy.clone()).render_policy(policy);
 }

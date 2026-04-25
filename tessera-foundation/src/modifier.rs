@@ -8,7 +8,9 @@ mod interaction;
 mod layout;
 mod semantics;
 
-use tessera_ui::{DimensionValue, Dp, Modifier, Px, modifier::ModifierCapabilityExt as _};
+use tessera_ui::{
+    AxisConstraint, CallbackWith, Dp, Modifier, Px, modifier::ModifierCapabilityExt as _,
+};
 
 use crate::alignment::Alignment;
 
@@ -18,7 +20,8 @@ use layout::{
 };
 
 pub use interaction::{
-    ClickableArgs, InteractionState, PointerEventContext, SelectableArgs, ToggleableArgs,
+    ClickableArgs, DragDelta, DraggableArgs, InteractionState, PointerEventContext, SelectableArgs,
+    ToggleableArgs,
 };
 pub use layout::{
     AlignmentParentData, MinimumInteractiveComponentEnforcement, Padding, WeightParentData,
@@ -57,8 +60,8 @@ pub trait ModifierExt {
         max_height: Option<Dp>,
     ) -> Modifier;
 
-    /// Applies explicit width/height `DimensionValue` constraints.
-    fn constrain(self, width: Option<DimensionValue>, height: Option<DimensionValue>) -> Modifier;
+    /// Applies explicit width/height interval constraints.
+    fn constrain(self, width: Option<AxisConstraint>, height: Option<AxisConstraint>) -> Modifier;
 
     /// Fills the available width within parent bounds.
     fn fill_max_width(self) -> Modifier;
@@ -77,6 +80,14 @@ pub trait ModifierExt {
 
     /// Provides alignment parent data for layered boxed layouts.
     fn align(self, alignment: Alignment) -> Modifier;
+
+    /// Emits drag deltas for free-form dragging.
+    fn draggable<C>(self, on_drag_delta: C) -> Modifier
+    where
+        C: Into<CallbackWith<DragDelta, ()>>;
+
+    /// Emits drag deltas with custom drag configuration.
+    fn draggable_with(self, args: DraggableArgs) -> Modifier;
 
     /// Attaches accessibility semantics metadata to this subtree.
     fn semantics(self, args: SemanticsArgs) -> Modifier;
@@ -99,32 +110,27 @@ impl ModifierExt for Modifier {
     }
 
     fn offset(self, x: Dp, y: Dp) -> Modifier {
-        self.push_layout(OffsetModifierNode { x, y })
+        self.push_placement(OffsetModifierNode { x, y })
     }
 
     fn size(self, width: Dp, height: Dp) -> Modifier {
         let width_px: Px = width.into();
         let height_px: Px = height.into();
         self.push_layout(ConstraintModifierNode {
-            width_override: Some(DimensionValue::Wrap {
-                min: Some(width_px),
-                max: Some(width_px),
-            }),
-            height_override: Some(DimensionValue::Wrap {
-                min: Some(height_px),
-                max: Some(height_px),
-            }),
+            width_override: Some(AxisConstraint::exact(width_px)),
+            height_override: Some(AxisConstraint::exact(height_px)),
+            fill_width: false,
+            fill_height: false,
         })
     }
 
     fn width(self, width: Dp) -> Modifier {
         let width_px: Px = width.into();
         self.push_layout(ConstraintModifierNode {
-            width_override: Some(DimensionValue::Wrap {
-                min: Some(width_px),
-                max: Some(width_px),
-            }),
+            width_override: Some(AxisConstraint::exact(width_px)),
             height_override: None,
+            fill_width: false,
+            fill_height: false,
         })
     }
 
@@ -132,10 +138,9 @@ impl ModifierExt for Modifier {
         let height_px: Px = height.into();
         self.push_layout(ConstraintModifierNode {
             width_override: None,
-            height_override: Some(DimensionValue::Wrap {
-                min: Some(height_px),
-                max: Some(height_px),
-            }),
+            height_override: Some(AxisConstraint::exact(height_px)),
+            fill_width: false,
+            fill_height: false,
         })
     }
 
@@ -146,57 +151,55 @@ impl ModifierExt for Modifier {
         min_height: Option<Dp>,
         max_height: Option<Dp>,
     ) -> Modifier {
-        let width = DimensionValue::Wrap {
-            min: min_width.map(Into::into),
-            max: max_width.map(Into::into),
-        };
-        let height = DimensionValue::Wrap {
-            min: min_height.map(Into::into),
-            max: max_height.map(Into::into),
-        };
+        let width = AxisConstraint::new(
+            min_width.map(Into::into).unwrap_or(Px::ZERO),
+            max_width.map(Into::into),
+        );
+        let height = AxisConstraint::new(
+            min_height.map(Into::into).unwrap_or(Px::ZERO),
+            max_height.map(Into::into),
+        );
         self.push_layout(ConstraintModifierNode {
             width_override: Some(width),
             height_override: Some(height),
+            fill_width: false,
+            fill_height: false,
         })
     }
 
-    fn constrain(self, width: Option<DimensionValue>, height: Option<DimensionValue>) -> Modifier {
+    fn constrain(self, width: Option<AxisConstraint>, height: Option<AxisConstraint>) -> Modifier {
         self.push_layout(ConstraintModifierNode {
             width_override: width,
             height_override: height,
+            fill_width: false,
+            fill_height: false,
         })
     }
 
     fn fill_max_width(self) -> Modifier {
         self.push_layout(ConstraintModifierNode {
-            width_override: Some(DimensionValue::Fill {
-                min: None,
-                max: None,
-            }),
+            width_override: None,
             height_override: None,
+            fill_width: true,
+            fill_height: false,
         })
     }
 
     fn fill_max_height(self) -> Modifier {
         self.push_layout(ConstraintModifierNode {
             width_override: None,
-            height_override: Some(DimensionValue::Fill {
-                min: None,
-                max: None,
-            }),
+            height_override: None,
+            fill_width: false,
+            fill_height: true,
         })
     }
 
     fn fill_max_size(self) -> Modifier {
         self.push_layout(ConstraintModifierNode {
-            width_override: Some(DimensionValue::Fill {
-                min: None,
-                max: None,
-            }),
-            height_override: Some(DimensionValue::Fill {
-                min: None,
-                max: None,
-            }),
+            width_override: None,
+            height_override: None,
+            fill_width: true,
+            fill_height: true,
         })
     }
 
@@ -210,6 +213,20 @@ impl ModifierExt for Modifier {
 
     fn align(self, alignment: Alignment) -> Modifier {
         self.push_parent_data(AlignmentParentDataModifierNode { alignment })
+    }
+
+    fn draggable<C>(self, on_drag_delta: C) -> Modifier
+    where
+        C: Into<CallbackWith<DragDelta, ()>>,
+    {
+        self.draggable_with(DraggableArgs {
+            on_drag_delta: on_drag_delta.into(),
+            ..Default::default()
+        })
+    }
+
+    fn draggable_with(self, args: DraggableArgs) -> Modifier {
+        interaction::apply_draggable_modifier(self, args)
     }
 
     fn semantics(self, args: SemanticsArgs) -> Modifier {

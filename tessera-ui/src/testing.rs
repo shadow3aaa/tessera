@@ -166,49 +166,49 @@ impl LayoutSnapshot {
             let mut nodes_by_selector = HashMap::default();
             let mut nodes_by_fn_name: HashMap<String, Vec<LayoutNodeSnapshot>> = HashMap::default();
 
-            for metadata_entry in metadatas.iter() {
-                let node_id = *metadata_entry.key();
-                let metadata = metadata_entry.value();
-                let Some(computed_data) = metadata.computed_data else {
-                    continue;
-                };
-                let Some(abs_position) = metadata.abs_position else {
-                    continue;
-                };
-                let Some(node) = tree.get(node_id) else {
-                    continue;
-                };
+            metadatas.with_entries(|entries| {
+                for (&node_id, metadata) in entries {
+                    let Some(computed_data) = metadata.computed_data else {
+                        continue;
+                    };
+                    let Some(abs_position) = metadata.abs_position else {
+                        continue;
+                    };
+                    let Some(node) = tree.get(node_id) else {
+                        continue;
+                    };
 
-                let snapshot = LayoutNodeSnapshot {
-                    fn_name: node.get().fn_name.clone(),
-                    position: abs_position,
-                    size: PxSize::new(computed_data.width, computed_data.height),
-                };
-                nodes_by_fn_name
-                    .entry(snapshot.fn_name.clone())
-                    .or_default()
-                    .push(snapshot.clone());
+                    let snapshot = LayoutNodeSnapshot {
+                        fn_name: node.get().fn_name.clone(),
+                        position: abs_position,
+                        size: PxSize::new(computed_data.width, computed_data.height),
+                    };
+                    nodes_by_fn_name
+                        .entry(snapshot.fn_name.clone())
+                        .or_default()
+                        .push(snapshot.clone());
 
-                if node.parent().is_none() {
-                    root = Some(snapshot.clone());
+                    if node.parent().is_none() {
+                        root = Some(snapshot.clone());
+                    }
+
+                    if let Some(selector) = metadata
+                        .accessibility
+                        .as_ref()
+                        .and_then(|accessibility| accessibility.key.as_ref())
+                    {
+                        assert_ne!(
+                            selector, "root",
+                            "`root` is reserved for the root node selector in layout tests"
+                        );
+                        let replaced = nodes_by_selector.insert(selector.clone(), snapshot.clone());
+                        assert!(
+                            replaced.is_none(),
+                            "duplicate layout test selector `{selector}`"
+                        );
+                    }
                 }
-
-                if let Some(selector) = metadata
-                    .accessibility
-                    .as_ref()
-                    .and_then(|accessibility| accessibility.key.as_ref())
-                {
-                    assert_ne!(
-                        selector, "root",
-                        "`root` is reserved for the root node selector in layout tests"
-                    );
-                    let replaced = nodes_by_selector.insert(selector.clone(), snapshot.clone());
-                    assert!(
-                        replaced.is_none(),
-                        "duplicate layout test selector `{selector}`"
-                    );
-                }
-            }
+            });
 
             Self {
                 root: root.expect("layout test root node not found after layout"),
@@ -616,12 +616,21 @@ macro_rules! assert_layout {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        AccessibilityActionHandler, AccessibilityNode, ComputedData, FrameNanosControl,
-        LayoutInput, LayoutOutput, LayoutPolicy, Modifier, NoopRenderPolicy, Px, PxPosition,
-        SemanticsModifierNode, receive_frame_nanos, remember, tessera,
-    };
+    use std::num::NonZero;
 
+    use super::reset_runtime_for_layout_test;
+
+    use crate::{
+        AccessibilityActionHandler, AccessibilityNode, AxisConstraint, ComputedData, Constraint,
+        FrameNanosControl, LayoutModifierChild, LayoutModifierInput, LayoutModifierNode,
+        LayoutPolicy, LayoutResult, Modifier, NoopRenderPolicy, PlacementModifierNode, Px,
+        PxPosition, RenderSlot, SemanticsModifierNode,
+        component_tree::{NodeRole, direct_layout_children},
+        layout::MeasureScope,
+        receive_frame_nanos, remember,
+        runtime::TesseraRuntime,
+        tessera,
+    };
     #[derive(Clone, PartialEq)]
     struct FixedSizePolicy {
         width: i32,
@@ -631,18 +640,19 @@ mod tests {
     impl LayoutPolicy for FixedSizePolicy {
         fn measure(
             &self,
-            input: &LayoutInput<'_>,
-            output: &mut LayoutOutput<'_>,
-        ) -> Result<ComputedData, crate::MeasurementError> {
-            for child_id in input.children_ids() {
-                let _ = input.measure_child_in_parent_constraint(*child_id)?;
-                output.place_child(*child_id, PxPosition::ZERO);
+            input: &MeasureScope<'_>,
+        ) -> Result<LayoutResult, crate::MeasurementError> {
+            let mut result = LayoutResult::default();
+            let child_constraint = input.parent_constraint().without_min();
+            for child in input.children() {
+                let _ = child.measure(&child_constraint)?;
+                result.place_child(child, PxPosition::ZERO);
             }
 
-            Ok(ComputedData {
+            Ok(result.with_size(ComputedData {
                 width: Px::new(self.width),
                 height: Px::new(self.height),
-            })
+            }))
         }
     }
 
@@ -652,23 +662,24 @@ mod tests {
     impl LayoutPolicy for VerticalStackPolicy {
         fn measure(
             &self,
-            input: &LayoutInput<'_>,
-            output: &mut LayoutOutput<'_>,
-        ) -> Result<ComputedData, crate::MeasurementError> {
+            input: &MeasureScope<'_>,
+        ) -> Result<LayoutResult, crate::MeasurementError> {
+            let mut result = LayoutResult::default();
             let mut current_y = Px::ZERO;
             let mut max_width = Px::ZERO;
+            let child_constraint = input.parent_constraint().without_min();
 
-            for child_id in input.children_ids() {
-                let child = input.measure_child_in_parent_constraint(*child_id)?;
-                output.place_child(*child_id, PxPosition::new(Px::ZERO, current_y));
-                current_y += child.height;
-                max_width = max_width.max(child.width);
+            for child in input.children() {
+                let child_size = child.measure(&child_constraint)?;
+                result.place_child(child, PxPosition::new(Px::ZERO, current_y));
+                current_y += child_size.height;
+                max_width = max_width.max(child_size.width);
             }
 
-            Ok(ComputedData {
+            Ok(result.with_size(ComputedData {
                 width: max_width,
                 height: current_y,
-            })
+            }))
         }
     }
 
@@ -680,21 +691,22 @@ mod tests {
     impl LayoutPolicy for OffsetChildPolicy {
         fn measure(
             &self,
-            input: &LayoutInput<'_>,
-            output: &mut LayoutOutput<'_>,
-        ) -> Result<ComputedData, crate::MeasurementError> {
-            let child_id = input
-                .children_ids()
+            input: &MeasureScope<'_>,
+        ) -> Result<LayoutResult, crate::MeasurementError> {
+            let mut result = LayoutResult::default();
+            let child_constraint = input.parent_constraint().without_min();
+            let child = input
+                .children()
                 .first()
                 .copied()
                 .expect("offset child policy requires a child");
-            let child = input.measure_child_in_parent_constraint(child_id)?;
-            output.place_child(child_id, PxPosition::new(Px::new(self.x), Px::ZERO));
+            let child_size = child.measure(&child_constraint)?;
+            result.place_child(child, PxPosition::new(Px::new(self.x), Px::ZERO));
 
-            Ok(ComputedData {
-                width: Px::new(self.x + child.width.raw()),
-                height: child.height,
-            })
+            Ok(result.with_size(ComputedData {
+                width: Px::new(self.x + child_size.width.raw()),
+                height: child_size.height,
+            }))
         }
     }
 
@@ -712,17 +724,102 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq)]
+    struct AnimatedWidthModifierNode {
+        width: i32,
+        height: i32,
+    }
+
+    impl LayoutModifierNode for AnimatedWidthModifierNode {
+        fn measure(
+            &self,
+            _input: &LayoutModifierInput<'_>,
+            child: &mut dyn LayoutModifierChild,
+        ) -> Result<crate::LayoutModifierOutput, crate::MeasurementError> {
+            let child_size = child.measure(&Constraint::exact(
+                Px::new(self.width),
+                Px::new(self.height),
+            ))?;
+            child.place(PxPosition::ZERO);
+            Ok(crate::LayoutModifierOutput { size: child_size })
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    struct AnimatedOffsetPlacementNode {
+        x: i32,
+        y: i32,
+    }
+
+    impl PlacementModifierNode for AnimatedOffsetPlacementNode {
+        fn transform_position(&self, position: PxPosition) -> PxPosition {
+            position.offset(Px::new(self.x), Px::new(self.y))
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    struct TestPaddingModifierNode {
+        padding: i32,
+    }
+
+    impl LayoutModifierNode for TestPaddingModifierNode {
+        fn measure(
+            &self,
+            input: &LayoutModifierInput<'_>,
+            child: &mut dyn LayoutModifierChild,
+        ) -> Result<crate::LayoutModifierOutput, crate::MeasurementError> {
+            let padding = Px::new(self.padding);
+            let parent = input.layout_input.parent_constraint();
+            let constraint = Constraint::new(
+                AxisConstraint::new(
+                    (parent.width().min - padding - padding).max(Px::ZERO),
+                    parent
+                        .width()
+                        .max
+                        .map(|value| (value - padding - padding).max(Px::ZERO)),
+                ),
+                AxisConstraint::new(
+                    (parent.height().min - padding - padding).max(Px::ZERO),
+                    parent
+                        .height()
+                        .max
+                        .map(|value| (value - padding - padding).max(Px::ZERO)),
+                ),
+            );
+            let child_size = child.measure(&constraint)?;
+            child.place(PxPosition::new(padding, padding));
+            Ok(crate::LayoutModifierOutput {
+                size: ComputedData {
+                    width: child_size.width + padding + padding,
+                    height: child_size.height + padding + padding,
+                },
+            })
+        }
+    }
+
     #[tessera(crate)]
-    fn tagged_box(tag: String, width: i32, height: i32) {
-        crate::layout::layout_primitive()
+    fn tagged_box(tag: Option<String>, width: Option<i32>, height: Option<i32>) {
+        let tag = tag.unwrap_or_default();
+        let width = width.unwrap_or_default();
+        let height = height.unwrap_or_default();
+        crate::layout::layout()
             .layout_policy(FixedSizePolicy { width, height })
             .render_policy(NoopRenderPolicy)
             .modifier(Modifier::new().push_semantics(TestTagSemanticsModifier { tag }));
     }
 
     #[tessera(crate)]
+    fn responsive_box(tag: Option<String>) {
+        let tag = tag.unwrap_or_default();
+        crate::layout::layout()
+            .layout_policy(crate::layout::DefaultLayoutPolicy)
+            .render_policy(NoopRenderPolicy)
+            .modifier(Modifier::new().push_semantics(TestTagSemanticsModifier { tag }));
+    }
+
+    #[tessera(crate)]
     fn stack_content() {
-        crate::layout::layout_primitive()
+        crate::layout::layout()
             .layout_policy(VerticalStackPolicy)
             .render_policy(NoopRenderPolicy)
             .modifier(Modifier::new())
@@ -734,7 +831,7 @@ mod tests {
 
     #[tessera(crate)]
     fn sample_layout() {
-        crate::layout::layout_primitive()
+        crate::layout::layout()
             .layout_policy(FixedSizePolicy {
                 width: 800,
                 height: 600,
@@ -776,13 +873,166 @@ mod tests {
             }
         });
 
-        crate::layout::layout_primitive()
+        crate::layout::layout()
             .layout_policy(OffsetChildPolicy { x: offset.get() })
             .render_policy(NoopRenderPolicy)
             .modifier(Modifier::new())
             .child(|| {
                 tagged_box().tag("moving".to_string()).width(20).height(20);
             });
+    }
+
+    #[tessera(crate)]
+    fn animated_modifier_layout_sample() {
+        let width = remember(|| 20_i32);
+
+        receive_frame_nanos(move |frame_nanos| {
+            let next_width = if frame_nanos >= 200_000_000 {
+                100
+            } else if frame_nanos >= 100_000_000 {
+                50
+            } else {
+                20
+            };
+            width.set(next_width);
+            if frame_nanos >= 200_000_000 {
+                FrameNanosControl::Stop
+            } else {
+                FrameNanosControl::Continue
+            }
+        });
+
+        crate::layout::layout()
+            .layout_policy(crate::layout::DefaultLayoutPolicy)
+            .render_policy(NoopRenderPolicy)
+            .modifier(
+                Modifier::new()
+                    .push_semantics(TestTagSemanticsModifier {
+                        tag: "modifier_box".to_string(),
+                    })
+                    .push_layout(AnimatedWidthModifierNode {
+                        width: width.get(),
+                        height: 20,
+                    }),
+            )
+            .child(|| {
+                responsive_box().tag("modifier_box_child".to_string());
+            });
+    }
+
+    #[tessera(crate)]
+    fn animated_offset_modifier_sample() {
+        let x = remember(|| 0_i32);
+
+        receive_frame_nanos(move |frame_nanos| {
+            let next_x = if frame_nanos >= 200_000_000 {
+                100
+            } else if frame_nanos >= 100_000_000 {
+                50
+            } else {
+                0
+            };
+            x.set(next_x);
+            if frame_nanos >= 200_000_000 {
+                FrameNanosControl::Stop
+            } else {
+                FrameNanosControl::Continue
+            }
+        });
+
+        crate::layout::layout()
+            .layout_policy(FixedSizePolicy {
+                width: 20,
+                height: 20,
+            })
+            .render_policy(NoopRenderPolicy)
+            .modifier(
+                Modifier::new()
+                    .push_semantics(TestTagSemanticsModifier {
+                        tag: "offset_box".to_string(),
+                    })
+                    .push_placement(AnimatedOffsetPlacementNode { x: x.get(), y: 0 }),
+            );
+    }
+
+    #[tessera(crate)]
+    fn slot_host(slot: Option<RenderSlot>) {
+        let slot = slot.unwrap_or_default();
+        crate::layout::layout()
+            .layout_policy(VerticalStackPolicy)
+            .render_policy(NoopRenderPolicy)
+            .modifier(Modifier::new())
+            .child(move || {
+                slot.render();
+            });
+    }
+
+    #[tessera(crate)]
+    fn animated_nested_slot_sample() {
+        let width = remember(|| 20_i32);
+
+        receive_frame_nanos(move |frame_nanos| {
+            let next_width = if frame_nanos >= 200_000_000 {
+                100
+            } else if frame_nanos >= 100_000_000 {
+                50
+            } else {
+                20
+            };
+            width.set(next_width);
+            if frame_nanos >= 200_000_000 {
+                FrameNanosControl::Stop
+            } else {
+                FrameNanosControl::Continue
+            }
+        });
+
+        crate::layout::layout()
+            .layout_policy(FixedSizePolicy {
+                width: 200,
+                height: 100,
+            })
+            .render_policy(NoopRenderPolicy)
+            .modifier(Modifier::new())
+            .child(move || {
+                slot_host().slot(move || {
+                    slot_host().slot(move || {
+                        tagged_box()
+                            .tag("nested_moving".to_string())
+                            .width(width.get())
+                            .height(20);
+                    });
+                });
+            });
+    }
+
+    #[tessera(crate)]
+    fn ordered_layout_modifier_sample() {
+        crate::layout::layout()
+            .layout_policy(crate::layout::DefaultLayoutPolicy)
+            .render_policy(NoopRenderPolicy)
+            .modifier(
+                Modifier::new()
+                    .push_semantics(TestTagSemanticsModifier {
+                        tag: "ordered_parent".to_string(),
+                    })
+                    .push_layout(TestPaddingModifierNode { padding: 10 })
+                    .push_layout(AnimatedWidthModifierNode {
+                        width: 50,
+                        height: 20,
+                    }),
+            )
+            .child(|| {
+                responsive_box().tag("ordered_child".to_string());
+            });
+    }
+
+    #[tessera(crate)]
+    fn explicit_layout_boundary_sample() {
+        crate::layout::layout().layout_policy(FixedSizePolicy {
+            width: 24,
+            height: 12,
+        });
     }
 
     #[test]
@@ -794,8 +1044,8 @@ mod tests {
             },
             expect: {
                 node("root").size(800, 600).position(0, 0);
-                node("title_box").x(0).y(0).size(200, 40);
-                node("button_box").below("title_box").align_start_with("title_box").size(120, 32);
+                node("title").x(0).y(0).size(200, 40);
+                node("button").below("title").align_start_with("title").size(120, 32);
             }
         }
     }
@@ -848,5 +1098,149 @@ mod tests {
             crate::testing::__private::current_layout_test_frame_nanos(&session),
             200_000_000
         );
+    }
+
+    #[test]
+    fn assert_layout_macro_pumps_modifier_driven_animation_frames() {
+        crate::assert_layout! {
+            viewport: (200, 100),
+            content: {
+                animated_modifier_layout_sample();
+            },
+            expect: {
+                0 => {
+                    node("modifier_box").size(20, 20);
+                },
+                100_000_000 => {
+                    node("modifier_box").size(50, 20);
+                },
+                200_000_000 => {
+                    node("modifier_box").size(100, 20);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn assert_layout_macro_pumps_offset_modifier_frames() {
+        crate::assert_layout! {
+            viewport: (200, 100),
+            content: {
+                animated_offset_modifier_sample();
+            },
+            expect: {
+                0 => {
+                    node("offset_box").position(0, 0).size(20, 20);
+                },
+                100_000_000 => {
+                    node("offset_box").position(50, 0).size(20, 20);
+                },
+                200_000_000 => {
+                    node("offset_box").position(100, 0).size(20, 20);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn assert_layout_macro_pumps_nested_slot_animation_frames() {
+        crate::assert_layout! {
+            viewport: (200, 100),
+            content: {
+                animated_nested_slot_sample();
+            },
+            expect: {
+                0 => {
+                    node("nested_moving").size(20, 20);
+                },
+                100_000_000 => {
+                    node("nested_moving").size(50, 20);
+                },
+                200_000_000 => {
+                    node("nested_moving").size(100, 20);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn layout_modifier_order_follows_source_chain() {
+        crate::assert_layout! {
+            viewport: (200, 100),
+            content: {
+                ordered_layout_modifier_sample();
+            },
+            expect: {
+                node("ordered_parent").position(0, 0).size(70, 40);
+                node("ordered_child").position(10, 10).size(50, 20);
+            }
+        }
+    }
+
+    #[test]
+    fn layout_keeps_composition_boundary_and_emits_layout_child() {
+        reset_runtime_for_layout_test((100, 100));
+        let _ = crate::build_tree::build_component_tree(&explicit_layout_boundary_sample);
+
+        TesseraRuntime::with(|runtime| {
+            let tree = runtime.component_tree.tree();
+            let root = tree
+                .get_node_id_at(NonZero::new(1).expect("root node index must be non-zero"))
+                .expect("root node must exist after build");
+
+            let mut layout_composition = None;
+            let mut layout_node = None;
+
+            for edge in root.traverse(tree) {
+                let indextree::NodeEdge::Start(node_id) = edge else {
+                    continue;
+                };
+                let Some(node_ref) = tree.get(node_id) else {
+                    continue;
+                };
+                let node = node_ref.get();
+                if node.fn_name != "layout" {
+                    continue;
+                }
+
+                match node.role {
+                    NodeRole::Composition => {
+                        layout_composition =
+                            Some((node_id, node.instance_key, node.replay.is_some()));
+                    }
+                    NodeRole::Layout => {
+                        layout_node = Some((node_id, node.instance_key, node.replay.is_none()));
+                    }
+                }
+            }
+
+            let (layout_composition_id, composition_instance_key, has_replay) =
+                layout_composition.expect("layout composition boundary must exist");
+            let (layout_node_id, layout_instance_key, has_no_replay) =
+                layout_node.expect("emitted layout node must exist");
+
+            assert!(
+                has_replay,
+                "layout composition boundary must keep replay metadata"
+            );
+            assert!(
+                has_no_replay,
+                "emitted layout node must not become its own replay boundary"
+            );
+            assert_ne!(
+                composition_instance_key, layout_instance_key,
+                "layout node must keep a distinct node identity"
+            );
+            assert_eq!(
+                layout_node_id.parent(tree),
+                Some(layout_composition_id),
+                "layout node must be emitted directly under the layout composition boundary"
+            );
+            assert_eq!(
+                direct_layout_children(layout_composition_id, tree),
+                vec![layout_node_id],
+                "direct layout children must resolve to the emitted layout node"
+            );
+        });
     }
 }

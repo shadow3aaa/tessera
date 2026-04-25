@@ -11,9 +11,9 @@ use std::{
 };
 
 use tessera_ui::{
-    Callback, CallbackWith, ComputedData, Constraint, DimensionValue, Dp, FocusDirection,
-    MeasurementError, Modifier, NodeId, ParentConstraint, Px, PxPosition, Slot, State, key,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, PlacementInput, layout_primitive},
+    AxisConstraint, CallbackWith, ComputedData, Constraint, Dp, FocusDirection, LayoutResult,
+    MeasurementError, Modifier, ParentConstraint, Px, PxPosition, RenderSlotWith, State, key,
+    layout::{LayoutPolicy, MeasureScope, PlacementScope, layout},
     modifier::FocusModifierExt as _,
     remember, tessera,
 };
@@ -39,14 +39,14 @@ const DEFAULT_VIEWPORT_ITEMS: usize = 8;
 ///
 /// ```
 /// use tessera_components::lazy_list::{LazyListController, lazy_column};
-/// use tessera_ui::{retain_with_key, tessera};
+/// use tessera_ui::{LayoutResult, retain_with_key, tessera};
 ///
 /// #[tessera]
 /// fn scrollable_page(page_id: String) {
 ///     // Both scroll position and measurement cache persist across navigation
 ///     let controller = retain_with_key(page_id.clone(), LazyListController::new);
-///     lazy_column().controller(controller).content(|scope| {
-///         scope.items(100, |i| { /* ... */ });
+///     lazy_column().controller(controller).items(100, |i| {
+///         let _ = i;
 ///     });
 /// }
 /// ```
@@ -82,249 +82,26 @@ impl LazyListController {
     }
 }
 
-/// Scope used to add lazily generated children to a lazy list.
-pub struct LazyListScope<'a> {
-    slots: &'a mut Vec<LazySlot>,
-}
-
-type LazyListRenderFn = dyn for<'a> Fn(&mut LazyListScope<'a>) + Send + Sync;
-
-/// Shared slot builder for lazy list content.
-#[derive(Clone, PartialEq)]
-pub struct LazyListContentSlot(Slot<LazyListRenderFn>);
-
-impl LazyListContentSlot {
-    /// Creates a new shared lazy list content slot.
-    pub fn new<F>(content: F) -> Self
-    where
-        F: for<'a> Fn(&mut LazyListScope<'a>) + Send + Sync + 'static,
-    {
-        Self(Slot::from_shared(Arc::new(content)))
-    }
-
-    fn render(&self, scope: &mut LazyListScope<'_>) {
-        let render = self.0.shared();
-        render(scope);
-    }
-}
-
-impl<F> From<F> for LazyListContentSlot
+fn hash_key<K>(key: K) -> u64
 where
-    F: for<'a> Fn(&mut LazyListScope<'a>) + Send + Sync + 'static,
+    K: Hash,
 {
-    fn from(value: F) -> Self {
-        Self::new(value)
-    }
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
 }
 
-#[allow(missing_docs)]
-impl LazyColumnBuilder {
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    pub fn controller(mut self, controller: State<LazyListController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-
-    pub fn content<F>(mut self, content: F) -> Self
-    where
-        F: for<'a> Fn(&mut LazyListScope<'a>) + Send + Sync + 'static,
-    {
-        self.props.content = Some(LazyListContentSlot::new(content));
-        self
-    }
-
-    pub fn content_shared(mut self, content: impl Into<LazyListContentSlot>) -> Self {
-        self.props.content = Some(content.into());
-        self
-    }
+/// Accumulated lazy-list item declarations carried by the builder.
+#[derive(Clone, Default, PartialEq)]
+pub struct LazyListContent {
+    slots: Vec<LazySlot>,
 }
 
-#[allow(missing_docs)]
-impl LazyRowBuilder {
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    pub fn controller(mut self, controller: State<LazyListController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-
-    pub fn content<F>(mut self, content: F) -> Self
-    where
-        F: for<'a> Fn(&mut LazyListScope<'a>) + Send + Sync + 'static,
-    {
-        self.props.content = Some(LazyListContentSlot::new(content));
-        self
-    }
-
-    pub fn content_shared(mut self, content: impl Into<LazyListContentSlot>) -> Self {
-        self.props.content = Some(content.into());
-        self
+impl LazyListContent {
+    fn push(&mut self, slot: LazySlot) {
+        self.slots.push(slot);
     }
 }
-
-impl<'a> LazyListScope<'a> {
-    /// Adds a batch of lazily generated items.
-    pub fn items<F>(&mut self, count: usize, builder: F)
-    where
-        F: Fn(usize) + Send + Sync + 'static,
-    {
-        self.slots.push(LazySlot::items(count, builder, None));
-    }
-
-    /// Adds a batch of lazily generated items with a key provider.
-    pub fn items_with_key<K, KF, F>(&mut self, count: usize, key_provider: KF, builder: F)
-    where
-        K: Hash,
-        KF: Fn(usize) -> K + Send + Sync + 'static,
-        F: Fn(usize) + Send + Sync + 'static,
-    {
-        let key_provider = CallbackWith::new(move |idx| {
-            let key = key_provider(idx);
-            let mut hasher = DefaultHasher::new();
-            key.hash(&mut hasher);
-            hasher.finish()
-        });
-        self.slots
-            .push(LazySlot::items(count, builder, Some(key_provider)));
-    }
-
-    /// Add a single lazily generated item.
-    pub fn item<F>(&mut self, builder: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        self.items(1, move |_| {
-            builder();
-        });
-    }
-
-    /// Adds a sticky header item that remains pinned while scrolling.
-    pub fn sticky_header<F>(&mut self, builder: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        self.slots.push(LazySlot::sticky(builder, None));
-    }
-
-    /// Adds a sticky header item with a stable key.
-    pub fn sticky_header_with_key<K, F>(&mut self, key: K, builder: F)
-    where
-        K: Hash,
-        F: Fn() + Send + Sync + 'static,
-    {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        let key_hash = hasher.finish();
-        self.slots.push(LazySlot::sticky(builder, Some(key_hash)));
-    }
-
-    /// Adds lazily generated items from an iterator, providing both index and
-    /// element reference.
-    ///
-    /// The iterator is eagerly collected so it can be accessed on demand while
-    /// virtualizing.
-    pub fn items_from_iter<I, T, F>(&mut self, iter: I, builder: F)
-    where
-        I: IntoIterator<Item = T>,
-        T: Send + Sync + 'static,
-        F: Fn(usize, &T) + Send + Sync + 'static,
-    {
-        let items: Arc<Vec<T>> = Arc::new(iter.into_iter().collect());
-        if items.is_empty() {
-            return;
-        }
-        let builder = Arc::new(builder);
-        let count = items.len();
-        self.slots.push(LazySlot::items(
-            count,
-            {
-                let items = items.clone();
-                let builder = builder.clone();
-                move |idx| {
-                    if let Some(item) = items.get(idx) {
-                        builder(idx, item);
-                    }
-                }
-            },
-            None,
-        ));
-    }
-
-    /// Adds lazily generated items from an iterator with a key provider.
-    pub fn items_from_iter_with_key<I, T, K, KF, F>(
-        &mut self,
-        iter: I,
-        key_provider: KF,
-        builder: F,
-    ) where
-        I: IntoIterator<Item = T>,
-        T: Send + Sync + 'static,
-        K: Hash,
-        KF: Fn(usize, &T) -> K + Send + Sync + 'static,
-        F: Fn(usize, &T) + Send + Sync + 'static,
-    {
-        let items: Arc<Vec<T>> = Arc::new(iter.into_iter().collect());
-        if items.is_empty() {
-            return;
-        }
-        let builder = Arc::new(builder);
-        let key_provider = Arc::new(key_provider);
-        let count = items.len();
-
-        let slot_builder = {
-            let items = items.clone();
-            let builder = builder.clone();
-            move |idx: usize| {
-                if let Some(item) = items.get(idx) {
-                    builder(idx, item);
-                }
-            }
-        };
-
-        let slot_key_provider = {
-            let items = items.clone();
-            let key_provider = key_provider.clone();
-            move |idx: usize| -> u64 {
-                if let Some(item) = items.get(idx) {
-                    let key = key_provider(idx, item);
-                    let mut hasher = DefaultHasher::new();
-                    key.hash(&mut hasher);
-                    hasher.finish()
-                } else {
-                    0
-                }
-            }
-        };
-
-        self.slots.push(LazySlot::items(
-            count,
-            slot_builder,
-            Some(CallbackWith::new(slot_key_provider)),
-        ));
-    }
-
-    /// Convenience helper for iterators when only the element is needed.
-    pub fn items_from_iter_values<I, T, F>(&mut self, iter: I, builder: F)
-    where
-        I: IntoIterator<Item = T>,
-        T: Send + Sync + 'static,
-        F: Fn(&T) + Send + Sync + 'static,
-    {
-        self.items_from_iter(iter, move |_, item| builder(item));
-    }
-}
-
-/// Scope alias for vertical lazy lists.
-pub type LazyColumnScope<'a> = LazyListScope<'a>;
-/// Scope alias for horizontal lazy lists.
-pub type LazyRowScope<'a> = LazyListScope<'a>;
 
 /// # lazy_column
 ///
@@ -347,8 +124,10 @@ pub type LazyRowScope<'a> = LazyListScope<'a>;
 /// - `content_padding` — symmetric padding around the lazy list content.
 /// - `max_viewport_main` — optional maximum viewport length reported back to
 ///   parents.
+/// - `scroll_smoothing` — interpolation factor used when animating scroll.
 /// - `controller` — optional external controller for scroll position and cache.
-/// - `content` — optional slot builder for lazy list content.
+/// - item declarations are appended through builder methods like `item`,
+///   `items`, and `sticky_header`.
 ///
 /// ## Examples
 ///
@@ -358,49 +137,39 @@ pub type LazyRowScope<'a> = LazyListScope<'a>;
 ///
 /// #[tessera]
 /// fn demo() {
-///     lazy_column().content(|scope| {
-///         scope.items(1000, |i| {
-///             let text_content = format!("Item #{i}");
-///             text().content(text_content);
-///         });
+///     lazy_column().items(1000, |i| {
+///         let text_content = format!("Item #{i}");
+///         text().content(text_content);
 ///     });
 /// }
 /// ```
 #[tessera]
 pub fn lazy_column(
-    #[prop(skip_setter)] modifier: Option<Modifier>,
-    cross_axis_alignment: CrossAxisAlignment,
-    item_spacing: Dp,
-    overscan: usize,
-    estimated_item_size: Dp,
-    content_padding: Dp,
+    modifier: Option<Modifier>,
+    cross_axis_alignment: Option<CrossAxisAlignment>,
+    item_spacing: Option<Dp>,
+    overscan: Option<usize>,
+    estimated_item_size: Option<Dp>,
+    content_padding: Option<Dp>,
     max_viewport_main: Option<Px>,
-    #[prop(skip_setter)] controller: Option<State<LazyListController>>,
-    #[prop(skip_setter)] content: Option<LazyListContentSlot>,
+    scroll_smoothing: Option<f32>,
+    controller: Option<State<LazyListController>>,
+    #[prop(skip_setter)] content: Option<LazyListContent>,
 ) {
-    let content = content.unwrap_or_else(|| LazyListContentSlot::new(|_| {}));
-    let slots = collect_column_slots(content);
+    let content = content.unwrap_or_default();
     let controller = controller.unwrap_or_else(|| remember(LazyListController::new));
     lazy_column_slots(LazyListSlotsArgs {
         modifier: modifier.unwrap_or_default(),
-        cross_axis_alignment,
-        item_spacing,
-        overscan,
-        estimated_item_size,
-        content_padding,
+        cross_axis_alignment: cross_axis_alignment.unwrap_or_default(),
+        item_spacing: item_spacing.unwrap_or(Dp(0.0)),
+        overscan: overscan.unwrap_or(0),
+        estimated_item_size: estimated_item_size.unwrap_or(Dp(0.0)),
+        content_padding: content_padding.unwrap_or(Dp(0.0)),
         max_viewport_main,
+        scroll_smoothing: scroll_smoothing.unwrap_or(0.0),
         controller,
-        slots,
+        slots: content.slots,
     });
-}
-
-fn collect_column_slots(content: LazyListContentSlot) -> Vec<LazySlot> {
-    let mut slots = Vec::new();
-    {
-        let mut scope = LazyColumnScope { slots: &mut slots };
-        content.render(&mut scope);
-    }
-    slots
 }
 
 #[derive(Clone)]
@@ -412,6 +181,7 @@ struct LazyListSlotsArgs {
     estimated_item_size: Dp,
     content_padding: Dp,
     max_viewport_main: Option<Px>,
+    scroll_smoothing: f32,
     controller: State<LazyListController>,
     slots: Vec<LazySlot>,
 }
@@ -420,7 +190,9 @@ fn lazy_column_slots(args: LazyListSlotsArgs) {
     let scrollable_builder = scrollable()
         .modifier(args.modifier)
         .vertical(true)
-        .horizontal(false);
+        .horizontal(false)
+        .apply_child_offset(false)
+        .scroll_smoothing(args.scroll_smoothing);
 
     // Create a proxy scroll controller that syncs with the LazyListController
     let scroll_controller = remember(ScrollableController::default);
@@ -450,7 +222,7 @@ fn lazy_column_slots(args: LazyListSlotsArgs) {
                 args.controller
                     .with_mut(|c| c.scroll.set_scroll_position(current_pos));
             }
-            lazy_list_view()
+            let mut builder = lazy_list_view()
                 .axis(LazyListAxis::Vertical)
                 .cross_axis_alignment(args.cross_axis_alignment)
                 .item_spacing(item_spacing)
@@ -459,9 +231,12 @@ fn lazy_column_slots(args: LazyListSlotsArgs) {
                 .padding_main(padding_main)
                 .padding_cross(padding_cross)
                 .slots(args.slots.clone())
-                .controller_internal(args.controller)
-                .scroll_controller_internal(scroll_controller)
-                .max_viewport_main_internal(args.max_viewport_main);
+                .controller(args.controller)
+                .scroll_controller(scroll_controller);
+            if let Some(max_viewport_main) = args.max_viewport_main {
+                builder = builder.max_viewport_main(max_viewport_main);
+            }
+            drop(builder);
         });
 }
 
@@ -487,8 +262,10 @@ fn lazy_column_slots(args: LazyListSlotsArgs) {
 /// - `content_padding` — symmetric padding around the lazy list content.
 /// - `max_viewport_main` — optional maximum viewport length reported back to
 ///   parents.
+/// - `scroll_smoothing` — interpolation factor used when animating scroll.
 /// - `controller` — optional external controller for scroll position and cache.
-/// - `content` — optional slot builder for lazy list content.
+/// - item declarations are appended through builder methods like `item`,
+///   `items`, and `sticky_header`.
 ///
 /// ## Examples
 ///
@@ -498,56 +275,275 @@ fn lazy_column_slots(args: LazyListSlotsArgs) {
 ///
 /// #[tessera]
 /// fn demo() {
-///     lazy_row().content(|scope| {
-///         scope.items(100, |i| {
-///             let text_content = format!("Item {i}");
-///             text().content(text_content);
-///         });
+///     lazy_row().items(100, |i| {
+///         let text_content = format!("Item {i}");
+///         text().content(text_content);
 ///     });
 /// }
 /// ```
 #[tessera]
 pub fn lazy_row(
-    #[prop(skip_setter)] modifier: Option<Modifier>,
-    cross_axis_alignment: CrossAxisAlignment,
-    item_spacing: Dp,
-    overscan: usize,
-    estimated_item_size: Dp,
-    content_padding: Dp,
+    modifier: Option<Modifier>,
+    cross_axis_alignment: Option<CrossAxisAlignment>,
+    item_spacing: Option<Dp>,
+    overscan: Option<usize>,
+    estimated_item_size: Option<Dp>,
+    content_padding: Option<Dp>,
     max_viewport_main: Option<Px>,
-    #[prop(skip_setter)] controller: Option<State<LazyListController>>,
-    #[prop(skip_setter)] content: Option<LazyListContentSlot>,
+    scroll_smoothing: Option<f32>,
+    controller: Option<State<LazyListController>>,
+    #[prop(skip_setter)] content: Option<LazyListContent>,
 ) {
-    let content = content.unwrap_or_else(|| LazyListContentSlot::new(|_| {}));
-    let slots = collect_row_slots(content);
+    let content = content.unwrap_or_default();
     let controller = controller.unwrap_or_else(|| remember(LazyListController::new));
     lazy_row_slots(LazyListSlotsArgs {
         modifier: modifier.unwrap_or_default(),
-        cross_axis_alignment,
-        item_spacing,
-        overscan,
-        estimated_item_size,
-        content_padding,
+        cross_axis_alignment: cross_axis_alignment.unwrap_or_default(),
+        item_spacing: item_spacing.unwrap_or(Dp(0.0)),
+        overscan: overscan.unwrap_or(0),
+        estimated_item_size: estimated_item_size.unwrap_or(Dp(0.0)),
+        content_padding: content_padding.unwrap_or(Dp(0.0)),
         max_viewport_main,
+        scroll_smoothing: scroll_smoothing.unwrap_or(0.0),
         controller,
-        slots,
+        slots: content.slots,
     });
 }
 
-fn collect_row_slots(content: LazyListContentSlot) -> Vec<LazySlot> {
-    let mut slots = Vec::new();
-    {
-        let mut scope = LazyRowScope { slots: &mut slots };
-        content.render(&mut scope);
+macro_rules! impl_lazy_list_builder {
+    ($builder:ident) => {
+        impl $builder {
+            /// Append a single lazy item.
+            pub fn item<F>(mut self, builder: F) -> Self
+            where
+                F: Fn() + Send + Sync + 'static,
+            {
+                self.push_slot(lazy_item_slot(builder));
+                self
+            }
+
+            /// Append a single lazy item with a stable key.
+            pub fn item_with_key<K, F>(mut self, key: K, builder: F) -> Self
+            where
+                K: Hash,
+                F: Fn() + Send + Sync + 'static,
+            {
+                self.push_slot(lazy_item_with_key_slot(key, builder));
+                self
+            }
+
+            /// Append a batch of indexed lazy items.
+            pub fn items<F>(mut self, count: usize, builder: F) -> Self
+            where
+                F: Fn(usize) + Send + Sync + 'static,
+            {
+                self.push_slot(LazySlot::items(count, builder, None));
+                self
+            }
+
+            /// Append a batch of indexed lazy items with stable keys.
+            pub fn items_with_key<K, KF, F>(
+                mut self,
+                count: usize,
+                key_provider: KF,
+                builder: F,
+            ) -> Self
+            where
+                K: Hash,
+                KF: Fn(usize) -> K + Send + Sync + 'static,
+                F: Fn(usize) + Send + Sync + 'static,
+            {
+                let key_provider = CallbackWith::new(move |idx| hash_key(key_provider(idx)));
+                self.push_slot(LazySlot::items(count, builder, Some(key_provider)));
+                self
+            }
+
+            /// Append a sticky header item.
+            pub fn sticky_header<F>(mut self, builder: F) -> Self
+            where
+                F: Fn() + Send + Sync + 'static,
+            {
+                self.push_slot(LazySlot::sticky(builder, None));
+                self
+            }
+
+            /// Append a sticky header item with a stable key.
+            pub fn sticky_header_with_key<K, F>(mut self, key: K, builder: F) -> Self
+            where
+                K: Hash,
+                F: Fn() + Send + Sync + 'static,
+            {
+                self.push_slot(LazySlot::sticky(builder, Some(hash_key(key))));
+                self
+            }
+
+            /// Append lazy items from an iterator, exposing index and element.
+            pub fn items_from_iter<I, T, F>(mut self, iter: I, builder: F) -> Self
+            where
+                I: IntoIterator<Item = T>,
+                T: Send + Sync + 'static,
+                F: Fn(usize, &T) + Send + Sync + 'static,
+            {
+                if let Some(slot) = lazy_items_from_iter_slot(iter, builder) {
+                    self.push_slot(slot);
+                }
+                self
+            }
+
+            /// Append lazy items from an iterator with a stable key provider.
+            pub fn items_from_iter_with_key<I, T, K, KF, F>(
+                mut self,
+                iter: I,
+                key_provider: KF,
+                builder: F,
+            ) -> Self
+            where
+                I: IntoIterator<Item = T>,
+                T: Send + Sync + 'static,
+                K: Hash,
+                KF: Fn(usize, &T) -> K + Send + Sync + 'static,
+                F: Fn(usize, &T) + Send + Sync + 'static,
+            {
+                if let Some(slot) = lazy_items_from_iter_with_key_slot(iter, key_provider, builder)
+                {
+                    self.push_slot(slot);
+                }
+                self
+            }
+
+            /// Append lazy items from an iterator when only the element is used.
+            pub fn items_from_iter_values<I, T, F>(self, iter: I, builder: F) -> Self
+            where
+                I: IntoIterator<Item = T>,
+                T: Send + Sync + 'static,
+                F: Fn(&T) + Send + Sync + 'static,
+            {
+                self.items_from_iter(iter, move |_, item| builder(item))
+            }
+
+            fn push_slot(&mut self, slot: LazySlot) {
+                self.props
+                    .content
+                    .get_or_insert_with(LazyListContent::default)
+                    .push(slot);
+            }
+        }
+    };
+}
+
+impl_lazy_list_builder!(LazyColumnBuilder);
+impl_lazy_list_builder!(LazyRowBuilder);
+
+fn lazy_item_slot<F>(builder: F) -> LazySlot
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    LazySlot::items(
+        1,
+        move |_| {
+            builder();
+        },
+        None,
+    )
+}
+
+fn lazy_item_with_key_slot<K, F>(key: K, builder: F) -> LazySlot
+where
+    K: Hash,
+    F: Fn() + Send + Sync + 'static,
+{
+    let key_hash = hash_key(key);
+    LazySlot::items(
+        1,
+        move |_| {
+            builder();
+        },
+        Some(CallbackWith::new(move |_| key_hash)),
+    )
+}
+
+fn lazy_items_from_iter_slot<I, T, F>(iter: I, builder: F) -> Option<LazySlot>
+where
+    I: IntoIterator<Item = T>,
+    T: Send + Sync + 'static,
+    F: Fn(usize, &T) + Send + Sync + 'static,
+{
+    let items: Arc<Vec<T>> = Arc::new(iter.into_iter().collect());
+    if items.is_empty() {
+        return None;
     }
-    slots
+    let builder = Arc::new(builder);
+    let count = items.len();
+    Some(LazySlot::items(
+        count,
+        {
+            let items = items.clone();
+            let builder = builder.clone();
+            move |idx| {
+                if let Some(item) = items.get(idx) {
+                    builder(idx, item);
+                }
+            }
+        },
+        None,
+    ))
+}
+
+fn lazy_items_from_iter_with_key_slot<I, T, K, KF, F>(
+    iter: I,
+    key_provider: KF,
+    builder: F,
+) -> Option<LazySlot>
+where
+    I: IntoIterator<Item = T>,
+    T: Send + Sync + 'static,
+    K: Hash,
+    KF: Fn(usize, &T) -> K + Send + Sync + 'static,
+    F: Fn(usize, &T) + Send + Sync + 'static,
+{
+    let items: Arc<Vec<T>> = Arc::new(iter.into_iter().collect());
+    if items.is_empty() {
+        return None;
+    }
+    let builder = Arc::new(builder);
+    let key_provider = Arc::new(key_provider);
+    let count = items.len();
+
+    let slot_builder = {
+        let items = items.clone();
+        let builder = builder.clone();
+        move |idx: usize| {
+            if let Some(item) = items.get(idx) {
+                builder(idx, item);
+            }
+        }
+    };
+
+    let slot_key_provider = {
+        let items = items.clone();
+        let key_provider = key_provider.clone();
+        move |idx: usize| -> u64 {
+            items
+                .get(idx)
+                .map(|item| hash_key(key_provider(idx, item)))
+                .unwrap_or(0)
+        }
+    };
+
+    Some(LazySlot::items(
+        count,
+        slot_builder,
+        Some(CallbackWith::new(slot_key_provider)),
+    ))
 }
 
 fn lazy_row_slots(args: LazyListSlotsArgs) {
     let scrollable_builder = scrollable()
         .modifier(args.modifier)
         .vertical(false)
-        .horizontal(true);
+        .horizontal(true)
+        .apply_child_offset(false)
+        .scroll_smoothing(args.scroll_smoothing);
 
     // Create a proxy scroll controller that syncs with the LazyListController
     let scroll_controller = remember(ScrollableController::default);
@@ -577,7 +573,7 @@ fn lazy_row_slots(args: LazyListSlotsArgs) {
                 args.controller
                     .with_mut(|c| c.scroll.set_scroll_position(current_pos));
             }
-            lazy_list_view()
+            let mut builder = lazy_list_view()
                 .axis(LazyListAxis::Horizontal)
                 .cross_axis_alignment(args.cross_axis_alignment)
                 .item_spacing(item_spacing)
@@ -586,46 +582,37 @@ fn lazy_row_slots(args: LazyListSlotsArgs) {
                 .padding_main(padding_main)
                 .padding_cross(padding_cross)
                 .slots(args.slots.clone())
-                .controller_internal(args.controller)
-                .scroll_controller_internal(scroll_controller)
-                .max_viewport_main_internal(args.max_viewport_main);
+                .controller(args.controller)
+                .scroll_controller(scroll_controller);
+            if let Some(max_viewport_main) = args.max_viewport_main {
+                builder = builder.max_viewport_main(max_viewport_main);
+            }
+            drop(builder);
         });
-}
-
-impl LazyListViewBuilder {
-    fn controller_internal(mut self, controller: State<LazyListController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-
-    fn scroll_controller_internal(
-        mut self,
-        scroll_controller: State<ScrollableController>,
-    ) -> Self {
-        self.props.scroll_controller = Some(scroll_controller);
-        self
-    }
-
-    fn max_viewport_main_internal(mut self, max_viewport_main: Option<Px>) -> Self {
-        self.props.max_viewport_main = max_viewport_main;
-        self
-    }
 }
 
 #[tessera]
 fn lazy_list_view(
-    axis: LazyListAxis,
-    cross_axis_alignment: CrossAxisAlignment,
-    item_spacing: Px,
-    estimated_item_main: Px,
-    overscan: usize,
+    axis: Option<LazyListAxis>,
+    cross_axis_alignment: Option<CrossAxisAlignment>,
+    item_spacing: Option<Px>,
+    estimated_item_main: Option<Px>,
+    overscan: Option<usize>,
     max_viewport_main: Option<Px>,
-    padding_main: Px,
-    padding_cross: Px,
-    #[prop(skip_setter)] controller: Option<State<LazyListController>>,
-    slots: Vec<LazySlot>,
-    #[prop(skip_setter)] scroll_controller: Option<State<ScrollableController>>,
+    padding_main: Option<Px>,
+    padding_cross: Option<Px>,
+    controller: Option<State<LazyListController>>,
+    slots: Option<Vec<LazySlot>>,
+    scroll_controller: Option<State<ScrollableController>>,
 ) {
+    let axis = axis.unwrap_or_default();
+    let cross_axis_alignment = cross_axis_alignment.unwrap_or_default();
+    let item_spacing = item_spacing.unwrap_or(Px::ZERO);
+    let estimated_item_main = estimated_item_main.unwrap_or(Px::ZERO);
+    let overscan = overscan.unwrap_or(0);
+    let padding_main = padding_main.unwrap_or(Px::ZERO);
+    let padding_cross = padding_cross.unwrap_or(Px::ZERO);
+    let slots = slots.unwrap_or_default();
     let controller = controller.expect("lazy_list_view requires controller");
     let scroll_controller = scroll_controller.expect("lazy_list_view requires scroll_controller");
     let plan = LazySlotPlan::new(slots.clone());
@@ -677,7 +664,7 @@ fn lazy_list_view(
     });
 
     if visible_children.children.is_empty() {
-        layout_primitive().layout_policy(ZeroLayout);
+        layout().layout_policy(ZeroLayout);
         return;
     }
 
@@ -702,7 +689,7 @@ fn lazy_list_view(
         .collect();
 
     let children = visible_children.children;
-    layout_primitive()
+    layout()
         .modifier(focus_modifier)
         .layout_policy(LazyListLayout {
             axis,
@@ -723,7 +710,7 @@ fn lazy_list_view(
             for child in &children {
                 let child = child.clone();
                 key(child.key_hash, || {
-                    child.builder.call(child.local_index);
+                    child.builder.render(child.local_index);
                 });
             }
         });
@@ -733,12 +720,8 @@ fn lazy_list_view(
 struct ZeroLayout;
 
 impl LayoutPolicy for ZeroLayout {
-    fn measure(
-        &self,
-        _input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        Ok(ComputedData::ZERO)
+    fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        Ok(LayoutResult::new(ComputedData::ZERO))
     }
 }
 
@@ -776,34 +759,35 @@ impl PartialEq for LazyListLayout {
 }
 
 impl LayoutPolicy for LazyListLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        if input.children_ids().len() != self.visible_item_indices.len() {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        if children.len() != self.visible_item_indices.len() {
             return Err(MeasurementError::MeasureFnFailed(
                 "Lazy list measured child count mismatch".into(),
             ));
         }
 
-        let mut measured_children: Vec<(usize, NodeId)> = self
+        let mut measured_children: Vec<_> = self
             .visible_item_indices
             .iter()
             .copied()
-            .zip(input.children_ids().iter().copied())
+            .zip(children.iter().copied())
             .collect();
         measured_children.sort_unstable_by_key(|(item_index, _)| *item_index);
 
-        let mut child_constraint = self.axis.child_constraint(input.parent_constraint());
+        let mut child_constraint = self
+            .axis
+            .child_constraint(input.parent_constraint(), self.cross_axis_alignment);
         apply_cross_padding(&mut child_constraint, self.axis, self.padding_cross);
         let mut measured_entries = Vec::with_capacity(self.visible_item_indices.len());
         let mut inner_cross = Px::ZERO;
-        for (item_index, child_id) in &measured_children {
-            let child_size = input.measure_child(*child_id, &child_constraint)?;
+        for (item_index, child) in &measured_children {
+            let child_size = child.measure(&child_constraint)?;
+            let child_size = child_size.size();
             let measured_main = self.axis.main(&child_size);
             inner_cross = inner_cross.max(self.axis.cross(&child_size));
-            measured_entries.push((*item_index, *child_id, child_size, measured_main));
+            measured_entries.push((*item_index, *child, child_size, measured_main));
         }
 
         let has_cache_updates = self.controller.with(|c| {
@@ -841,14 +825,9 @@ impl LayoutPolicy for LazyListLayout {
         });
         let mut placements = Vec::with_capacity(measured_entries.len());
         for ((item_index, child_id, child_size, _), offset_main) in
-            measured_entries.into_iter().zip(item_offsets.into_iter())
+            measured_entries.into_iter().zip(item_offsets)
         {
-            placements.push(Placement {
-                item_index,
-                child_id,
-                offset_main,
-                size: child_size,
-            });
+            placements.push((item_index, child_id, offset_main, child_size));
         }
 
         let total_main_with_padding = total_main + self.padding_main + self.padding_main;
@@ -874,30 +853,31 @@ impl LayoutPolicy for LazyListLayout {
         for placement in &placements {
             let cross_offset = compute_cross_offset(
                 inner_cross,
-                self.axis.cross(&placement.size),
+                self.axis.cross(&placement.3),
                 self.cross_axis_alignment,
             );
-            let mut main_offset = placement.offset_main + self.padding_main;
-            if self.is_sticky(placement.item_index) {
-                let sticky_start = self.scroll_offset + self.padding_main;
+            let mut main_offset = placement.2 + self.padding_main - self.scroll_offset;
+            if self.is_sticky(placement.0) {
+                let sticky_start = self.padding_main;
                 main_offset = main_offset.max(sticky_start);
-                if let Some(next_index) = self.next_sticky_after(placement.item_index) {
+                if let Some(next_index) = self.next_sticky_after(placement.0) {
                     let next_offset = self.controller.with(|c| {
                         c.cache
                             .offset_for(next_index, self.estimated_item_main, self.item_spacing)
                     });
-                    let max_offset =
-                        next_offset + self.padding_main - self.axis.main(&placement.size);
+                    let max_offset = next_offset + self.padding_main
+                        - self.axis.main(&placement.3)
+                        - self.scroll_offset;
                     main_offset = main_offset.min(max_offset);
                 }
             }
             let position = self
                 .axis
                 .position(main_offset, self.padding_cross + cross_offset);
-            output.place_child(placement.child_id, position);
+            result.place_child(placement.1, position);
         }
 
-        Ok(self.axis.pack_size(reported_main, cross_with_padding))
+        Ok(result.with_size(self.axis.pack_size(reported_main, cross_with_padding)))
     }
 
     fn measure_eq(&self, other: &Self) -> bool {
@@ -927,62 +907,54 @@ impl LayoutPolicy for LazyListLayout {
             && self.scroll_offset == other.scroll_offset
     }
 
-    fn place_children(&self, input: &PlacementInput<'_>, output: &mut LayoutOutput<'_>) -> bool {
-        if input.children_ids().len() != self.visible_item_indices.len() {
-            return false;
+    fn place_children(&self, input: &PlacementScope<'_>) -> Option<Vec<(u64, PxPosition)>> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        if children.len() != self.visible_item_indices.len() {
+            return None;
         }
 
         let mut placements = Vec::with_capacity(self.visible_item_indices.len());
         let mut inner_cross = Px::ZERO;
-        for (&item_index, &child_id) in self
-            .visible_item_indices
-            .iter()
-            .zip(input.children_ids().iter())
-        {
-            let Some(child_size) = input.child_size(child_id) else {
-                return false;
-            };
+        for (&item_index, &child) in self.visible_item_indices.iter().zip(children.iter()) {
+            let child_size = child.size();
             let measured_cross = self.axis.cross(&child_size);
             inner_cross = inner_cross.max(measured_cross);
             let offset_main = self.controller.with(|c| {
                 c.cache
                     .offset_for(item_index, self.estimated_item_main, self.item_spacing)
             });
-            placements.push(Placement {
-                item_index,
-                child_id,
-                offset_main,
-                size: child_size,
-            });
+            placements.push((item_index, child, offset_main, child_size));
         }
 
         for placement in &placements {
             let cross_offset = compute_cross_offset(
                 inner_cross,
-                self.axis.cross(&placement.size),
+                self.axis.cross(&placement.3),
                 self.cross_axis_alignment,
             );
-            let mut main_offset = placement.offset_main + self.padding_main;
-            if self.is_sticky(placement.item_index) {
-                let sticky_start = self.scroll_offset + self.padding_main;
+            let mut main_offset = placement.2 + self.padding_main - self.scroll_offset;
+            if self.is_sticky(placement.0) {
+                let sticky_start = self.padding_main;
                 main_offset = main_offset.max(sticky_start);
-                if let Some(next_index) = self.next_sticky_after(placement.item_index) {
+                if let Some(next_index) = self.next_sticky_after(placement.0) {
                     let next_offset = self.controller.with(|c| {
                         c.cache
                             .offset_for(next_index, self.estimated_item_main, self.item_spacing)
                     });
-                    let max_offset =
-                        next_offset + self.padding_main - self.axis.main(&placement.size);
+                    let max_offset = next_offset + self.padding_main
+                        - self.axis.main(&placement.3)
+                        - self.scroll_offset;
                     main_offset = main_offset.min(max_offset);
                 }
             }
             let position = self
                 .axis
                 .position(main_offset, self.padding_cross + cross_offset);
-            output.place_child(placement.child_id, position);
+            result.place_child(placement.1, position);
         }
 
-        true
+        Some(result.into_placements())
     }
 }
 
@@ -1161,39 +1133,30 @@ impl LazyListAxis {
         }
     }
 
-    fn child_constraint(&self, parent: ParentConstraint<'_>) -> Constraint {
+    fn child_constraint(
+        &self,
+        parent: ParentConstraint<'_>,
+        alignment: CrossAxisAlignment,
+    ) -> Constraint {
+        let cross_constraint = match (self, alignment) {
+            (Self::Vertical, CrossAxisAlignment::Stretch) => parent.width(),
+            (Self::Horizontal, CrossAxisAlignment::Stretch) => parent.height(),
+            (Self::Vertical, _) => parent.width().without_min(),
+            (Self::Horizontal, _) => parent.height().without_min(),
+        };
+
         match self {
-            Self::Vertical => Constraint::new(
-                parent.width(),
-                DimensionValue::Wrap {
-                    min: None,
-                    max: None,
-                },
-            ),
-            Self::Horizontal => Constraint::new(
-                DimensionValue::Wrap {
-                    min: None,
-                    max: None,
-                },
-                parent.height(),
-            ),
+            Self::Vertical => Constraint::new(cross_constraint, AxisConstraint::NONE),
+            Self::Horizontal => Constraint::new(AxisConstraint::NONE, cross_constraint),
         }
     }
 
     fn constraint_max(&self, constraint: ParentConstraint<'_>) -> Option<Px> {
         match self {
-            Self::Vertical => constraint.height().get_max(),
-            Self::Horizontal => constraint.width().get_max(),
+            Self::Vertical => constraint.height().resolve_max(),
+            Self::Horizontal => constraint.width().resolve_max(),
         }
     }
-}
-
-#[derive(Clone, PartialEq)]
-struct Placement {
-    item_index: usize,
-    child_id: NodeId,
-    offset_main: Px,
-    size: ComputedData,
 }
 
 #[derive(Clone)]
@@ -1296,7 +1259,7 @@ impl LazySlot {
     {
         Self::Items(LazyItemsSlot {
             count,
-            builder: CallbackWith::new(builder),
+            builder: RenderSlotWith::new(builder),
             key_provider,
         })
     }
@@ -1306,7 +1269,9 @@ impl LazySlot {
         F: Fn() + Send + Sync + 'static,
     {
         Self::Sticky(LazyStickySlot {
-            builder: Callback::new(builder),
+            builder: RenderSlotWith::new(move |_| {
+                builder();
+            }),
             key_hash,
         })
     }
@@ -1322,13 +1287,13 @@ impl LazySlot {
 #[derive(Clone, PartialEq)]
 struct LazyItemsSlot {
     count: usize,
-    builder: CallbackWith<usize, ()>,
+    builder: RenderSlotWith<usize>,
     key_provider: Option<CallbackWith<usize, u64>>,
 }
 
 #[derive(Clone, PartialEq)]
 struct LazyStickySlot {
-    builder: Callback,
+    builder: RenderSlotWith<usize>,
     key_hash: Option<u64>,
 }
 
@@ -1402,17 +1367,7 @@ impl LazySlotPlan {
         };
         let (builder, local_index) = match resolved {
             ResolvedSlot::Items(slot, local_index) => (slot.builder, local_index),
-            ResolvedSlot::Sticky(slot) => {
-                let builder = slot.builder;
-                (
-                    {
-                        CallbackWith::new(move |_| {
-                            builder.call();
-                        })
-                    },
-                    0,
-                )
-            }
+            ResolvedSlot::Sticky(slot) => (slot.builder, 0),
         };
         Some(VisibleChild {
             item_index: index,
@@ -1463,7 +1418,7 @@ struct LazySlotEntry {
 struct VisibleChild {
     item_index: usize,
     local_index: usize,
-    builder: CallbackWith<usize, ()>,
+    builder: RenderSlotWith<usize>,
     key_hash: u64,
 }
 
@@ -1605,25 +1560,21 @@ fn apply_cross_padding(constraint: &mut Constraint, axis: LazyListAxis, padding:
     let total_padding = padding + padding;
     match axis {
         LazyListAxis::Vertical => {
-            constraint.width = shrink_dimension_max(constraint.width, total_padding);
+            constraint.width = shrink_axis_max(constraint.width, total_padding);
         }
         LazyListAxis::Horizontal => {
-            constraint.height = shrink_dimension_max(constraint.height, total_padding);
+            constraint.height = shrink_axis_max(constraint.height, total_padding);
         }
     }
 }
 
-fn shrink_dimension_max(dim: DimensionValue, amount: Px) -> DimensionValue {
-    match dim {
-        DimensionValue::Fixed(px) => DimensionValue::Fixed(saturating_sub_px(px, amount)),
-        DimensionValue::Wrap { min, max } => DimensionValue::Wrap {
-            min,
-            max: max.map(|m| saturating_sub_px(m, amount)),
-        },
-        DimensionValue::Fill { min, max } => DimensionValue::Fill {
-            min,
-            max: max.map(|m| saturating_sub_px(m, amount)),
-        },
+fn shrink_axis_max(axis: AxisConstraint, amount: Px) -> AxisConstraint {
+    let min = axis.min;
+    let max = axis.max.map(|m| saturating_sub_px(m, amount));
+    if max == Some(min) {
+        AxisConstraint::exact(saturating_sub_px(min, amount))
+    } else {
+        AxisConstraint::new(min, max)
     }
 }
 
@@ -1633,17 +1584,24 @@ fn saturating_sub_px(lhs: Px, rhs: Px) -> Px {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use tessera_ui::{
-        ComputedData, DimensionValue, LayoutInput, LayoutOutput, LayoutPolicy, MeasurementError,
-        Modifier, NoopRenderPolicy, Px, PxPosition, layout::layout_primitive, remember, tessera,
+        AxisConstraint, ComputedData, LayoutPolicy, LayoutResult, MeasurementError, Modifier,
+        NoopRenderPolicy, Px, PxPosition,
+        layout::{MeasureScope, layout},
+        receive_frame_nanos, remember, tessera,
     };
 
     use crate::{
         alignment::CrossAxisAlignment,
         modifier::{ModifierExt as _, SemanticsArgs},
+        theme::{MaterialTheme, material_theme},
     };
 
     use super::{LazyListController, lazy_column, lazy_row};
+
+    static LAZY_LIST_VISIBLE_ITEM_BUILD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Clone, PartialEq)]
     struct FixedTestLayout {
@@ -1651,23 +1609,61 @@ mod tests {
         height: i32,
     }
 
+    #[derive(Clone, PartialEq)]
+    struct PreferredConstraintTestLayout {
+        preferred_width: i32,
+        preferred_height: i32,
+    }
+
     impl LayoutPolicy for FixedTestLayout {
-        fn measure(
-            &self,
-            _input: &LayoutInput<'_>,
-            _output: &mut LayoutOutput<'_>,
-        ) -> Result<ComputedData, MeasurementError> {
-            Ok(ComputedData {
+        fn measure(&self, _input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+            Ok(LayoutResult::new(ComputedData {
                 width: Px::new(self.width),
                 height: Px::new(self.height),
-            })
+            }))
+        }
+    }
+
+    impl LayoutPolicy for PreferredConstraintTestLayout {
+        fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+            let preferred_width = Px::new(self.preferred_width);
+            let preferred_height = Px::new(self.preferred_height);
+            let width = AxisConstraint::exact(preferred_width)
+                .intersect(input.parent_constraint().width())
+                .clamp(preferred_width);
+            let height = AxisConstraint::exact(preferred_height)
+                .intersect(input.parent_constraint().height())
+                .clamp(preferred_height);
+            Ok(LayoutResult::new(ComputedData { width, height }))
         }
     }
 
     #[tessera]
-    fn fixed_test_box(tag: String, width: i32, height: i32) {
-        layout_primitive()
+    fn fixed_test_box(tag: Option<String>, width: Option<i32>, height: Option<i32>) {
+        let tag = tag.unwrap_or_default();
+        let width = width.unwrap_or(0);
+        let height = height.unwrap_or(0);
+
+        layout()
             .layout_policy(FixedTestLayout { width, height })
+            .render_policy(NoopRenderPolicy)
+            .modifier(Modifier::new().semantics(SemanticsArgs {
+                test_tag: Some(tag),
+                ..Default::default()
+            }));
+    }
+
+    #[tessera]
+    fn preferred_constraint_test_box(tag: Option<String>, width: Option<i32>, height: Option<i32>) {
+        let tag = tag.unwrap_or_default();
+        let width = width.unwrap_or(0);
+        let height = height.unwrap_or(0);
+
+        layout()
+            .layout_policy(PreferredConstraintTestLayout {
+                preferred_width: width,
+                preferred_height: height,
+            })
             .render_policy(NoopRenderPolicy)
             .modifier(Modifier::new().semantics(SemanticsArgs {
                 test_tag: Some(tag),
@@ -1679,32 +1675,30 @@ mod tests {
     fn lazy_column_layout_case() {
         lazy_column()
             .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(Px::new(60))),
-                Some(DimensionValue::Fixed(Px::new(50))),
+                Some(AxisConstraint::exact(Px::new(60))),
+                Some(AxisConstraint::exact(Px::new(50))),
             ))
             .cross_axis_alignment(CrossAxisAlignment::Start)
             .item_spacing(Px::new(3).into())
             .estimated_item_size(Px::new(10).into())
             .content_padding(Px::new(4).into())
-            .content(|scope| {
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_first".to_string())
-                        .width(20)
-                        .height(10);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_second".to_string())
-                        .width(18)
-                        .height(12);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_third".to_string())
-                        .width(16)
-                        .height(8);
-                });
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_first".to_string())
+                    .width(20)
+                    .height(10);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_second".to_string())
+                    .width(18)
+                    .height(12);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_third".to_string())
+                    .width(16)
+                    .height(8);
             });
     }
 
@@ -1712,32 +1706,30 @@ mod tests {
     fn lazy_row_layout_case() {
         lazy_row()
             .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(Px::new(70))),
-                Some(DimensionValue::Fixed(Px::new(30))),
+                Some(AxisConstraint::exact(Px::new(70))),
+                Some(AxisConstraint::exact(Px::new(30))),
             ))
             .cross_axis_alignment(CrossAxisAlignment::Start)
             .item_spacing(Px::new(3).into())
             .estimated_item_size(Px::new(10).into())
             .content_padding(Px::new(4).into())
-            .content(|scope| {
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_row_first".to_string())
-                        .width(20)
-                        .height(10);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_row_second".to_string())
-                        .width(15)
-                        .height(12);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_row_third".to_string())
-                        .width(18)
-                        .height(8);
-                });
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_row_first".to_string())
+                    .width(20)
+                    .height(10);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_row_second".to_string())
+                    .width(15)
+                    .height(12);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_row_third".to_string())
+                    .width(18)
+                    .height(8);
             });
     }
 
@@ -1754,33 +1746,31 @@ mod tests {
 
         lazy_column()
             .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(Px::new(60))),
-                Some(DimensionValue::Fixed(Px::new(50))),
+                Some(AxisConstraint::exact(Px::new(60))),
+                Some(AxisConstraint::exact(Px::new(50))),
             ))
             .controller(controller)
             .cross_axis_alignment(CrossAxisAlignment::Start)
             .item_spacing(Px::new(3).into())
             .estimated_item_size(Px::new(10).into())
             .content_padding(Px::new(4).into())
-            .content(|scope| {
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_scrolled_first".to_string())
-                        .width(20)
-                        .height(10);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_scrolled_second".to_string())
-                        .width(18)
-                        .height(12);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_scrolled_third".to_string())
-                        .width(16)
-                        .height(8);
-                });
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_scrolled_first".to_string())
+                    .width(20)
+                    .height(10);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_scrolled_second".to_string())
+                    .width(18)
+                    .height(12);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_scrolled_third".to_string())
+                    .width(16)
+                    .height(8);
             });
     }
 
@@ -1797,33 +1787,87 @@ mod tests {
 
         lazy_column()
             .modifier(Modifier::new().constrain(
-                Some(DimensionValue::Fixed(Px::new(60))),
-                Some(DimensionValue::Fixed(Px::new(40))),
+                Some(AxisConstraint::exact(Px::new(60))),
+                Some(AxisConstraint::exact(Px::new(40))),
             ))
             .controller(controller)
             .cross_axis_alignment(CrossAxisAlignment::Start)
             .item_spacing(Px::new(3).into())
             .estimated_item_size(Px::new(10).into())
             .content_padding(Px::new(4).into())
-            .content(|scope| {
-                scope.sticky_header(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_sticky_header".to_string())
-                        .width(20)
-                        .height(10);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_sticky_body".to_string())
-                        .width(18)
-                        .height(12);
-                });
-                scope.item(|| {
-                    fixed_test_box()
-                        .tag("lazy_column_sticky_tail".to_string())
-                        .width(16)
-                        .height(8);
-                });
+            .sticky_header(|| {
+                fixed_test_box()
+                    .tag("lazy_column_sticky_header".to_string())
+                    .width(20)
+                    .height(10);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_sticky_body".to_string())
+                    .width(18)
+                    .height(12);
+            })
+            .item(|| {
+                fixed_test_box()
+                    .tag("lazy_column_sticky_tail".to_string())
+                    .width(16)
+                    .height(8);
+            });
+    }
+
+    #[tessera]
+    fn lazy_column_non_stretch_cross_axis_case() {
+        lazy_column()
+            .modifier(Modifier::new().constrain(
+                Some(AxisConstraint::exact(Px::new(60))),
+                Some(AxisConstraint::exact(Px::new(50))),
+            ))
+            .cross_axis_alignment(CrossAxisAlignment::Start)
+            .estimated_item_size(Px::new(10).into())
+            .content_padding(Px::new(4).into())
+            .item(|| {
+                preferred_constraint_test_box()
+                    .tag("lazy_column_non_stretch".to_string())
+                    .width(20)
+                    .height(10);
+            });
+    }
+
+    #[tessera]
+    fn lazy_column_stable_visible_items_case() {
+        let controller = remember(LazyListController::new);
+        receive_frame_nanos(move |frame_nanos| {
+            let offset = match frame_nanos {
+                0 => 0,
+                16_666_667 => 2,
+                33_333_334 => 4,
+                _ => 4,
+            };
+            let position = PxPosition::new(Px::ZERO, Px::new(-offset));
+            controller.with_mut(|c| {
+                c.scroll_controller_mut().set_scroll_position(position);
+            });
+            tessera_ui::FrameNanosControl::Continue
+        });
+
+        material_theme()
+            .theme(MaterialTheme::default)
+            .child(move || {
+                lazy_column()
+                    .modifier(Modifier::new().constrain(
+                        Some(AxisConstraint::exact(Px::new(60))),
+                        Some(AxisConstraint::exact(Px::new(50))),
+                    ))
+                    .controller(controller)
+                    .cross_axis_alignment(CrossAxisAlignment::Start)
+                    .estimated_item_size(Px::new(20).into())
+                    .items(10, |index| {
+                        LAZY_LIST_VISIBLE_ITEM_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
+                        fixed_test_box()
+                            .tag(format!("stable_visible_item_{index}"))
+                            .width(20)
+                            .height(20);
+                    });
             });
     }
 
@@ -1885,5 +1929,42 @@ mod tests {
                 node("lazy_column_sticky_tail").position(4, 26).size(16, 8);
             }
         }
+    }
+
+    #[test]
+    fn lazy_column_non_stretch_cross_axis_does_not_force_exact_parent_width() {
+        tessera_ui::assert_layout! {
+            viewport: (80, 60),
+            content: {
+                lazy_column_non_stretch_cross_axis_case();
+            },
+            expect: {
+                node("lazy_column_non_stretch").position(4, 4).size(20, 10);
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_column_rebuilds_visible_items_when_item_slot_updates() {
+        LAZY_LIST_VISIBLE_ITEM_BUILD_COUNT.store(0, Ordering::Relaxed);
+
+        let mut session = tessera_ui::testing::__private::start_layout_test_session(
+            tessera_ui::testing::layout_test(|| {
+                lazy_column_stable_visible_items_case();
+            })
+            .viewport_px(80, 60),
+        );
+
+        let _ = tessera_ui::testing::__private::pump_layout_test_session(&mut session, 0);
+        let first_builds = LAZY_LIST_VISIBLE_ITEM_BUILD_COUNT.load(Ordering::Relaxed);
+        assert!(first_builds > 0);
+
+        let _ = tessera_ui::testing::__private::pump_layout_test_session(&mut session, 16_666_667);
+        let second_builds = LAZY_LIST_VISIBLE_ITEM_BUILD_COUNT.load(Ordering::Relaxed);
+        assert!(second_builds > first_builds);
+
+        let _ = tessera_ui::testing::__private::pump_layout_test_session(&mut session, 33_333_334);
+        let third_builds = LAZY_LIST_VISIBLE_ITEM_BUILD_COUNT.load(Ordering::Relaxed);
+        assert!(third_builds > second_builds);
     }
 }

@@ -267,7 +267,13 @@
 //! components and modifiers.
 //!
 //! For more details, see the [Layout Guide](https://tessera-ui.github.io/guide/component.html#layout).
-#![deny(missing_docs, clippy::unwrap_used)]
+#![deny(
+    missing_docs,
+    clippy::unwrap_used,
+    rustdoc::broken_intra_doc_links,
+    rustdoc::invalid_rust_codeblocks,
+    rustdoc::invalid_html_tags
+)]
 
 extern crate self as tessera_ui;
 
@@ -304,13 +310,11 @@ mod render_pass;
 pub mod render_scene;
 pub mod renderer;
 mod runtime;
+pub mod scroll;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod thread_utils;
 pub mod time;
-
-#[cfg(feature = "shard")]
-pub mod router;
 
 pub use accesskit;
 pub use indextree::{Arena, NodeId};
@@ -323,14 +327,14 @@ pub use crate::{
     asset::AssetExt,
     color::Color,
     component_tree::{
-        ComponentTree, ComputedData, Constraint, DimensionValue, ImeInput, ImeInputHandlerFn,
+        AxisConstraint, ComponentTree, ComputedData, Constraint, ImeInput, ImeInputHandlerFn,
         ImeRequest, ImeSession, KeyboardInput, KeyboardInputHandlerFn, MeasurementError,
-        ParentConstraint, PointerEventPass, PointerInput, PointerInputHandlerFn, WindowAction,
+        ParentConstraint, PointerEventPass, PointerInput, PointerInputHandlerFn,
     },
     context::{Context, provide_context, use_context},
     cursor::{
-        CursorEvent, CursorEventContent, GestureState, MOUSE_POINTER_ID, PointerChange, PointerId,
-        PressKeyEventType, ScrollEventContent, ScrollEventSource,
+        CursorEventContent, GestureState, MOUSE_POINTER_ID, PointerChange, PointerId,
+        PressKeyEventType, ScrollDeltaUnit, ScrollEventContent, ScrollEventSource,
     },
     dp::Dp,
     entry_point::EntryPoint,
@@ -340,20 +344,20 @@ pub use crate::{
         FocusScopeNode, FocusState, FocusTraversalPolicy, FocusTraversalStrategy,
     },
     layout::{
-        DefaultLayoutPolicy, LayoutInput, LayoutOutput, LayoutPolicy, LayoutResult,
-        NoopRenderPolicy, RenderInput, RenderMetadataMut, RenderPolicy,
+        DefaultLayoutPolicy, LayoutPolicy, LayoutResult, NoopRenderPolicy, RenderInput,
+        RenderMetadataMut, RenderPolicy,
     },
     modifier::{
         BuildModifierNode, CursorModifierExt, CursorModifierNode, DrawModifierContent,
         DrawModifierContext, DrawModifierNode, FocusModifierExt, ImeInputModifierNode,
         KeyboardInputModifierNode, LayoutModifierChild, LayoutModifierInput, LayoutModifierNode,
         LayoutModifierOutput, Modifier, ParentDataMap, ParentDataModifierNode,
-        PointerInputModifierNode, SemanticsModifierNode,
+        PlacementModifierNode, PointerInputModifierNode, SemanticsModifierNode,
     },
     pipeline_context::PipelineContext,
     plugin::{
-        Plugin, PluginContext, PluginResult, register_plugin, register_plugin_boxed, with_plugin,
-        with_plugin_mut,
+        DesktopPlatformContext, DesktopWindowAction, Plugin, PluginContext, PluginResult,
+        register_plugin, register_plugin_boxed, with_plugin, with_plugin_mut,
     },
     prop::{Callback, CallbackWith, RenderSlot, RenderSlotWith, Slot},
     px::{Px, PxPosition, PxRect, PxSize},
@@ -380,17 +384,10 @@ pub use crate::{
         FrameNanosControl, State, current_frame_nanos, current_frame_time, frame_delta, key,
         receive_frame_nanos, remember, remember_with_key, retain, retain_with_key,
     },
+    scroll::{PlatformScrollConfig, normalize_platform_scroll_delta, platform_scroll_config},
 };
 
 use ime_state::ImeState;
 
-#[cfg(feature = "shard")]
-pub use tessera_macros::shard;
-#[cfg(feature = "shard")]
-pub use tessera_shard;
-
 #[cfg(target_os = "android")]
 pub use {jni, ndk_context, ndk_sys};
-
-/// Backward-compatible alias for the primary focus requester handle.
-pub type Focus = FocusRequester;

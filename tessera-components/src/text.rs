@@ -4,9 +4,11 @@
 //!
 //! Display labels, headings, and other text content.
 use tessera_ui::{
-    Color, ComputedData, DimensionValue, Dp, LayoutInput, LayoutOutput, LayoutPolicy,
-    MeasurementError, Modifier, Px, PxPosition, RenderInput, RenderPolicy, accesskit::Role,
-    layout::layout_primitive, tessera, use_context,
+    Color, ComputedData, Dp, LayoutPolicy, LayoutResult, MeasurementError, Modifier, Px,
+    PxPosition, RenderInput, RenderPolicy,
+    accesskit::Role,
+    layout::{MeasureScope, layout},
+    tessera, use_context,
 };
 
 use crate::{
@@ -34,6 +36,7 @@ pub use crate::pipelines::text::pipeline::{read_font_system, write_font_system};
 /// - `modifier` — modifier chain applied to the text node.
 /// - `content` — text content to display.
 /// - `color` — optional text color override.
+/// - `style` — optional text style override for typography presets.
 /// - `size` — optional font size override.
 /// - `line_height` — optional line height override.
 /// - `accessibility_label` — optional accessibility label override.
@@ -50,30 +53,38 @@ pub use crate::pipelines::text::pipeline::{read_font_system, write_font_system};
 ///     text()
 ///         .content("Hello, world!")
 ///         .color(Color::new(0.2, 0.5, 0.8, 1.0))
-///         .size(Dp(32.0));
+///         .style(tessera_components::theme::TextStyle {
+///             font_size: Dp(32.0),
+///             line_height: Some(Dp(40.0)),
+///         });
 /// }
 ///
 /// demo();
 /// ```
 #[tessera]
 pub fn text(
-    modifier: Modifier,
-    #[prop(into)] content: String,
+    modifier: Option<Modifier>,
+    #[prop(into)] content: Option<String>,
     color: Option<Color>,
+    style: Option<TextStyle>,
     size: Option<Dp>,
     line_height: Option<Dp>,
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
 ) {
+    let modifier = modifier.unwrap_or_default();
+    let content = content.unwrap_or_default();
     let theme = use_context::<MaterialTheme>();
+    let inherited_style = use_context::<TextStyle>().map(|s| s.get());
+    let resolved_style = style
+        .or(inherited_style)
+        .or_else(|| theme.map(|t| t.get().typography.body_large))
+        .unwrap_or_default();
     let color = color
         .or_else(|| use_context::<ContentColor>().map(|c| c.get().current))
         .or_else(|| theme.map(|t| t.get().color_scheme.on_surface))
         .unwrap_or_else(|| ContentColor::default().current);
-    let size = size
-        .or_else(|| use_context::<TextStyle>().map(|s| s.get().font_size))
-        .or_else(|| theme.map(|t| t.get().typography.body_large.font_size))
-        .unwrap_or_else(|| TextStyle::default().font_size);
+    let size = size.unwrap_or(resolved_style.font_size);
     let accessibility_label = accessibility_label
         .clone()
         .or_else(|| (!content.is_empty()).then(|| content.clone()));
@@ -83,9 +94,8 @@ pub fn text(
         description: accessibility_description,
         ..Default::default()
     };
-    let inherited_style = use_context::<TextStyle>().map(|s| s.get());
     let line_height = line_height
-        .or_else(|| inherited_style.and_then(|style| style.line_height))
+        .or(resolved_style.line_height)
         .unwrap_or(Dp(size.0 * 1.2));
 
     let policy = TextLayout {
@@ -94,7 +104,7 @@ pub fn text(
         size,
         line_height,
     };
-    layout_primitive()
+    layout()
         .modifier(modifier.semantics(semantics))
         .layout_policy(policy.clone())
         .render_policy(policy);
@@ -118,22 +128,9 @@ impl PartialEq for TextLayout {
 }
 
 impl LayoutPolicy for TextLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        _output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let max_width: Option<Px> = match input.parent_constraint().width() {
-            DimensionValue::Fixed(w) => Some(w),
-            DimensionValue::Wrap { max, .. } => max,
-            DimensionValue::Fill { max, .. } => max,
-        };
-
-        let max_height: Option<Px> = match input.parent_constraint().height() {
-            DimensionValue::Fixed(h) => Some(h),
-            DimensionValue::Wrap { max, .. } => max,
-            DimensionValue::Fill { max, .. } => max,
-        };
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let max_width = input.parent_constraint().width().resolve_max();
+        let max_height = input.parent_constraint().height().resolve_max();
 
         let info = TextData::measure(
             self.text.clone(),
@@ -141,25 +138,26 @@ impl LayoutPolicy for TextLayout {
             self.size.to_pixels_f32(),
             self.line_height.to_pixels_f32(),
             TextConstraint {
-                max_width: max_width.map(|px| px.to_f32()),
-                max_height: max_height.map(|px| px.to_f32()),
+                max_width: max_width.map(|px: Px| px.to_f32()),
+                max_height: max_height.map(|px: Px| px.to_f32()),
             },
         );
 
-        Ok(ComputedData {
+        Ok(LayoutResult::new(ComputedData {
             width: info.size[0].into(),
             height: info.size[1].into(),
-        })
+        }))
     }
 }
 
 impl RenderPolicy for TextLayout {
-    fn record(&self, input: &RenderInput<'_>) {
-        let metadata = input.metadata_mut();
-        let computed = metadata
-            .computed_data()
-            .expect("ComputedData must exist during record");
-        drop(metadata);
+    fn record(&self, input: &mut RenderInput<'_>) {
+        let computed = {
+            let metadata = input.metadata_mut();
+            metadata
+                .computed_data()
+                .expect("ComputedData must exist during record")
+        };
 
         // Use TextData::get() with the computed bounds to retrieve cached data
         let text_data = TextData::get(

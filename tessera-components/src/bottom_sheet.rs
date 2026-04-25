@@ -5,11 +5,12 @@
 //! Used to show contextual information or actions in a modal sheet.
 use std::time::Duration;
 
+use tessera_foundation::gesture::DragRecognizer;
 use tessera_ui::{
-    Callback, CallbackWith, Color, ComputedData, Constraint, DimensionValue, Dp, FocusScopeNode,
-    FocusTraversalPolicy, MeasurementError, Modifier, Px, PxPosition, RenderSlot, State,
-    current_frame_nanos,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, layout_primitive},
+    AxisConstraint, Callback, CallbackWith, Color, Constraint, Dp, FocusScopeNode,
+    FocusTraversalPolicy, LayoutResult, MeasurementError, Modifier, Px, PxPosition, RenderSlot,
+    State, current_frame_nanos,
+    layout::{LayoutPolicy, MeasureScope, layout},
     modifier::FocusModifierExt as _,
     provide_context, receive_frame_nanos, remember, tessera, use_context, winit,
 };
@@ -19,7 +20,6 @@ use crate::{
     animation,
     column::column,
     fluid_glass::{GlassBorder, fluid_glass},
-    gesture_recognizer::DragRecognizer,
     modifier::{ModifierExt, with_keyboard_input, with_pointer_input},
     nested_scroll::{
         NestedScrollConnection, PostScrollInput, PreFlingInput, PreScrollInput, ScrollDelta,
@@ -52,7 +52,7 @@ pub enum BottomSheetStyle {
 /// Controller for [`bottom_sheet_provider`], managing open/closed state.
 ///
 /// This controller can be created by the application and passed through
-/// [`bottom_sheet_provider().controller(...)`]. It is used to control the
+/// `bottom_sheet_provider().controller(...)`. It is used to control the
 /// visibility of the sheet programmatically.
 #[derive(Clone, PartialEq)]
 pub struct BottomSheetController {
@@ -234,8 +234,6 @@ fn render_glass_scrim(on_close_request: Callback, progress: f32, is_open: bool) 
         .on_click_shared(on_close_request)
         .tint_color(Color::TRANSPARENT)
         .modifier(Modifier::new().fill_max_size())
-        .dispersion_height(Dp(0.0))
-        .refraction_height(Dp(0.0))
         .block_input(true)
         .blur_radius(Dp(blur_radius as f64))
         .border(GlassBorder::new(Px(0)))
@@ -246,7 +244,7 @@ fn render_glass_scrim(on_close_request: Callback, progress: f32, is_open: bool) 
             bottom_left: RoundedCorner::manual(Dp(0.0), 3.0),
         })
         .noise_amount(0.0)
-        .with_child(|| {});
+        .child(|| {});
 }
 
 fn render_material_scrim(on_close_request: Callback, progress: f32, is_open: bool) {
@@ -262,7 +260,7 @@ fn render_material_scrim(on_close_request: Callback, progress: f32, is_open: boo
         .on_click_shared(on_close_request)
         .modifier(Modifier::new().fill_max_size())
         .block_input(true)
-        .with_child(|| {});
+        .child(|| {});
 }
 
 /// Render scrim according to configured style.
@@ -344,23 +342,28 @@ fn handle_drag_gestures(
 /// Place bottom sheet if present. Extracted to reduce complexity of the parent
 /// function.
 fn place_bottom_sheet_if_present(
-    input: &LayoutInput<'_>,
-    output: &mut LayoutOutput<'_>,
+    input: &MeasureScope<'_>,
+    result: &mut LayoutResult,
     is_open: bool,
     drag_offset: f32,
     progress: f32,
 ) {
-    if input.children_ids().len() <= 2 {
+    let children = input.children();
+    if children.len() <= 2 {
         return;
     }
 
-    let bottom_sheet_id = input.children_ids()[2];
+    let bottom_sheet = children[2];
 
-    let parent_width = input.parent_constraint().width().get_max().unwrap_or(Px(0));
+    let parent_width = input
+        .parent_constraint()
+        .width()
+        .resolve_max()
+        .unwrap_or(Px(0));
     let parent_height = input
         .parent_constraint()
         .height()
-        .get_max()
+        .resolve_max()
         .unwrap_or(Px(0));
 
     // M3 Spec: Max width 640dp.
@@ -381,15 +384,9 @@ fn place_bottom_sheet_if_present(
     };
     let max_height = (parent_height - top_margin).max(Px(0));
 
-    let constraint = Constraint {
-        width: DimensionValue::Fixed(sheet_width),
-        height: DimensionValue::Wrap {
-            min: None,
-            max: Some(max_height),
-        },
-    };
+    let constraint = Constraint::new(sheet_width, AxisConstraint::new(Px::ZERO, Some(max_height)));
 
-    let child_size = match input.measure_child(bottom_sheet_id, &constraint) {
+    let child_size = match bottom_sheet.measure(&constraint) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -408,17 +405,21 @@ fn place_bottom_sheet_if_present(
         Px(0)
     };
 
-    output.place_child(bottom_sheet_id, PxPosition::new(x, Px(y)));
+    result.place_child(bottom_sheet, PxPosition::new(x, Px(y)));
 }
 #[tessera]
-fn bottom_sheet_drag_handle(controller: Option<State<BottomSheetController>>, on_close: Callback) {
+fn bottom_sheet_drag_handle(
+    controller: Option<State<BottomSheetController>>,
+    on_close: Option<Callback>,
+) {
+    let on_close = on_close.unwrap_or_default();
     let controller = controller.expect("bottom_sheet_drag_handle requires controller");
     let drag_recognizer = remember(DragRecognizer::default);
     let modifier = with_pointer_input(Modifier::new(), move |mut input| {
         handle_drag_gestures(controller, drag_recognizer, &mut input, &on_close);
     });
 
-    layout_primitive().modifier(modifier).child(|| {
+    layout().modifier(modifier).child(|| {
         column()
             .modifier(Modifier::new().fill_max_width())
             .cross_axis_alignment(CrossAxisAlignment::Center)
@@ -434,9 +435,9 @@ fn bottom_sheet_drag_handle(controller: Option<State<BottomSheetController>>, on
                             .with_alpha(0.4)
                             .into(),
                     )
-                    .shape(Shape::capsule())
+                    .shape(Shape::CAPSULE)
                     .modifier(Modifier::new().size(Dp(32.0), Dp(4.0)))
-                    .with_child(|| {});
+                    .child(|| {});
                 spacer().modifier(Modifier::new().height(Dp(22.0)));
             });
     });
@@ -491,12 +492,15 @@ fn build_bottom_sheet_nested_scroll_connection(
 
 #[tessera]
 fn bottom_sheet_content_wrapper(
-    style: BottomSheetStyle,
+    style: Option<BottomSheetStyle>,
     bottom_sheet_content: Option<RenderSlot>,
     controller: Option<State<BottomSheetController>>,
-    on_close: Callback,
-    just_opened: bool,
+    on_close: Option<Callback>,
+    just_opened: Option<bool>,
 ) {
+    let style = style.unwrap_or_default();
+    let on_close = on_close.unwrap_or_default();
+    let just_opened = just_opened.unwrap_or(false);
     let controller = controller.expect("bottom_sheet_content_wrapper requires controller");
     let bottom_sheet_content =
         bottom_sheet_content.expect("bottom_sheet_content_wrapper requires sheet content");
@@ -517,7 +521,7 @@ fn bottom_sheet_content_wrapper(
     if just_opened {
         focus_scope.restore_focus();
     }
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let bottom_sheet_content = bottom_sheet_content;
         let nested_scroll_connection = nested_scroll_connection.clone();
         let content_wrapper = move || {
@@ -552,10 +556,9 @@ fn bottom_sheet_content_wrapper(
                     })
                     .tint_color(Color::WHITE.with_alpha(0.4))
                     .modifier(Modifier::new().fill_max_width())
-                    .refraction_amount(32.0)
                     .blur_radius(Dp(5.0))
                     .block_input(true)
-                    .with_child(content_wrapper);
+                    .child(content_wrapper);
             }
             BottomSheetStyle::Material => {
                 surface()
@@ -575,7 +578,7 @@ fn bottom_sheet_content_wrapper(
                     })
                     .modifier(Modifier::new().fill_max_width())
                     .block_input(true)
-                    .with_child(content_wrapper);
+                    .child(content_wrapper);
             }
         }
     });
@@ -624,13 +627,15 @@ fn bottom_sheet_content_wrapper(
 #[tessera]
 pub fn bottom_sheet_provider(
     on_close_request: Option<Callback>,
-    style: BottomSheetStyle,
-    is_open: bool,
+    style: Option<BottomSheetStyle>,
+    is_open: Option<bool>,
     controller: Option<State<BottomSheetController>>,
     main_content: Option<RenderSlot>,
     bottom_sheet_content: Option<RenderSlot>,
 ) {
     let on_close_request = on_close_request.unwrap_or_default();
+    let style = style.unwrap_or_default();
+    let is_open = is_open.unwrap_or(false);
     let main_content = main_content.unwrap_or_else(RenderSlot::empty);
     let bottom_sheet_content = bottom_sheet_content.unwrap_or_else(RenderSlot::empty);
     let external_controller = controller;
@@ -685,7 +690,7 @@ pub fn bottom_sheet_provider(
 
     let progress = calc_progress_from_timer(timer_opt);
 
-    layout_primitive()
+    layout()
         .layout_policy(BottomSheetLayout {
             progress,
             is_open,
@@ -714,23 +719,28 @@ struct BottomSheetLayout {
 }
 
 impl LayoutPolicy for BottomSheetLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let main_content_id = input.children_ids()[0];
-        let main_content_size = input.measure_child_in_parent_constraint(main_content_id)?;
-        output.place_child(main_content_id, PxPosition::new(Px(0), Px(0)));
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let child_constraint = input.parent_constraint().without_min();
+        let main_content = children[0];
+        let main_content_size = main_content.measure(&child_constraint)?;
+        result.place_child(main_content, PxPosition::new(Px(0), Px(0)));
 
-        if input.children_ids().len() > 1 {
-            let scrim_id = input.children_ids()[1];
-            input.measure_child_in_parent_constraint(scrim_id)?;
-            output.place_child(scrim_id, PxPosition::new(Px(0), Px(0)));
+        if children.len() > 1 {
+            let scrim = children[1];
+            scrim.measure(&child_constraint)?;
+            result.place_child(scrim, PxPosition::new(Px(0), Px(0)));
         }
 
-        place_bottom_sheet_if_present(input, output, self.is_open, self.drag_offset, self.progress);
+        place_bottom_sheet_if_present(
+            input,
+            &mut result,
+            self.is_open,
+            self.drag_offset,
+            self.progress,
+        );
 
-        Ok(main_content_size)
+        Ok(result.with_size(main_content_size.size()))
     }
 }

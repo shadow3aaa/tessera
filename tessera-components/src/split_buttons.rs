@@ -5,9 +5,11 @@
 //! Pair a primary action with a related secondary action or menu.
 
 use tessera_ui::{
-    Callback, Color, ComputedData, Constraint, DimensionValue, Dp, LayoutInput, LayoutOutput,
-    LayoutPolicy, MeasurementError, Modifier, Px, PxPosition, RenderSlot, accesskit::Role,
-    layout::layout_primitive, tessera, use_context,
+    AxisConstraint, Callback, Color, ComputedData, Constraint, Dp, LayoutPolicy, LayoutResult,
+    MeasurementError, Modifier, Px, PxPosition, RenderSlot,
+    accesskit::Role,
+    layout::{MeasureScope, layout},
+    tessera, use_context,
 };
 
 use crate::{
@@ -97,7 +99,6 @@ impl SplitButtonColors {
 /// Defaults for split buttons.
 pub struct SplitButtonDefaults;
 
-#[allow(missing_docs)]
 impl SplitButtonDefaults {
     /// Minimum width of split button items.
     pub const MIN_WIDTH: Dp = Dp(48.0);
@@ -266,48 +267,8 @@ impl SplitButtonDefaults {
     }
 }
 
-fn default_split_button_layout_modifier() -> Modifier {
-    Modifier::new().constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP))
-}
-
-#[allow(missing_docs)]
-impl SplitButtonLayoutBuilder {
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    pub fn spacing(mut self, spacing: Dp) -> Self {
-        self.props.spacing = Some(spacing);
-        self
-    }
-}
-
 #[allow(missing_docs)]
 impl SplitLeadingButtonBuilder {
-    pub fn enabled(mut self, enabled: bool) -> Self {
-        self.props.enabled = Some(enabled);
-        self
-    }
-
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    pub fn accessibility_label(mut self, accessibility_label: impl Into<String>) -> Self {
-        self.props.accessibility_label = Some(accessibility_label.into());
-        self
-    }
-
-    pub fn accessibility_description(
-        mut self,
-        accessibility_description: impl Into<String>,
-    ) -> Self {
-        self.props.accessibility_description = Some(accessibility_description.into());
-        self
-    }
-
     pub fn filled(self) -> Self {
         self.variant(SplitButtonVariant::Filled).enabled(true)
     }
@@ -327,29 +288,6 @@ impl SplitLeadingButtonBuilder {
 
 #[allow(missing_docs)]
 impl SplitTrailingButtonBuilder {
-    pub fn enabled(mut self, enabled: bool) -> Self {
-        self.props.enabled = Some(enabled);
-        self
-    }
-
-    pub fn modifier(mut self, modifier: Modifier) -> Self {
-        self.props.modifier = Some(modifier);
-        self
-    }
-
-    pub fn accessibility_label(mut self, accessibility_label: impl Into<String>) -> Self {
-        self.props.accessibility_label = Some(accessibility_label.into());
-        self
-    }
-
-    pub fn accessibility_description(
-        mut self,
-        accessibility_description: impl Into<String>,
-    ) -> Self {
-        self.props.accessibility_description = Some(accessibility_description.into());
-        self
-    }
-
     pub fn filled(self) -> Self {
         self.variant(SplitButtonVariant::Filled).enabled(true)
     }
@@ -417,16 +355,16 @@ impl SplitTrailingButtonBuilder {
 /// ```
 #[tessera]
 pub fn split_button_layout(
-    #[prop(skip_setter)] modifier: Option<Modifier>,
-    #[prop(skip_setter)] spacing: Option<Dp>,
+    modifier: Option<Modifier>,
+    spacing: Option<Dp>,
     leading_button: Option<RenderSlot>,
     trailing_button: Option<RenderSlot>,
 ) {
-    let modifier = modifier.unwrap_or_else(default_split_button_layout_modifier);
+    let modifier = modifier.unwrap_or_default();
     let leading_button = leading_button.unwrap_or_else(RenderSlot::empty);
     let trailing_button = trailing_button.unwrap_or_else(RenderSlot::empty);
     let spacing = Px::from(spacing.unwrap_or(SplitButtonDefaults::SPACING)).max(Px::ZERO);
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(SplitButtonLayoutPolicy { spacing })
         .child(move || {
@@ -478,15 +416,17 @@ pub fn split_button_layout(
 /// ```
 #[tessera]
 pub fn split_leading_button(
-    variant: SplitButtonVariant,
-    size: SplitButtonSize,
-    #[prop(skip_setter)] enabled: Option<bool>,
-    #[prop(skip_setter)] modifier: Option<Modifier>,
+    variant: Option<SplitButtonVariant>,
+    size: Option<SplitButtonSize>,
+    enabled: Option<bool>,
+    modifier: Option<Modifier>,
     on_click: Option<Callback>,
-    #[prop(skip_setter)] accessibility_label: Option<String>,
-    #[prop(skip_setter)] accessibility_description: Option<String>,
+    #[prop(into)] accessibility_label: Option<String>,
+    #[prop(into)] accessibility_description: Option<String>,
     content: Option<RenderSlot>,
 ) {
+    let variant = variant.unwrap_or_default();
+    let size = size.unwrap_or_default();
     let content = content.unwrap_or_else(RenderSlot::empty);
     render_split_button(
         SplitButtonItemArgs::leading(
@@ -548,15 +488,17 @@ pub fn split_leading_button(
 /// ```
 #[tessera]
 pub fn split_trailing_button(
-    variant: SplitButtonVariant,
-    size: SplitButtonSize,
-    #[prop(skip_setter)] enabled: Option<bool>,
-    #[prop(skip_setter)] modifier: Option<Modifier>,
+    variant: Option<SplitButtonVariant>,
+    size: Option<SplitButtonSize>,
+    enabled: Option<bool>,
+    modifier: Option<Modifier>,
     on_click: Option<Callback>,
-    #[prop(skip_setter)] accessibility_label: Option<String>,
-    #[prop(skip_setter)] accessibility_description: Option<String>,
+    #[prop(into)] accessibility_label: Option<String>,
+    #[prop(into)] accessibility_description: Option<String>,
     content: Option<RenderSlot>,
 ) {
+    let variant = variant.unwrap_or_default();
+    let size = size.unwrap_or_default();
     let content = content.unwrap_or_else(RenderSlot::empty);
     render_split_button(
         SplitButtonItemArgs::trailing(
@@ -648,109 +590,61 @@ struct SplitButtonLayoutPolicy {
 }
 
 impl LayoutPolicy for SplitButtonLayoutPolicy {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let child_ids = input.children_ids();
-        if child_ids.len() != 2 {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        if children.len() != 2 {
             return Err(MeasurementError::MeasureFnFailed(
                 "SplitButtonLayout requires exactly two children.".to_string(),
             ));
         }
 
-        let layout_constraint = Constraint::new(
-            input.parent_constraint().width(),
-            input.parent_constraint().height(),
-        );
+        let layout_constraint = *input.parent_constraint().as_ref();
         let child_constraint = Constraint::new(
-            DimensionValue::Wrap {
-                min: None,
-                max: layout_constraint.width.get_max(),
-            },
-            DimensionValue::Wrap {
-                min: None,
-                max: layout_constraint.height.get_max(),
-            },
+            AxisConstraint::new(Px::ZERO, layout_constraint.width.resolve_max()),
+            AxisConstraint::new(Px::ZERO, layout_constraint.height.resolve_max()),
         );
 
-        let leading_id = child_ids[0];
-        let leading_size = input
-            .measure_children(vec![(leading_id, child_constraint)])?
-            .get(&leading_id)
-            .copied()
-            .unwrap_or(ComputedData::ZERO);
+        let leading = children[0];
+        let leading_size = leading.measure(&child_constraint)?.size();
 
-        let trailing_id = child_ids[1];
+        let trailing = children[1];
         let trailing_max_width = layout_constraint
             .width
-            .get_max()
+            .resolve_max()
             .map(|max| (max - leading_size.width - self.spacing).max(Px::ZERO));
         let trailing_constraint = Constraint::new(
-            DimensionValue::Wrap {
-                min: None,
-                max: trailing_max_width,
-            },
-            DimensionValue::Fixed(leading_size.height),
+            AxisConstraint::new(Px::ZERO, trailing_max_width),
+            leading_size.height,
         );
-        let trailing_size = input
-            .measure_children(vec![(trailing_id, trailing_constraint)])?
-            .get(&trailing_id)
-            .copied()
-            .unwrap_or(ComputedData::ZERO);
+        let trailing_size = trailing.measure(&trailing_constraint)?.size();
 
         let content_width = leading_size.width + trailing_size.width + self.spacing;
         let content_height = leading_size.height.max(trailing_size.height);
         let final_width = resolve_dimension(layout_constraint.width, content_width);
         let final_height = resolve_dimension(layout_constraint.height, content_height);
 
-        output.place_child(
-            leading_id,
+        result.place_child(
+            leading,
             PxPosition::new(Px::ZERO, center_offset(leading_size.height, final_height)),
         );
-        output.place_child(
-            trailing_id,
+        result.place_child(
+            trailing,
             PxPosition::new(
                 leading_size.width + self.spacing,
                 center_offset(trailing_size.height, final_height),
             ),
         );
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: final_width,
             height: final_height,
-        })
+        }))
     }
 }
 
-fn resolve_dimension(constraint: DimensionValue, content: Px) -> Px {
-    match constraint {
-        DimensionValue::Fixed(value) => value,
-        DimensionValue::Fill { min, max } => {
-            if let Some(max) = max {
-                let mut value = max;
-                if let Some(min) = min {
-                    value = value.max(min);
-                }
-                value
-            } else {
-                panic!(
-                    "Fill size without max constraint is not supported in split button layouts."
-                );
-            }
-        }
-        DimensionValue::Wrap { min, max } => {
-            let mut value = content;
-            if let Some(min) = min {
-                value = value.max(min);
-            }
-            if let Some(max) = max {
-                value = value.min(max);
-            }
-            value
-        }
-    }
+fn resolve_dimension(constraint: AxisConstraint, content: Px) -> Px {
+    constraint.clamp(content)
 }
 
 fn center_offset(child: Px, container: Px) -> Px {
@@ -868,10 +762,10 @@ fn render_split_button(args: SplitButtonItemArgs, content: RenderSlot) {
         accessibility_label,
         accessibility_description,
     })
-    .with_child(move || {
+    .child(move || {
         let content = content;
         provide_text_style(typography.label_large, move || {
-            layout_primitive()
+            layout()
                 .modifier(Modifier::new().padding(content_padding))
                 .child(move || {
                     content.render();

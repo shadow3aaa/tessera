@@ -7,10 +7,10 @@
 use std::time::Duration;
 
 use tessera_ui::{
-    Callback, CallbackWith, Color, ComputedData, Constraint, DimensionValue, Dp, FocusScopeNode,
-    FocusTraversalPolicy, MeasurementError, Modifier, Px, PxPosition, RenderSlot, State,
+    Callback, CallbackWith, Color, Constraint, Dp, FocusScopeNode, FocusTraversalPolicy,
+    LayoutResult, MeasurementError, Modifier, Px, PxPosition, RenderSlot, State,
     current_frame_nanos,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, layout_primitive},
+    layout::{LayoutPolicy, MeasureScope, layout},
     modifier::FocusModifierExt as _,
     provide_context, receive_frame_nanos, remember, tessera, use_context, winit,
 };
@@ -29,7 +29,7 @@ use crate::{
 
 const ANIM_TIME: Duration = Duration::from_millis(300);
 const SCRIM_ALPHA: f32 = 0.32;
-const MAX_SHEET_WIDTH: Dp = Dp(360.0);
+const MAX_SHEET_WIDTH: Dp = Dp(250.0);
 const CORNER_RADIUS: Dp = Dp(16.0);
 const MODAL_ELEVATION: Dp = Dp(1.0);
 
@@ -51,83 +51,6 @@ pub enum SideSheetPosition {
     Start,
     /// Attach to the end (right) edge.
     End,
-}
-
-impl ModalSideSheetProviderBuilder {
-    /// Sets an external side sheet controller.
-    pub fn controller(mut self, controller: State<SideSheetController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-}
-
-impl StandardSideSheetProviderBuilder {
-    /// Sets an external side sheet controller.
-    pub fn controller(mut self, controller: State<SideSheetController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-}
-
-impl SideSheetProviderInnerBuilder {
-    fn on_close_request_handle(mut self, on_close_request: Callback) -> Self {
-        self.props.on_close_request = on_close_request;
-        self
-    }
-
-    fn controller_state(mut self, controller: Option<State<SideSheetController>>) -> Self {
-        self.props.controller = controller;
-        self
-    }
-
-    fn main_content_slot(mut self, main_content: RenderSlot) -> Self {
-        self.props.main_content = Some(main_content);
-        self
-    }
-
-    fn side_sheet_content_slot(mut self, side_sheet_content: RenderSlot) -> Self {
-        self.props.side_sheet_content = Some(side_sheet_content);
-        self
-    }
-}
-
-impl SideSheetProviderRenderBuilder {
-    fn on_close_request_handle(mut self, on_close_request: Callback) -> Self {
-        self.props.on_close_request = Some(on_close_request);
-        self
-    }
-
-    fn controller_state(mut self, controller: State<SideSheetController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-
-    fn main_content_slot(mut self, main_content: RenderSlot) -> Self {
-        self.props.main_content = Some(main_content);
-        self
-    }
-
-    fn side_sheet_content_slot(mut self, side_sheet_content: RenderSlot) -> Self {
-        self.props.side_sheet_content = Some(side_sheet_content);
-        self
-    }
-}
-
-impl SideSheetContentWrapperBuilder {
-    fn controller_state(mut self, controller: State<SideSheetController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
-
-    fn on_close_request_handle(mut self, on_close_request: Callback) -> Self {
-        self.props.on_close_request = Some(on_close_request);
-        self
-    }
-
-    fn content_slot(mut self, content: RenderSlot) -> Self {
-        self.props.content = Some(content);
-        self
-    }
 }
 
 /// Controller for side sheet providers, managing open/closed state.
@@ -343,7 +266,7 @@ fn render_modal_scrim(on_close_request: Callback, progress: f32, is_open: bool) 
         .on_click_shared(on_close_request)
         .modifier(Modifier::new().fill_max_size())
         .block_input(true)
-        .with_child(|| {});
+        .child(|| {});
 }
 
 /// Render scrim according to configured type.
@@ -359,7 +282,7 @@ fn render_scrim(
             surface()
                 .style(Color::TRANSPARENT.into())
                 .modifier(Modifier::new().fill_max_size())
-                .with_child(|| {});
+                .child(|| {});
         }
     }
 }
@@ -459,23 +382,28 @@ fn build_side_sheet_nested_scroll_connection(
 /// Place side sheet if present. Extracted to reduce complexity of the parent
 /// function.
 fn place_side_sheet_if_present(
-    input: &LayoutInput<'_>,
-    output: &mut LayoutOutput<'_>,
+    input: &MeasureScope<'_>,
+    result: &mut LayoutResult,
     is_open: bool,
     progress: f32,
     position: SideSheetPosition,
     drag_offset: f32,
 ) {
-    if input.children_ids().len() <= 2 {
+    let children = input.children();
+    if children.len() <= 2 {
         return;
     }
 
-    let side_sheet_id = input.children_ids()[2];
-    let parent_width = input.parent_constraint().width().get_max().unwrap_or(Px(0));
+    let side_sheet = children[2];
+    let parent_width = input
+        .parent_constraint()
+        .width()
+        .resolve_max()
+        .unwrap_or(Px(0));
     let parent_height = input
         .parent_constraint()
         .height()
-        .get_max()
+        .resolve_max()
         .unwrap_or(Px(0));
 
     let max_width_px = MAX_SHEET_WIDTH.to_px();
@@ -485,12 +413,9 @@ fn place_side_sheet_if_present(
         parent_width
     };
 
-    let constraint = Constraint {
-        width: DimensionValue::Fixed(sheet_width),
-        height: DimensionValue::Fixed(parent_height),
-    };
+    let constraint = Constraint::exact(sheet_width, parent_height);
 
-    let child_size = match input.measure_child(side_sheet_id, &constraint) {
+    let child_size = match side_sheet.measure(&constraint) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -503,7 +428,7 @@ fn place_side_sheet_if_present(
         position,
         drag_offset,
     );
-    output.place_child(side_sheet_id, PxPosition::new(Px(x), Px(0)));
+    result.place_child(side_sheet, PxPosition::new(Px(x), Px(0)));
 }
 
 /// # modal_side_sheet_provider
@@ -546,20 +471,25 @@ fn place_side_sheet_if_present(
 #[tessera]
 pub fn modal_side_sheet_provider(
     on_close_request: Option<Callback>,
-    position: SideSheetPosition,
-    is_open: bool,
-    #[prop(skip_setter)] controller: Option<State<SideSheetController>>,
+    position: Option<SideSheetPosition>,
+    is_open: Option<bool>,
+    controller: Option<State<SideSheetController>>,
     main_content: Option<RenderSlot>,
     side_sheet_content: Option<RenderSlot>,
 ) {
-    side_sheet_provider_inner()
+    let position = position.unwrap_or_default();
+    let is_open = is_open.unwrap_or(false);
+    let mut builder = side_sheet_provider_inner()
         .sheet_type(SideSheetType::Modal)
-        .on_close_request_handle(on_close_request.unwrap_or_default())
+        .on_close_request_shared(on_close_request.unwrap_or_default())
         .position(position)
         .is_open(is_open)
-        .controller_state(controller)
-        .main_content_slot(main_content.unwrap_or_else(RenderSlot::empty))
-        .side_sheet_content_slot(side_sheet_content.unwrap_or_else(RenderSlot::empty));
+        .main_content_shared(main_content.unwrap_or_else(RenderSlot::empty))
+        .side_sheet_content_shared(side_sheet_content.unwrap_or_else(RenderSlot::empty));
+    if let Some(controller) = controller {
+        builder = builder.controller(controller);
+    }
+    drop(builder);
 }
 
 /// # standard_side_sheet_provider
@@ -603,32 +533,41 @@ pub fn modal_side_sheet_provider(
 #[tessera]
 pub fn standard_side_sheet_provider(
     on_close_request: Option<Callback>,
-    position: SideSheetPosition,
-    is_open: bool,
-    #[prop(skip_setter)] controller: Option<State<SideSheetController>>,
-    main_content: Option<RenderSlot>,
-    side_sheet_content: Option<RenderSlot>,
-) {
-    side_sheet_provider_inner()
-        .sheet_type(SideSheetType::Standard)
-        .on_close_request_handle(on_close_request.unwrap_or_default())
-        .position(position)
-        .is_open(is_open)
-        .controller_state(controller)
-        .main_content_slot(main_content.unwrap_or_else(RenderSlot::empty))
-        .side_sheet_content_slot(side_sheet_content.unwrap_or_else(RenderSlot::empty));
-}
-
-#[tessera]
-fn side_sheet_provider_inner(
-    sheet_type: SideSheetType,
-    on_close_request: Callback,
-    position: SideSheetPosition,
-    is_open: bool,
+    position: Option<SideSheetPosition>,
+    is_open: Option<bool>,
     controller: Option<State<SideSheetController>>,
     main_content: Option<RenderSlot>,
     side_sheet_content: Option<RenderSlot>,
 ) {
+    let position = position.unwrap_or_default();
+    let is_open = is_open.unwrap_or(false);
+    let mut builder = side_sheet_provider_inner()
+        .sheet_type(SideSheetType::Standard)
+        .on_close_request_shared(on_close_request.unwrap_or_default())
+        .position(position)
+        .is_open(is_open)
+        .main_content_shared(main_content.unwrap_or_else(RenderSlot::empty))
+        .side_sheet_content_shared(side_sheet_content.unwrap_or_else(RenderSlot::empty));
+    if let Some(controller) = controller {
+        builder = builder.controller(controller);
+    }
+    drop(builder);
+}
+
+#[tessera]
+fn side_sheet_provider_inner(
+    sheet_type: Option<SideSheetType>,
+    on_close_request: Option<Callback>,
+    position: Option<SideSheetPosition>,
+    is_open: Option<bool>,
+    controller: Option<State<SideSheetController>>,
+    main_content: Option<RenderSlot>,
+    side_sheet_content: Option<RenderSlot>,
+) {
+    let sheet_type = sheet_type.unwrap_or(SideSheetType::Modal);
+    let on_close_request = on_close_request.unwrap_or_default();
+    let position = position.unwrap_or_default();
+    let is_open = is_open.unwrap_or(false);
     let main_content = main_content.unwrap_or_else(RenderSlot::empty);
     let side_sheet_content = side_sheet_content.unwrap_or_else(RenderSlot::empty);
     let external_controller = controller;
@@ -647,22 +586,24 @@ fn side_sheet_provider_inner(
 
     side_sheet_provider_render()
         .sheet_type(sheet_type)
-        .on_close_request_handle(on_close_request)
+        .on_close_request_shared(on_close_request)
         .position(position)
-        .controller_state(controller)
-        .main_content_slot(main_content)
-        .side_sheet_content_slot(side_sheet_content);
+        .controller(controller)
+        .main_content_shared(main_content)
+        .side_sheet_content_shared(side_sheet_content);
 }
 
 #[tessera]
 fn side_sheet_provider_render(
-    sheet_type: SideSheetType,
+    sheet_type: Option<SideSheetType>,
     on_close_request: Option<Callback>,
-    position: SideSheetPosition,
-    #[prop(skip_setter)] controller: Option<State<SideSheetController>>,
+    position: Option<SideSheetPosition>,
+    controller: Option<State<SideSheetController>>,
     main_content: Option<RenderSlot>,
     side_sheet_content: Option<RenderSlot>,
 ) {
+    let sheet_type = sheet_type.unwrap_or(SideSheetType::Modal);
+    let position = position.unwrap_or_default();
     let on_close_request = on_close_request.unwrap_or_default();
     let controller = controller.expect("side_sheet_provider_render requires controller");
     let main_content = main_content.unwrap_or_else(RenderSlot::empty);
@@ -697,13 +638,11 @@ fn side_sheet_provider_render(
         });
     }
 
-    if !(is_open || is_animating) {
-        return;
-    }
+    let show_side_sheet = is_open || is_animating;
 
     let progress = calc_progress_from_timer(timer_opt);
 
-    layout_primitive()
+    layout()
         .layout_policy(SideSheetLayout {
             progress,
             is_open,
@@ -714,27 +653,32 @@ fn side_sheet_provider_render(
             let side_sheet_content = side_sheet_content;
             main_content.render();
 
-            render_scrim(sheet_type, on_close_request, progress, is_open);
+            if show_side_sheet {
+                render_scrim(sheet_type, on_close_request, progress, is_open);
 
-            side_sheet_content_wrapper()
-                .sheet_type(sheet_type)
-                .position(position)
-                .controller_state(controller)
-                .on_close_request_handle(on_close_request)
-                .just_opened(just_opened)
-                .content_slot(side_sheet_content);
+                side_sheet_content_wrapper()
+                    .sheet_type(sheet_type)
+                    .position(position)
+                    .controller(controller)
+                    .on_close_request_shared(on_close_request)
+                    .just_opened(just_opened)
+                    .content_shared(side_sheet_content);
+            }
         });
 }
 
 #[tessera]
 fn side_sheet_content_wrapper(
-    sheet_type: SideSheetType,
-    position: SideSheetPosition,
-    #[prop(skip_setter)] controller: Option<State<SideSheetController>>,
+    sheet_type: Option<SideSheetType>,
+    position: Option<SideSheetPosition>,
+    controller: Option<State<SideSheetController>>,
     on_close_request: Option<Callback>,
-    just_opened: bool,
+    just_opened: Option<bool>,
     content: Option<RenderSlot>,
 ) {
+    let sheet_type = sheet_type.unwrap_or(SideSheetType::Modal);
+    let position = position.unwrap_or_default();
+    let just_opened = just_opened.unwrap_or(false);
     let controller = controller.expect("side_sheet_content_wrapper requires controller");
     let on_close_request = on_close_request.unwrap_or_default();
     let content = content.expect("side_sheet_content_wrapper requires content");
@@ -763,7 +707,7 @@ fn side_sheet_content_wrapper(
     if just_opened {
         focus_scope.restore_focus();
     }
-    layout_primitive().modifier(modifier).child(move || {
+    layout().modifier(modifier).child(move || {
         let content = content;
         if is_modal {
             surface()
@@ -772,7 +716,7 @@ fn side_sheet_content_wrapper(
                 .shape(sheet_shape(position))
                 .modifier(Modifier::new().fill_max_height())
                 .block_input(true)
-                .with_child(move || {
+                .child(move || {
                     let content = content;
                     let parent_nested_scroll =
                         use_context::<NestedScrollConnection>().map(|context| context.get());
@@ -782,7 +726,7 @@ fn side_sheet_content_wrapper(
                         position,
                         parent_nested_scroll,
                     );
-                    layout_primitive()
+                    layout()
                         .modifier(Modifier::new().padding_all(Dp(16.0)))
                         .child(move || {
                             let content = content;
@@ -800,7 +744,7 @@ fn side_sheet_content_wrapper(
                 .shape(sheet_shape(position))
                 .modifier(Modifier::new().fill_max_height())
                 .block_input(true)
-                .with_child(move || {
+                .child(move || {
                     let content = content;
                     let parent_nested_scroll =
                         use_context::<NestedScrollConnection>().map(|context| context.get());
@@ -810,7 +754,7 @@ fn side_sheet_content_wrapper(
                         position,
                         parent_nested_scroll,
                     );
-                    layout_primitive()
+                    layout()
                         .modifier(Modifier::new().padding_all(Dp(16.0)))
                         .child(move || {
                             let content = content;
@@ -835,30 +779,29 @@ struct SideSheetLayout {
 }
 
 impl LayoutPolicy for SideSheetLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let main_content_id = input.children_ids()[0];
-        let main_content_size = input.measure_child_in_parent_constraint(main_content_id)?;
-        output.place_child(main_content_id, PxPosition::new(Px(0), Px(0)));
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let child_constraint = input.parent_constraint().without_min();
+        let main_content = children[0];
+        let main_content_size = main_content.measure(&child_constraint)?;
+        result.place_child(main_content, PxPosition::new(Px(0), Px(0)));
 
-        if input.children_ids().len() > 1 {
-            let scrim_id = input.children_ids()[1];
-            input.measure_child_in_parent_constraint(scrim_id)?;
-            output.place_child(scrim_id, PxPosition::new(Px(0), Px(0)));
+        if children.len() > 1 {
+            let scrim = children[1];
+            scrim.measure(&child_constraint)?;
+            result.place_child(scrim, PxPosition::new(Px(0), Px(0)));
         }
 
         place_side_sheet_if_present(
             input,
-            output,
+            &mut result,
             self.is_open,
             self.progress,
             self.position,
             self.drag_offset,
         );
 
-        Ok(main_content_size)
+        Ok(result.with_size(main_content_size.size()))
     }
 }

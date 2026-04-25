@@ -7,11 +7,14 @@
 
 use std::{any::Any, marker::PhantomData, ptr, sync::Arc};
 
-use crate::runtime::{
-    FunctorHandle, invoke_callback_handle, invoke_callback_with_handle, invoke_render_slot_handle,
-    invoke_render_slot_with_handle, remember_callback_handle, remember_callback_with_handle,
-    remember_render_slot_handle, remember_render_slot_with_handle,
-    track_render_slot_read_dependency,
+use crate::{
+    runtime::{
+        FunctorHandle, invoke_callback_handle, invoke_callback_with_handle,
+        invoke_render_slot_handle, invoke_render_slot_with_handle, remember_callback_handle,
+        remember_callback_with_handle, remember_render_slot_handle,
+        remember_render_slot_with_handle, track_render_slot_read_dependency,
+    },
+    tessera,
 };
 
 /// Stable, comparable slot handle for any shared callable trait object.
@@ -286,20 +289,21 @@ impl RenderSlot {
         }
     }
 
-    fn invoke(&self) {
-        match &self.repr {
-            RenderSlotRepr::Empty => {}
-            RenderSlotRepr::Handle(handle) => invoke_render_slot_handle(*handle),
-        }
-    }
-
     /// Execute the render closure.
     pub fn render(&self) {
-        if let RenderSlotRepr::Handle(handle) = self.repr {
-            track_render_slot_read_dependency(handle);
+        match self.repr {
+            RenderSlotRepr::Empty => {}
+            RenderSlotRepr::Handle(handle) => {
+                render_slot_boundary(handle);
+            }
         }
-        self.invoke();
     }
+}
+
+#[tessera(crate)]
+fn render_slot_boundary(handle: FunctorHandle) {
+    track_render_slot_read_dependency(handle);
+    invoke_render_slot_handle(handle);
 }
 
 impl<F> From<F> for RenderSlot
@@ -363,11 +367,19 @@ impl<T> RenderSlotWith<T> {
     /// Execute the render closure with an input value.
     pub fn render(&self, value: T)
     where
-        T: 'static,
+        T: Clone + PartialEq + Send + Sync + 'static,
     {
-        track_render_slot_read_dependency(self.handle);
-        invoke_render_slot_with_handle(self.handle, value)
+        render_slot_with_boundary(self.handle, value);
     }
+}
+
+#[tessera(crate)]
+fn render_slot_with_boundary<T>(handle: FunctorHandle, value: T)
+where
+    T: Clone + PartialEq + Send + Sync + 'static,
+{
+    track_render_slot_read_dependency(handle);
+    invoke_render_slot_with_handle(handle, value)
 }
 
 impl<T, F> From<F> for RenderSlotWith<T>

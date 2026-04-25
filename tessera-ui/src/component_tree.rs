@@ -1,21 +1,13 @@
 mod constraint;
 mod node;
 
-use std::{
-    num::NonZero,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{num::NonZero, sync::Arc};
 
-use dashmap::DashMap;
-use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tracing::{debug, warn};
 
 use crate::{
-    ComputeResourceManager, Px, PxRect,
+    ComputeResourceManager, NodeId, Px, PxRect,
     cursor::{CursorEventContent, PointerChange},
     focus::{
         FocusDirection, FocusHandleId, FocusOwner, PendingFocusCallbackInvocation, bind_focus_owner,
@@ -23,32 +15,33 @@ use crate::{
     layout::{LayoutResult, RenderInput},
     modifier::{
         DrawModifierContent, DrawModifierContext, ImeInputModifierNode, KeyboardInputModifierNode,
-        PointerInputModifierNode,
+        OrderedModifierAction, PointerInputModifierNode,
     },
     px::{PxPosition, PxSize},
     render_graph::{RenderGraph, RenderGraphBuilder},
     runtime::{
-        LayoutDirtyNodes, RuntimePhase, StructureReconcileResult,
+        LayoutDirtyNodes, RuntimePhase, StructureReconcileResult, TesseraRuntime,
         push_current_component_instance_key, push_current_node_with_instance_logic_id, push_phase,
     },
     time::Instant,
 };
 
-pub use constraint::{Constraint, DimensionValue, ParentConstraint};
+pub use constraint::{AxisConstraint, Constraint, ParentConstraint};
 pub use node::{
     ComputedData, ImeInput, ImeInputHandlerFn, ImeRequest, ImeSession, KeyboardInput,
     KeyboardInputHandlerFn, MeasurementError, PointerEventPass, PointerInput,
-    PointerInputHandlerFn, WindowAction,
+    PointerInputHandlerFn,
 };
 
 pub(crate) use node::{
-    ComponentNode, ComponentNodeMetaData, ComponentNodeMetaDatas, ComponentNodeTree,
-    WindowRequests, measure_node, measure_nodes,
+    ComponentNode, ComponentNodeMetaData, ComponentNodeMetaDatas, ComponentNodeTree, NodeRole,
+    WindowRequests, direct_layout_children, measure_node,
 };
 
 #[cfg(feature = "profiling")]
 use crate::profiler::{NodeMeta, Phase as ProfilerPhase, ScopeGuard as ProfilerScopeGuard};
 
+#[derive(Clone)]
 pub(crate) struct LayoutSnapshotEntry {
     pub constraint_key: Constraint,
     pub layout_result: LayoutResult,
@@ -56,43 +49,71 @@ pub(crate) struct LayoutSnapshotEntry {
     pub child_sizes: Vec<ComputedData>,
 }
 
-pub(crate) type LayoutSnapshotMap = DashMap<u64, LayoutSnapshotEntry, FxBuildHasher>;
-
 #[derive(Default)]
-struct LayoutSnapshotStore {
-    entries: LayoutSnapshotMap,
+pub(crate) struct LayoutSnapshotMap {
+    entries: HashMap<u64, LayoutSnapshotEntry>,
 }
 
-thread_local! {
-    static LAYOUT_SNAPSHOT_STORE: LayoutSnapshotStore = LayoutSnapshotStore::default();
+impl LayoutSnapshotMap {
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub(crate) fn remove(&mut self, instance_key: &u64) -> Option<LayoutSnapshotEntry> {
+        self.entries.remove(instance_key)
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        instance_key: u64,
+        entry: LayoutSnapshotEntry,
+    ) -> Option<LayoutSnapshotEntry> {
+        self.entries.insert(instance_key, entry)
+    }
+
+    pub(crate) fn get_cloned(&self, instance_key: &u64) -> Option<LayoutSnapshotEntry> {
+        self.entries.get(instance_key).cloned()
+    }
 }
 
-fn with_layout_snapshot_entries<R>(f: impl FnOnce(&LayoutSnapshotMap) -> R) -> R {
-    LAYOUT_SNAPSHOT_STORE.with(|store| f(&store.entries))
+pub(crate) fn nearest_replay_boundary_instance_key(
+    node_id: NodeId,
+    tree: &ComponentNodeTree,
+) -> u64 {
+    let mut current_id = node_id;
+    let mut fallback = 0;
+
+    loop {
+        let Some(node_ref) = tree.get(current_id) else {
+            return fallback;
+        };
+        let node = node_ref.get();
+        if fallback == 0 {
+            fallback = node.instance_key;
+        }
+        if node.replay.is_some() {
+            return node.instance_key;
+        }
+        let Some(parent_id) = node_ref.parent() else {
+            return fallback;
+        };
+        current_id = parent_id;
+    }
 }
 
 pub(crate) fn clear_layout_snapshots() {
-    with_layout_snapshot_entries(LayoutSnapshotMap::clear);
-}
-
-fn remove_layout_snapshots(keys: &HashSet<u64>) {
-    if keys.is_empty() {
-        return;
-    }
-    with_layout_snapshot_entries(|snapshots| {
-        for key in keys {
-            snapshots.remove(key);
-        }
+    TesseraRuntime::with_mut(|runtime| {
+        runtime.component_tree.clear_layout_snapshots();
     });
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct LayoutContext<'a> {
-    pub snapshots: &'a LayoutSnapshotMap,
+    snapshots: *mut LayoutSnapshotMap,
     pub measure_self_nodes: &'a HashSet<u64>,
     pub placement_self_nodes: &'a HashSet<u64>,
     pub dirty_effective_nodes: &'a HashSet<u64>,
-    pub diagnostics: &'a LayoutDiagnosticsCollector,
+    diagnostics: *mut LayoutDiagnosticsCollector,
 }
 
 #[cfg_attr(not(feature = "profiling"), allow(dead_code))]
@@ -115,64 +136,18 @@ pub struct LayoutFrameDiagnostics {
 
 #[derive(Default)]
 pub(crate) struct LayoutDiagnosticsCollector {
-    measure_node_calls: AtomicU64,
-    cache_hits_direct: AtomicU64,
-    cache_hits_boundary: AtomicU64,
-    cache_miss_no_entry: AtomicU64,
-    cache_miss_constraint: AtomicU64,
-    cache_miss_dirty_self: AtomicU64,
-    cache_miss_child_size: AtomicU64,
-    cache_store_count: AtomicU64,
-    cache_drop_non_cacheable_count: AtomicU64,
+    measure_node_calls: u64,
+    cache_hits_direct: u64,
+    cache_hits_boundary: u64,
+    cache_miss_no_entry: u64,
+    cache_miss_constraint: u64,
+    cache_miss_dirty_self: u64,
+    cache_miss_child_size: u64,
+    cache_store_count: u64,
+    cache_drop_non_cacheable_count: u64,
 }
 
 impl LayoutDiagnosticsCollector {
-    #[inline]
-    pub(crate) fn inc_measure_node_calls(&self) {
-        self.measure_node_calls.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_hit_direct(&self) {
-        self.cache_hits_direct.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_hit_boundary(&self) {
-        self.cache_hits_boundary.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_miss_no_entry(&self) {
-        self.cache_miss_no_entry.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_miss_constraint(&self) {
-        self.cache_miss_constraint.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_miss_dirty_self(&self) {
-        self.cache_miss_dirty_self.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_miss_child_size(&self) {
-        self.cache_miss_child_size.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_store_count(&self) {
-        self.cache_store_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn inc_cache_drop_non_cacheable_count(&self) {
-        self.cache_drop_non_cacheable_count
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
     fn snapshot(
         &self,
         dirty_nodes_param: u64,
@@ -180,24 +155,131 @@ impl LayoutDiagnosticsCollector {
         dirty_nodes_with_ancestors: u64,
         dirty_expand_ns: u64,
     ) -> LayoutFrameDiagnostics {
-        let cache_hits_direct = self.cache_hits_direct.load(Ordering::Relaxed);
-        let cache_hits_boundary = self.cache_hits_boundary.load(Ordering::Relaxed);
+        let cache_hits_direct = self.cache_hits_direct;
+        let cache_hits_boundary = self.cache_hits_boundary;
         LayoutFrameDiagnostics {
             dirty_nodes_param,
             dirty_nodes_structural,
             dirty_nodes_with_ancestors,
             dirty_expand_ns,
-            measure_node_calls: self.measure_node_calls.load(Ordering::Relaxed),
+            measure_node_calls: self.measure_node_calls,
             cache_hits_direct,
             cache_hits_boundary,
-            cache_miss_no_entry: self.cache_miss_no_entry.load(Ordering::Relaxed),
-            cache_miss_constraint: self.cache_miss_constraint.load(Ordering::Relaxed),
-            cache_miss_dirty_self: self.cache_miss_dirty_self.load(Ordering::Relaxed),
-            cache_miss_child_size: self.cache_miss_child_size.load(Ordering::Relaxed),
-            cache_store_count: self.cache_store_count.load(Ordering::Relaxed),
-            cache_drop_non_cacheable_count: self
-                .cache_drop_non_cacheable_count
-                .load(Ordering::Relaxed),
+            cache_miss_no_entry: self.cache_miss_no_entry,
+            cache_miss_constraint: self.cache_miss_constraint,
+            cache_miss_dirty_self: self.cache_miss_dirty_self,
+            cache_miss_child_size: self.cache_miss_child_size,
+            cache_store_count: self.cache_store_count,
+            cache_drop_non_cacheable_count: self.cache_drop_non_cacheable_count,
+        }
+    }
+}
+
+impl LayoutContext<'_> {
+    pub(crate) fn new<'a>(
+        snapshots: &'a mut LayoutSnapshotMap,
+        measure_self_nodes: &'a HashSet<u64>,
+        placement_self_nodes: &'a HashSet<u64>,
+        dirty_effective_nodes: &'a HashSet<u64>,
+        diagnostics: &'a mut LayoutDiagnosticsCollector,
+    ) -> LayoutContext<'a> {
+        LayoutContext {
+            snapshots,
+            measure_self_nodes,
+            placement_self_nodes,
+            dirty_effective_nodes,
+            diagnostics,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn snapshot(&self, instance_key: u64) -> Option<LayoutSnapshotEntry> {
+        // SAFETY: Layout snapshots are owned by the single-threaded compute
+        // pass. The pointer is created from a unique mutable borrow for the
+        // duration of the pass and only accessed on the same thread.
+        unsafe { (*self.snapshots).get_cloned(&instance_key) }
+    }
+
+    #[inline]
+    pub(crate) fn insert_snapshot(&self, instance_key: u64, entry: LayoutSnapshotEntry) {
+        // SAFETY: See `snapshot`.
+        unsafe {
+            (*self.snapshots).insert(instance_key, entry);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn remove_snapshot(&self, instance_key: u64) {
+        // SAFETY: See `snapshot`.
+        unsafe {
+            (*self.snapshots).remove(&instance_key);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_measure_node_calls(&self) {
+        // SAFETY: Layout diagnostics are owned by the single-threaded compute pass.
+        // The pointer is created from a unique mutable borrow for the duration of
+        // that pass and is only accessed on the same thread during recursive
+        // layout measurement.
+        unsafe {
+            (*self.diagnostics).measure_node_calls += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_hit_direct(&self) {
+        unsafe {
+            (*self.diagnostics).cache_hits_direct += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_hit_boundary(&self) {
+        unsafe {
+            (*self.diagnostics).cache_hits_boundary += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_miss_no_entry(&self) {
+        unsafe {
+            (*self.diagnostics).cache_miss_no_entry += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_miss_constraint(&self) {
+        unsafe {
+            (*self.diagnostics).cache_miss_constraint += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_miss_dirty_self(&self) {
+        unsafe {
+            (*self.diagnostics).cache_miss_dirty_self += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_miss_child_size(&self) {
+        unsafe {
+            (*self.diagnostics).cache_miss_child_size += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_store_count(&self) {
+        unsafe {
+            (*self.diagnostics).cache_store_count += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc_cache_drop_non_cacheable_count(&self) {
+        unsafe {
+            (*self.diagnostics).cache_drop_non_cacheable_count += 1;
         }
     }
 }
@@ -218,7 +300,7 @@ pub(crate) struct ComputeParams<'a> {
 #[derive(Debug)]
 pub(crate) enum ComputeMode<'a> {
     Full {
-        compute_resource_manager: Arc<RwLock<ComputeResourceManager>>,
+        compute_resource_manager: &'a mut ComputeResourceManager,
         gpu: &'a wgpu::Device,
     },
     #[cfg(feature = "testing")]
@@ -231,6 +313,7 @@ pub struct ComponentTree {
     tree: indextree::Arena<ComponentNode>,
     /// Components' metadatas
     metadatas: ComponentNodeMetaDatas,
+    layout_snapshots: LayoutSnapshotMap,
     /// Used to remember the current node
     node_queue: Vec<indextree::NodeId>,
     /// Detached old-subtree nodes keyed by instance key during replay replace.
@@ -280,11 +363,12 @@ impl ComponentTree {
     pub fn new() -> Self {
         let tree = indextree::Arena::new();
         let node_queue = Vec::new();
-        let metadatas = ComponentNodeMetaDatas::with_hasher(FxBuildHasher);
+        let metadatas = ComponentNodeMetaDatas::new();
         Self {
             tree,
             node_queue,
             metadatas,
+            layout_snapshots: LayoutSnapshotMap::default(),
             replay_reuse_candidates: HashMap::default(),
             active_pointer_paths: HashMap::default(),
             focus_owner: FocusOwner::new(),
@@ -295,6 +379,7 @@ impl ComponentTree {
     pub fn clear(&mut self) {
         self.tree.clear();
         self.metadatas.clear();
+        self.layout_snapshots.clear();
         self.node_queue.clear();
         self.replay_reuse_candidates.clear();
         self.active_pointer_paths.clear();
@@ -602,6 +687,23 @@ impl ComponentTree {
         &self.metadatas
     }
 
+    pub(crate) fn metadatas_mut(&mut self) -> &mut ComponentNodeMetaDatas {
+        &mut self.metadatas
+    }
+
+    pub(crate) fn clear_layout_snapshots(&mut self) {
+        self.layout_snapshots.clear();
+    }
+
+    fn remove_layout_snapshots(&mut self, keys: &HashSet<u64>) {
+        if keys.is_empty() {
+            return;
+        }
+        for key in keys {
+            self.layout_snapshots.remove(key);
+        }
+    }
+
     pub(crate) fn focus_owner(&self) -> &FocusOwner {
         &self.focus_owner
     }
@@ -742,16 +844,13 @@ impl ComponentTree {
                 false,
             );
         };
-        let screen_constraint = Constraint::new(
-            DimensionValue::Fixed(screen_size.width),
-            DimensionValue::Fixed(screen_size.height),
-        );
+        let screen_constraint = Constraint::exact(screen_size.width, screen_size.height);
         let current_children_by_node = collect_children_by_instance_key(root_node, &self.tree);
         let StructureReconcileResult {
             changed_nodes: structural_dirty_nodes,
             removed_nodes,
         } = crate::runtime::reconcile_layout_structure(&current_children_by_node);
-        remove_layout_snapshots(&removed_nodes);
+        self.remove_layout_snapshots(&removed_nodes);
 
         let mut dirty_nodes_self = layout_dirty_nodes.measure_self_nodes.clone();
         dirty_nodes_self.extend(layout_dirty_nodes.placement_self_nodes.iter().copied());
@@ -762,48 +861,46 @@ impl ComponentTree {
         let dirty_nodes_effective =
             expand_dirty_nodes_with_ancestors(root_node, &self.tree, &dirty_nodes_self);
         let dirty_expand_ns = dirty_prepare_start.elapsed().as_nanos() as u64;
-        let diagnostics = LayoutDiagnosticsCollector::default();
+        let mut diagnostics = LayoutDiagnosticsCollector::default();
 
         self.focus_owner
             .sync_from_component_tree(root_node, &self.tree);
         self.focus_owner.commit_pending();
 
-        let diagnostics_snapshot = with_layout_snapshot_entries(|snapshots| {
-            let layout_ctx = LayoutContext {
-                snapshots,
-                measure_self_nodes: &layout_dirty_nodes.measure_self_nodes,
-                placement_self_nodes: &layout_dirty_nodes.placement_self_nodes,
-                dirty_effective_nodes: &dirty_nodes_effective,
-                diagnostics: &diagnostics,
-            };
+        let layout_ctx = LayoutContext::new(
+            &mut self.layout_snapshots,
+            &layout_dirty_nodes.measure_self_nodes,
+            &layout_dirty_nodes.placement_self_nodes,
+            &dirty_nodes_effective,
+            &mut diagnostics,
+        );
 
-            let measure_timer = Instant::now();
-            debug!("Start measuring the component tree...");
+        let measure_timer = Instant::now();
+        debug!("Start measuring the component tree...");
 
-            match measure_node(
-                root_node,
-                &screen_constraint,
-                &self.tree,
-                &self.metadatas,
-                Some(&layout_ctx),
-            ) {
-                Ok(_root_computed_data) => {
-                    debug!("Component tree measured in {:?}", measure_timer.elapsed());
-                }
-                Err(e) => {
-                    panic!(
-                        "Root node ({root_node:?}) measurement failed: {e:?}. Aborting draw command computation."
-                    );
-                }
+        match measure_node(
+            root_node,
+            &screen_constraint,
+            &self.tree,
+            &mut self.metadatas,
+            Some(&layout_ctx),
+        ) {
+            Ok(_root_computed_data) => {
+                debug!("Component tree measured in {:?}", measure_timer.elapsed());
             }
+            Err(e) => {
+                panic!(
+                    "Root node ({root_node:?}) measurement failed: {e:?}. Aborting draw command computation."
+                );
+            }
+        }
 
-            diagnostics.snapshot(
-                dirty_nodes_param,
-                dirty_nodes_structural,
-                dirty_nodes_effective.len() as u64,
-                dirty_expand_ns,
-            )
-        });
+        let diagnostics_snapshot = diagnostics.snapshot(
+            dirty_nodes_param,
+            dirty_nodes_structural,
+            dirty_nodes_effective.len() as u64,
+            dirty_expand_ns,
+        );
 
         let (compute_resource_manager, gpu) = match mode {
             ComputeMode::Full {
@@ -812,7 +909,7 @@ impl ComponentTree {
             } => (compute_resource_manager, gpu),
             #[cfg(feature = "testing")]
             ComputeMode::LayoutOnly => {
-                populate_layout_metadata(root_node, &self.tree, &self.metadatas);
+                populate_layout_metadata(root_node, &self.tree, &mut self.metadatas);
                 return (
                     RenderGraph::default(),
                     WindowRequests::default(),
@@ -828,16 +925,16 @@ impl ComponentTree {
         record_layout_commands(
             root_node,
             &self.tree,
-            &self.metadatas,
-            compute_resource_manager.clone(),
+            &mut self.metadatas,
+            compute_resource_manager,
             gpu,
         );
         let record_cost = record_timer.elapsed();
-        populate_layout_metadata(root_node, &self.tree, &self.metadatas);
+        populate_layout_metadata(root_node, &self.tree, &mut self.metadatas);
 
         let compute_draw_timer = Instant::now();
         debug!("Start computing render graph...");
-        let graph = build_render_graph(root_node, &self.tree, &self.metadatas, screen_size);
+        let graph = build_render_graph(root_node, &self.tree, &mut self.metadatas, screen_size);
         self.focus_owner
             .sync_layout_from_component_tree(root_node, &self.tree, &self.metadatas);
         debug!(
@@ -850,20 +947,8 @@ impl ComponentTree {
         let mut window_requests = WindowRequests::default();
         debug!("Start executing typed input dispatch...");
 
-        let node_ids_preorder: Vec<_> = root_node
-            .traverse(&self.tree)
-            .filter_map(|edge| match edge {
-                indextree::NodeEdge::Start(id) => Some(id),
-                indextree::NodeEdge::End(_) => None,
-            })
-            .collect();
-        let node_ids_postorder: Vec<_> = root_node
-            .reverse_traverse(&self.tree)
-            .filter_map(|edge| match edge {
-                indextree::NodeEdge::Start(id) => Some(id),
-                indextree::NodeEdge::End(_) => None,
-            })
-            .collect();
+        let node_ids_preorder = layout_node_ids_preorder(root_node, &self.tree);
+        let node_ids_postorder = layout_node_ids_postorder(root_node, &self.tree);
         let pointer_change_paths = build_pointer_change_paths(
             root_node,
             &self.tree,
@@ -880,24 +965,21 @@ impl ComponentTree {
             let Some(node) = self.tree.get(node_id).map(|n| n.get()) else {
                 continue;
             };
-            for modifier in node.modifier.pointer_preview_input_nodes() {
-                let mut dispatch_ctx = PointerInputDispatchContext {
-                    tree: &self.tree,
-                    metadatas: &self.metadatas,
-                    cursor_position: &mut cursor_position,
-                    pointer_changes: pointer_changes.as_mut_slice(),
-                    pointer_change_paths: &pointer_change_paths,
-                    modifiers,
-                    window_requests: &mut window_requests,
-                    focus_owner: &mut self.focus_owner,
-                };
-                run_pointer_modifier_for_node(
-                    &mut dispatch_ctx,
-                    node_id,
-                    PointerEventPass::Initial,
-                    modifier.as_ref(),
-                );
-            }
+            let mut dispatch_ctx = PointerInputDispatchContext {
+                tree: &self.tree,
+                metadatas: &self.metadatas,
+                cursor_position: &mut cursor_position,
+                pointer_changes: pointer_changes.as_mut_slice(),
+                pointer_change_paths: &pointer_change_paths,
+                modifiers,
+                window_requests: &mut window_requests,
+                focus_owner: &mut self.focus_owner,
+            };
+            dispatch_pointer_modifiers_for_node_pass(
+                &mut dispatch_ctx,
+                node_id,
+                PointerEventPass::Initial,
+            );
             let handlers = &node.pointer_preview_handlers;
             for handler in handlers {
                 let mut dispatch_ctx = PointerInputDispatchContext {
@@ -923,24 +1005,21 @@ impl ComponentTree {
             let Some(node) = self.tree.get(node_id).map(|n| n.get()) else {
                 continue;
             };
-            for modifier in node.modifier.pointer_input_nodes() {
-                let mut dispatch_ctx = PointerInputDispatchContext {
-                    tree: &self.tree,
-                    metadatas: &self.metadatas,
-                    cursor_position: &mut cursor_position,
-                    pointer_changes: pointer_changes.as_mut_slice(),
-                    pointer_change_paths: &pointer_change_paths,
-                    modifiers,
-                    window_requests: &mut window_requests,
-                    focus_owner: &mut self.focus_owner,
-                };
-                run_pointer_modifier_for_node(
-                    &mut dispatch_ctx,
-                    node_id,
-                    PointerEventPass::Main,
-                    modifier.as_ref(),
-                );
-            }
+            let mut dispatch_ctx = PointerInputDispatchContext {
+                tree: &self.tree,
+                metadatas: &self.metadatas,
+                cursor_position: &mut cursor_position,
+                pointer_changes: pointer_changes.as_mut_slice(),
+                pointer_change_paths: &pointer_change_paths,
+                modifiers,
+                window_requests: &mut window_requests,
+                focus_owner: &mut self.focus_owner,
+            };
+            dispatch_pointer_modifiers_for_node_pass(
+                &mut dispatch_ctx,
+                node_id,
+                PointerEventPass::Main,
+            );
             let handlers = &node.pointer_handlers;
             for handler in handlers {
                 let mut dispatch_ctx = PointerInputDispatchContext {
@@ -966,24 +1045,21 @@ impl ComponentTree {
             let Some(node) = self.tree.get(node_id).map(|n| n.get()) else {
                 continue;
             };
-            for modifier in node.modifier.pointer_final_input_nodes() {
-                let mut dispatch_ctx = PointerInputDispatchContext {
-                    tree: &self.tree,
-                    metadatas: &self.metadatas,
-                    cursor_position: &mut cursor_position,
-                    pointer_changes: pointer_changes.as_mut_slice(),
-                    pointer_change_paths: &pointer_change_paths,
-                    modifiers,
-                    window_requests: &mut window_requests,
-                    focus_owner: &mut self.focus_owner,
-                };
-                run_pointer_modifier_for_node(
-                    &mut dispatch_ctx,
-                    node_id,
-                    PointerEventPass::Final,
-                    modifier.as_ref(),
-                );
-            }
+            let mut dispatch_ctx = PointerInputDispatchContext {
+                tree: &self.tree,
+                metadatas: &self.metadatas,
+                cursor_position: &mut cursor_position,
+                pointer_changes: pointer_changes.as_mut_slice(),
+                pointer_change_paths: &pointer_change_paths,
+                modifiers,
+                window_requests: &mut window_requests,
+                focus_owner: &mut self.focus_owner,
+            };
+            dispatch_pointer_modifiers_for_node_pass(
+                &mut dispatch_ctx,
+                node_id,
+                PointerEventPass::Final,
+            );
             let handlers = &node.pointer_final_handlers;
             for handler in handlers {
                 let mut dispatch_ctx = PointerInputDispatchContext {
@@ -1029,29 +1105,34 @@ impl ComponentTree {
                 let Some(node) = keyboard_dispatch_ctx.tree.get(node_id).map(|n| n.get()) else {
                     continue;
                 };
-                for modifier in node.modifier.keyboard_preview_input_nodes() {
-                    run_keyboard_modifier_for_node(
-                        &mut keyboard_dispatch_ctx,
-                        node_id,
-                        modifier.as_ref(),
-                    );
+                for action in node.modifier.ordered_actions() {
+                    match action {
+                        OrderedModifierAction::KeyboardPreviewInput(modifier) => {
+                            run_keyboard_modifier_for_node(
+                                &mut keyboard_dispatch_ctx,
+                                node_id,
+                                modifier.as_ref(),
+                            );
+                        }
+                        OrderedModifierAction::ImePreviewInput(modifier) => {
+                            run_ime_modifier_for_node(
+                                keyboard_dispatch_ctx.tree,
+                                keyboard_dispatch_ctx.metadatas,
+                                node_id,
+                                modifier.as_ref(),
+                                &mut ime_events,
+                                keyboard_dispatch_ctx.window_requests,
+                                keyboard_dispatch_ctx.focus_owner,
+                            );
+                        }
+                        _ => {}
+                    }
                 }
                 for handler in &node.keyboard_preview_handlers {
                     run_keyboard_handler_for_node(
                         &mut keyboard_dispatch_ctx,
                         node_id,
                         handler.as_ref(),
-                    );
-                }
-                for modifier in node.modifier.ime_preview_input_nodes() {
-                    run_ime_modifier_for_node(
-                        keyboard_dispatch_ctx.tree,
-                        keyboard_dispatch_ctx.metadatas,
-                        node_id,
-                        modifier.as_ref(),
-                        &mut ime_events,
-                        keyboard_dispatch_ctx.window_requests,
-                        keyboard_dispatch_ctx.focus_owner,
                     );
                 }
                 for handler in &node.ime_preview_handlers {
@@ -1071,29 +1152,34 @@ impl ComponentTree {
                 let Some(node) = keyboard_dispatch_ctx.tree.get(node_id).map(|n| n.get()) else {
                     continue;
                 };
-                for modifier in node.modifier.keyboard_input_nodes() {
-                    run_keyboard_modifier_for_node(
-                        &mut keyboard_dispatch_ctx,
-                        node_id,
-                        modifier.as_ref(),
-                    );
+                for action in node.modifier.ordered_actions() {
+                    match action {
+                        OrderedModifierAction::KeyboardInput(modifier) => {
+                            run_keyboard_modifier_for_node(
+                                &mut keyboard_dispatch_ctx,
+                                node_id,
+                                modifier.as_ref(),
+                            );
+                        }
+                        OrderedModifierAction::ImeInput(modifier) => {
+                            run_ime_modifier_for_node(
+                                keyboard_dispatch_ctx.tree,
+                                keyboard_dispatch_ctx.metadatas,
+                                node_id,
+                                modifier.as_ref(),
+                                &mut ime_events,
+                                keyboard_dispatch_ctx.window_requests,
+                                keyboard_dispatch_ctx.focus_owner,
+                            );
+                        }
+                        _ => {}
+                    }
                 }
                 for handler in &node.keyboard_handlers {
                     run_keyboard_handler_for_node(
                         &mut keyboard_dispatch_ctx,
                         node_id,
                         handler.as_ref(),
-                    );
-                }
-                for modifier in node.modifier.ime_input_nodes() {
-                    run_ime_modifier_for_node(
-                        keyboard_dispatch_ctx.tree,
-                        keyboard_dispatch_ctx.metadatas,
-                        node_id,
-                        modifier.as_ref(),
-                        &mut ime_events,
-                        keyboard_dispatch_ctx.window_requests,
-                        keyboard_dispatch_ctx.focus_owner,
                     );
                 }
                 for handler in &node.ime_handlers {
@@ -1145,6 +1231,7 @@ impl ComponentTree {
 }
 
 struct NodeInputContext {
+    base_abs_pos: PxPosition,
     abs_pos: PxPosition,
     event_clip_rect: Option<PxRect>,
     node_computed_data: ComputedData,
@@ -1159,8 +1246,21 @@ fn resolve_node_input_context(
     metadatas: &ComponentNodeMetaDatas,
     node_id: indextree::NodeId,
 ) -> Option<NodeInputContext> {
+    let Some(node_ref) = tree.get(node_id) else {
+        warn!("Node not found for node {node_id:?}; skipping input handling");
+        return None;
+    };
+    let node = node_ref.get();
+    if node.role != NodeRole::Layout {
+        return None;
+    }
+
     let Some(metadata) = metadatas.get(&node_id) else {
         warn!("Input metadata missing for node {node_id:?}; skipping input handling");
+        return None;
+    };
+    let Some(base_abs_pos) = metadata.base_abs_position else {
+        warn!("Base absolute position missing for node {node_id:?}; skipping input handling");
         return None;
     };
     let Some(abs_pos) = metadata.abs_position else {
@@ -1175,19 +1275,13 @@ fn resolve_node_input_context(
         );
         return None;
     };
-    drop(metadata);
-
-    let Some(node_ref) = tree.get(node_id) else {
-        warn!("Node not found for node {node_id:?}; skipping input handling");
-        return None;
-    };
-    let node = node_ref.get();
     let instance_logic_id = node.instance_logic_id;
     let instance_key = node.instance_key;
     let fn_name = node.fn_name.as_str().to_owned();
     let parent_id = node_ref.parent();
 
     Some(NodeInputContext {
+        base_abs_pos,
         abs_pos,
         event_clip_rect,
         node_computed_data,
@@ -1196,6 +1290,38 @@ fn resolve_node_input_context(
         fn_name,
         parent_id,
     })
+}
+
+fn layout_node_ids_preorder(
+    root_node: indextree::NodeId,
+    tree: &ComponentNodeTree,
+) -> Vec<indextree::NodeId> {
+    root_node
+        .traverse(tree)
+        .filter_map(|edge| match edge {
+            indextree::NodeEdge::Start(id) => tree
+                .get(id)
+                .filter(|node| node.get().role == NodeRole::Layout)
+                .map(|_| id),
+            indextree::NodeEdge::End(_) => None,
+        })
+        .collect()
+}
+
+fn layout_node_ids_postorder(
+    root_node: indextree::NodeId,
+    tree: &ComponentNodeTree,
+) -> Vec<indextree::NodeId> {
+    root_node
+        .reverse_traverse(tree)
+        .filter_map(|edge| match edge {
+            indextree::NodeEdge::Start(id) => tree
+                .get(id)
+                .filter(|node| node.get().role == NodeRole::Layout)
+                .map(|_| id),
+            indextree::NodeEdge::End(_) => None,
+        })
+        .collect()
 }
 
 fn attach_ime_position_if_needed(window_requests: &mut WindowRequests, abs_pos: PxPosition) {
@@ -1218,7 +1344,24 @@ fn hit_path_node_ids(
         metadatas: &ComponentNodeMetaDatas,
         position: PxPosition,
     ) -> Option<Vec<indextree::NodeId>> {
+        let children: Vec<_> = node_id.children(tree).collect();
+        for child_id in children.into_iter().rev() {
+            if let Some(mut child_path) = collect_hit_path(child_id, tree, metadatas, position) {
+                let mut path = Vec::with_capacity(child_path.len() + 1);
+                if let Some(metadata) = metadatas.get(&node_id)
+                    && metadata.base_abs_position.is_some()
+                    && metadata.abs_position.is_some()
+                    && metadata.computed_data.is_some()
+                {
+                    path.push(node_id);
+                }
+                path.append(&mut child_path);
+                return Some(path);
+            }
+        }
+
         let metadata = metadatas.get(&node_id)?;
+        let base_abs_pos = metadata.base_abs_position?;
         let abs_pos = metadata.abs_position?;
         let size = metadata.computed_data?;
         if size.width.0 <= 0 || size.height.0 <= 0 {
@@ -1230,27 +1373,17 @@ fn hit_path_node_ids(
             return None;
         }
         let bounds = PxRect::from_position_size(abs_pos, PxSize::new(size.width, size.height));
-        let bounds_contains = bounds.contains(position);
         let node_handles_hover = tree.get(node_id).is_some_and(|node| {
-            let node = node.get();
-            !node.pointer_preview_handlers.is_empty()
-                || !node.pointer_handlers.is_empty()
-                || !node.pointer_final_handlers.is_empty()
-                || node.modifier.has_pointer_input_nodes()
-                || node.modifier.has_cursor_icon()
-        });
+            node_handles_pointer_at_position(node.get(), base_abs_pos, size, position)
+        }) || bounds.contains(position)
+            && tree.get(node_id).is_some_and(|node| {
+                let node = node.get();
+                !node.pointer_preview_handlers.is_empty()
+                    || !node.pointer_handlers.is_empty()
+                    || !node.pointer_final_handlers.is_empty()
+            });
 
-        let children: Vec<_> = node_id.children(tree).collect();
-        for child_id in children.into_iter().rev() {
-            if let Some(mut child_path) = collect_hit_path(child_id, tree, metadatas, position) {
-                let mut path = Vec::with_capacity(child_path.len() + 1);
-                path.push(node_id);
-                path.append(&mut child_path);
-                return Some(path);
-            }
-        }
-
-        (bounds_contains && node_handles_hover).then_some(vec![node_id])
+        node_handles_hover.then_some(vec![node_id])
     }
 
     let Some(position) = position else {
@@ -1269,9 +1402,66 @@ fn resolve_hover_cursor_icon(
         .into_iter()
         .rev()
         .find_map(|node_id| {
-            tree.get(node_id)
-                .and_then(|node| node.get().modifier.cursor_icon())
+            let node_ref = tree.get(node_id)?;
+            let metadata = metadatas.get(&node_id)?;
+            let base_abs_pos = metadata.base_abs_position?;
+            let size = metadata.computed_data?;
+            resolve_node_hover_cursor_icon(node_ref.get(), base_abs_pos, size, position?)
         })
+}
+
+fn node_handles_pointer_at_position(
+    node: &crate::component_tree::ComponentNode,
+    base_abs_pos: PxPosition,
+    size: ComputedData,
+    position: PxPosition,
+) -> bool {
+    let mut current_abs_pos = base_abs_pos;
+    let size = PxSize::new(size.width, size.height);
+    for action in node.modifier.ordered_actions() {
+        match action {
+            OrderedModifierAction::Placement(placement) => {
+                current_abs_pos = placement.node().transform_position(current_abs_pos);
+            }
+            OrderedModifierAction::Cursor(_)
+            | OrderedModifierAction::PointerPreviewInput(_)
+            | OrderedModifierAction::PointerInput(_)
+            | OrderedModifierAction::PointerFinalInput(_) => {
+                let bounds = PxRect::from_position_size(current_abs_pos, size);
+                if bounds.contains(position) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn resolve_node_hover_cursor_icon(
+    node: &crate::component_tree::ComponentNode,
+    base_abs_pos: PxPosition,
+    size: ComputedData,
+    position: PxPosition,
+) -> Option<winit::window::CursorIcon> {
+    let mut current_abs_pos = base_abs_pos;
+    let size = PxSize::new(size.width, size.height);
+    let mut resolved = None;
+    for action in node.modifier.ordered_actions() {
+        match action {
+            OrderedModifierAction::Placement(placement) => {
+                current_abs_pos = placement.node().transform_position(current_abs_pos);
+            }
+            OrderedModifierAction::Cursor(cursor) => {
+                let bounds = PxRect::from_position_size(current_abs_pos, size);
+                if bounds.contains(position) {
+                    resolved = Some(cursor.cursor_icon());
+                }
+            }
+            _ => {}
+        }
+    }
+    resolved
 }
 
 fn build_pointer_change_paths(
@@ -1385,22 +1575,84 @@ struct PointerInputDispatchContext<'a> {
     focus_owner: &'a mut FocusOwner,
 }
 
+fn dispatch_pointer_modifiers_for_node_pass(
+    dispatch_ctx: &mut PointerInputDispatchContext<'_>,
+    node_id: indextree::NodeId,
+    pass: PointerEventPass,
+) {
+    let Some(NodeInputContext { base_abs_pos, .. }) =
+        resolve_node_input_context(dispatch_ctx.tree, dispatch_ctx.metadatas, node_id)
+    else {
+        return;
+    };
+    let Some(node_ref) = dispatch_ctx.tree.get(node_id) else {
+        return;
+    };
+
+    let mut current_abs_pos = base_abs_pos;
+    for action in node_ref.get().modifier.ordered_actions() {
+        match action {
+            OrderedModifierAction::Placement(placement) => {
+                current_abs_pos = placement.node().transform_position(current_abs_pos);
+            }
+            OrderedModifierAction::PointerPreviewInput(modifier)
+                if pass == PointerEventPass::Initial =>
+            {
+                run_pointer_modifier_for_node(
+                    dispatch_ctx,
+                    node_id,
+                    pass,
+                    current_abs_pos,
+                    modifier.as_ref(),
+                );
+            }
+            OrderedModifierAction::PointerInput(modifier) if pass == PointerEventPass::Main => {
+                run_pointer_modifier_for_node(
+                    dispatch_ctx,
+                    node_id,
+                    pass,
+                    current_abs_pos,
+                    modifier.as_ref(),
+                );
+            }
+            OrderedModifierAction::PointerFinalInput(modifier)
+                if pass == PointerEventPass::Final =>
+            {
+                run_pointer_modifier_for_node(
+                    dispatch_ctx,
+                    node_id,
+                    pass,
+                    current_abs_pos,
+                    modifier.as_ref(),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 fn run_pointer_handler_for_node(
     dispatch_ctx: &mut PointerInputDispatchContext<'_>,
     node_id: indextree::NodeId,
     pass: PointerEventPass,
     pointer_handler: &PointerInputHandlerFn,
 ) {
-    run_pointer_input_for_node(dispatch_ctx, node_id, pass, pointer_handler);
+    let Some(NodeInputContext { abs_pos, .. }) =
+        resolve_node_input_context(dispatch_ctx.tree, dispatch_ctx.metadatas, node_id)
+    else {
+        return;
+    };
+    run_pointer_input_for_node(dispatch_ctx, node_id, pass, abs_pos, pointer_handler);
 }
 
 fn run_pointer_modifier_for_node(
     dispatch_ctx: &mut PointerInputDispatchContext<'_>,
     node_id: indextree::NodeId,
     pass: PointerEventPass,
+    abs_pos_override: PxPosition,
     pointer_modifier: &dyn PointerInputModifierNode,
 ) {
-    run_pointer_input_for_node(dispatch_ctx, node_id, pass, |input| {
+    run_pointer_input_for_node(dispatch_ctx, node_id, pass, abs_pos_override, |input| {
         pointer_modifier.on_pointer_input(input)
     });
 }
@@ -1409,12 +1661,14 @@ fn run_pointer_input_for_node<F>(
     dispatch_ctx: &mut PointerInputDispatchContext<'_>,
     node_id: indextree::NodeId,
     pass: PointerEventPass,
+    abs_pos_override: PxPosition,
     dispatch: F,
 ) where
     F: FnOnce(PointerInput<'_>),
 {
     let Some(NodeInputContext {
-        abs_pos,
+        base_abs_pos: _,
+        abs_pos: _,
         event_clip_rect,
         node_computed_data,
         instance_logic_id,
@@ -1427,6 +1681,8 @@ fn run_pointer_input_for_node<F>(
     };
     #[cfg(not(feature = "profiling"))]
     let _ = parent_id;
+
+    let abs_pos = abs_pos_override;
 
     let mut cursor_position_ref = &mut *dispatch_ctx.cursor_position;
     let mut dummy_cursor_position = None;
@@ -1458,9 +1714,11 @@ fn run_pointer_input_for_node<F>(
         parent_id,
         Some(fn_name.as_str()),
     ));
+    let replay_boundary_instance_key =
+        nearest_replay_boundary_instance_key(node_id, dispatch_ctx.tree);
     let _node_ctx_guard =
         push_current_node_with_instance_logic_id(node_id, instance_logic_id, fn_name.as_str());
-    let _instance_ctx_guard = push_current_component_instance_key(instance_key);
+    let _instance_ctx_guard = push_current_component_instance_key(replay_boundary_instance_key);
     let _phase_guard = push_phase(RuntimePhase::Input);
     let _focus_owner_guard = bind_focus_owner(dispatch_ctx.focus_owner);
     let input = PointerInput {
@@ -1471,7 +1729,7 @@ fn run_pointer_input_for_node<F>(
         pointer_changes: &mut local_pointer_changes,
         key_modifiers: dispatch_ctx.modifiers,
         ime_request: &mut dispatch_ctx.window_requests.ime_request,
-        window_action: &mut dispatch_ctx.window_requests.window_action,
+        request_window_drag: &mut dispatch_ctx.window_requests.request_window_drag,
     };
     dispatch(input);
     for (local_change, &original_index) in local_pointer_changes
@@ -1533,9 +1791,10 @@ fn run_keyboard_input_for_node<F>(
         event_clip_rect: _,
         node_computed_data,
         instance_logic_id,
-        instance_key,
+        instance_key: _,
         fn_name,
         parent_id,
+        ..
     }) = resolve_node_input_context(dispatch_ctx.tree, dispatch_ctx.metadatas, node_id)
     else {
         return;
@@ -1550,9 +1809,11 @@ fn run_keyboard_input_for_node<F>(
         parent_id,
         Some(fn_name.as_str()),
     ));
+    let replay_boundary_instance_key =
+        nearest_replay_boundary_instance_key(node_id, dispatch_ctx.tree);
     let _node_ctx_guard =
         push_current_node_with_instance_logic_id(node_id, instance_logic_id, fn_name.as_str());
-    let _instance_ctx_guard = push_current_component_instance_key(instance_key);
+    let _instance_ctx_guard = push_current_component_instance_key(replay_boundary_instance_key);
     let _phase_guard = push_phase(RuntimePhase::Input);
     let _focus_owner_guard = bind_focus_owner(dispatch_ctx.focus_owner);
     let input = KeyboardInput {
@@ -1630,9 +1891,10 @@ fn run_ime_input_for_node<F>(
         event_clip_rect: _,
         node_computed_data,
         instance_logic_id,
-        instance_key,
+        instance_key: _,
         fn_name,
         parent_id,
+        ..
     }) = resolve_node_input_context(tree, metadatas, node_id)
     else {
         return;
@@ -1647,9 +1909,10 @@ fn run_ime_input_for_node<F>(
         parent_id,
         Some(fn_name.as_str()),
     ));
+    let replay_boundary_instance_key = nearest_replay_boundary_instance_key(node_id, tree);
     let _node_ctx_guard =
         push_current_node_with_instance_logic_id(node_id, instance_logic_id, fn_name.as_str());
-    let _instance_ctx_guard = push_current_component_instance_key(instance_key);
+    let _instance_ctx_guard = push_current_component_instance_key(replay_boundary_instance_key);
     let _phase_guard = push_phase(RuntimePhase::Input);
     let _focus_owner_guard = bind_focus_owner(focus_owner);
     let input = ImeInput {
@@ -1909,8 +2172,8 @@ fn collect_children_by_instance_key(
             continue;
         };
         let instance_key = node.get().instance_key;
-        let child_keys = node_id
-            .children(tree)
+        let child_keys = direct_layout_children(node_id, tree)
+            .into_iter()
             .filter_map(|child_id| tree.get(child_id).map(|child| child.get().instance_key))
             .collect();
         children_by_node.insert(instance_key, child_keys);
@@ -1921,8 +2184,8 @@ fn collect_children_by_instance_key(
 fn record_layout_commands(
     root_node: indextree::NodeId,
     tree: &ComponentNodeTree,
-    metadatas: &ComponentNodeMetaDatas,
-    compute_resource_manager: Arc<RwLock<ComputeResourceManager>>,
+    metadatas: &mut ComponentNodeMetaDatas,
+    compute_resource_manager: &mut ComputeResourceManager,
     gpu: &wgpu::Device,
 ) {
     struct DrawModifierChainContent<'a> {
@@ -1931,7 +2194,7 @@ fn record_layout_commands(
     }
 
     impl DrawModifierContent for DrawModifierChainContent<'_> {
-        fn draw(&mut self, input: &RenderInput<'_>) {
+        fn draw(&mut self, input: &mut RenderInput<'_>) {
             if let Some((draw_modifier, remaining)) = self.draw_nodes.split_first() {
                 let mut draw_ctx = DrawModifierContext {
                     render_input: input,
@@ -1962,15 +2225,22 @@ fn record_layout_commands(
                 Some(node.get().fn_name.as_str()),
             ))
         };
-        let input = RenderInput::new(node_id, metadatas, compute_resource_manager.clone(), gpu);
+        let mut input = RenderInput::new(node_id, metadatas, compute_resource_manager, gpu);
         let node_ref = node.get();
-        let mut draw_nodes = node_ref.modifier.draw_nodes();
-        draw_nodes.reverse();
+        let draw_nodes: Vec<_> = node_ref
+            .modifier
+            .ordered_actions()
+            .into_iter()
+            .filter_map(|action| match action {
+                OrderedModifierAction::Draw(node) => Some(node),
+                _ => None,
+            })
+            .collect();
         let mut content = DrawModifierChainContent {
             draw_nodes: &draw_nodes,
             render_policy: node_ref.render_policy.as_ref(),
         };
-        content.draw(&input);
+        content.draw(&mut input);
         stack.extend(node_id.children(tree));
     }
 }
@@ -1986,15 +2256,15 @@ struct PreparedLayoutMetadata {
 }
 
 fn prepare_layout_metadata_for_node(
-    _tree: &ComponentNodeTree,
-    metadatas: &ComponentNodeMetaDatas,
+    tree: &ComponentNodeTree,
+    metadatas: &mut ComponentNodeMetaDatas,
     start_pos: PxPosition,
     is_root: bool,
     node_id: indextree::NodeId,
     parent_clip_rect: Option<PxRect>,
     current_opacity: f32,
 ) -> Option<PreparedLayoutMetadata> {
-    let mut metadata = metadatas.get_mut(&node_id)?;
+    let metadata = metadatas.get_mut(&node_id)?;
     let rel_pos = match metadata.rel_position {
         Some(pos) => pos,
         None if is_root => PxPosition::ZERO,
@@ -2004,8 +2274,17 @@ fn prepare_layout_metadata_for_node(
             return None;
         }
     };
-    let self_position = start_pos + rel_pos;
+    let base_self_position = start_pos + rel_pos;
+    let mut self_position = base_self_position;
+    if let Some(node) = tree.get(node_id) {
+        for action in node.get().modifier.ordered_actions() {
+            if let OrderedModifierAction::Placement(placement_node) = action {
+                self_position = placement_node.node().transform_position(self_position);
+            }
+        }
+    }
     let cumulative_opacity = current_opacity * metadata.opacity;
+    metadata.base_abs_position = Some(base_self_position);
     metadata.abs_position = Some(self_position);
     metadata.event_clip_rect = parent_clip_rect;
 
@@ -2046,11 +2325,11 @@ fn prepare_layout_metadata_for_node(
 fn populate_layout_metadata(
     root_node: indextree::NodeId,
     tree: &ComponentNodeTree,
-    metadatas: &ComponentNodeMetaDatas,
+    metadatas: &mut ComponentNodeMetaDatas,
 ) {
     fn visit(
         tree: &ComponentNodeTree,
-        metadatas: &ComponentNodeMetaDatas,
+        metadatas: &mut ComponentNodeMetaDatas,
         start_pos: PxPosition,
         is_root: bool,
         node_id: indextree::NodeId,
@@ -2066,6 +2345,17 @@ fn populate_layout_metadata(
             clip_rect,
             current_opacity,
         ) else {
+            for child in node_id.children(tree) {
+                visit(
+                    tree,
+                    metadatas,
+                    start_pos,
+                    false,
+                    child,
+                    clip_rect,
+                    current_opacity,
+                );
+            }
             return;
         };
 
@@ -2098,7 +2388,7 @@ fn populate_layout_metadata(
 fn build_render_graph(
     node_id: indextree::NodeId,
     tree: &ComponentNodeTree,
-    metadatas: &ComponentNodeMetaDatas,
+    metadatas: &mut ComponentNodeMetaDatas,
     screen_size: PxSize,
 ) -> RenderGraph {
     let screen_rect = PxRect {
@@ -2121,7 +2411,7 @@ fn build_render_graph(
 
 struct RenderGraphBuildContext<'a> {
     tree: &'a ComponentNodeTree,
-    metadatas: &'a ComponentNodeMetaDatas,
+    metadatas: &'a mut ComponentNodeMetaDatas,
     builder: &'a mut RenderGraphBuilder,
     screen_rect: PxRect,
 }
@@ -2144,6 +2434,9 @@ fn build_render_graph_inner(
         clip_rect,
         current_opacity,
     ) else {
+        for child in node_id.children(context.tree) {
+            build_render_graph_inner(context, start_pos, false, child, clip_rect, current_opacity);
+        }
         return;
     };
 
@@ -2154,7 +2447,7 @@ fn build_render_graph_inner(
     }
 
     let fragment = match context.metadatas.get_mut(&node_id) {
-        Some(mut metadata) => metadata.take_fragment(),
+        Some(metadata) => metadata.take_fragment(),
         None => {
             warn!("Missing metadata for node {node_id:?}; skipping render graph build");
             return;
@@ -2194,14 +2487,20 @@ mod tests {
     use super::*;
 
     use crate::{
-        component_tree::ComponentNode,
+        component_tree::{ComponentNode, NodeRole},
         layout::{DefaultLayoutPolicy, NoopRenderPolicy},
         modifier::Modifier,
     };
 
-    fn node(name: &str, instance_logic_id: u64, instance_key: u64) -> ComponentNode {
+    fn node_with_role(
+        name: &str,
+        role: NodeRole,
+        instance_logic_id: u64,
+        instance_key: u64,
+    ) -> ComponentNode {
         ComponentNode {
             fn_name: name.to_string(),
+            role,
             instance_logic_id,
             instance_key,
             pointer_preview_handlers: Vec::new(),
@@ -2225,6 +2524,10 @@ mod tests {
             replay: None,
             props_unchanged_from_previous: false,
         }
+    }
+
+    fn node(name: &str, instance_logic_id: u64, instance_key: u64) -> ComponentNode {
+        node_with_role(name, NodeRole::Layout, instance_logic_id, instance_key)
     }
 
     #[test]
@@ -2342,5 +2645,27 @@ mod tests {
         assert!(!replace_result.removed_instance_keys.contains(&3));
         assert!(!replace_result.removed_instance_logic_ids.contains(&2));
         assert!(!replace_result.removed_instance_logic_ids.contains(&3));
+    }
+
+    #[test]
+    fn layout_node_input_traversal_skips_composition_nodes() {
+        let mut tree = ComponentTree::new();
+
+        let root = tree.add_node(node_with_role("root", NodeRole::Composition, 1, 1));
+        let layout_a = tree.add_node(node("layout_a", 2, 2));
+        tree.pop_node();
+
+        let composition = tree.add_node(node_with_role("wrapper", NodeRole::Composition, 3, 3));
+        let layout_b = tree.add_node(node("layout_b", 4, 4));
+        tree.pop_node();
+        tree.pop_node();
+        tree.pop_node();
+
+        let preorder = layout_node_ids_preorder(root, tree.tree());
+        let postorder = layout_node_ids_postorder(root, tree.tree());
+
+        assert_eq!(preorder, vec![layout_a, layout_b]);
+        assert_eq!(postorder, vec![layout_b, layout_a]);
+        assert_eq!(composition.children(tree.tree()).count(), 1);
     }
 }

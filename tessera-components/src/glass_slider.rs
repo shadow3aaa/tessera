@@ -3,12 +3,13 @@
 //! ## Usage
 //!
 //! Use to select a value from a continuous range.
+use tessera_foundation::gesture::{DragRecognizer, TapRecognizer};
 use tessera_ui::{
-    CallbackWith, Color, ComputedData, Constraint, DimensionValue, Dp, FocusProperties,
-    FocusRequester, MeasurementError, Modifier, PointerInput, PointerInputModifierNode, Px,
+    CallbackWith, Color, ComputedData, Constraint, Dp, FocusProperties, FocusRequester,
+    LayoutResult, MeasurementError, Modifier, PointerInput, PointerInputModifierNode, Px,
     PxPosition, State,
     accesskit::Role,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, layout_primitive},
+    layout::{LayoutPolicy, MeasureScope, layout},
     modifier::{CursorModifierExt as _, FocusModifierExt as _, ModifierCapabilityExt as _},
     remember, tessera,
     winit::window::CursorIcon,
@@ -16,7 +17,6 @@ use tessera_ui::{
 
 use crate::{
     fluid_glass::{GlassBorder, fluid_glass},
-    gesture_recognizer::{DragRecognizer, TapRecognizer},
     modifier::{ModifierExt as _, SemanticsArgs},
     shape_def::Shape,
 };
@@ -307,7 +307,7 @@ fn process_pointer_gestures(
 /// ## Parameters
 ///
 /// - `args` — configures the slider's value, appearance, and `on_change`
-///   callback; see [`GlassSliderConfig`].
+///   callback through the component's builder parameters.
 /// - `controller` — optional controller; use [`glass_slider`] to provide your
 ///   own.
 ///
@@ -315,7 +315,7 @@ fn process_pointer_gestures(
 ///
 /// ```
 /// use tessera_components::glass_slider::{GlassSliderController, glass_slider};
-/// use tessera_ui::{remember, tessera};
+/// use tessera_ui::{LayoutResult, remember, tessera};
 ///
 /// #[tessera]
 /// fn demo() {
@@ -336,7 +336,7 @@ fn process_pointer_gestures(
 /// ```
 #[tessera]
 pub fn glass_slider(
-    value: f32,
+    value: Option<f32>,
     modifier: Option<Modifier>,
     on_change: Option<CallbackWith<f32>>,
     track_height: Option<Dp>,
@@ -344,11 +344,14 @@ pub fn glass_slider(
     progress_tint_color: Option<Color>,
     blur_radius: Option<Dp>,
     track_border_width: Option<Dp>,
-    disabled: bool,
+    disabled: Option<bool>,
     #[prop(into)] accessibility_label: Option<String>,
     #[prop(into)] accessibility_description: Option<String>,
     controller: Option<State<GlassSliderController>>,
 ) {
+    let defaults = GlassSliderConfig::default();
+    let value = value.unwrap_or(defaults.value);
+    let disabled = disabled.unwrap_or(defaults.disabled);
     let mut slider_args = glass_slider_config_from_params(GlassSliderParams {
         value,
         modifier,
@@ -371,16 +374,22 @@ pub fn glass_slider(
 }
 
 #[tessera]
-fn glass_slider_progress_fill(value: f32, tint_color: Color, blur_radius: Dp) {
+fn glass_slider_progress_fill(
+    value: Option<f32>,
+    tint_color: Option<Color>,
+    blur_radius: Option<Dp>,
+) {
+    let value = value.unwrap_or(0.0);
+    let tint_color = tint_color.unwrap_or(Color::TRANSPARENT);
+    let blur_radius = blur_radius.unwrap_or(Dp(0.0));
     fluid_glass()
         .tint_color(tint_color)
         .blur_radius(blur_radius)
-        .shape(Shape::capsule())
-        .refraction_amount(0.0)
-        .with_child(|| {});
+        .shape(Shape::CAPSULE)
+        .child(|| {});
 
     let clamped = value.clamp(0.0, 1.0);
-    layout_primitive().layout_policy(GlassSliderFillLayout { value: clamped });
+    layout().layout_policy(GlassSliderFillLayout { value: clamped });
 }
 
 #[derive(Clone, PartialEq)]
@@ -389,44 +398,34 @@ struct GlassSliderFillLayout {
 }
 
 impl LayoutPolicy for GlassSliderFillLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let available_width = match input.parent_constraint().width() {
-            DimensionValue::Fixed(px) => px,
-            DimensionValue::Wrap { max, .. } => max.unwrap_or(Px(0)),
-            DimensionValue::Fill { max, .. } => max.expect(
-                "Seems that you are trying to fill an infinite width, which is not allowed",
-            ),
-        };
-        let available_height = match input.parent_constraint().height() {
-            DimensionValue::Fixed(px) => px,
-            DimensionValue::Wrap { max, .. } => max.unwrap_or(Px(0)),
-            DimensionValue::Fill { max, .. } => max.expect(
-                "Seems that you are trying to fill an infinite height, which is not allowed",
-            ),
-        };
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let available_width = input
+            .parent_constraint()
+            .width()
+            .resolve_max()
+            .unwrap_or(Px(0));
+        let available_height = input
+            .parent_constraint()
+            .height()
+            .resolve_max()
+            .unwrap_or(Px(0));
 
         let width_px = Px((available_width.to_f32() * self.value).round() as i32);
-        let child_id = input
-            .children_ids()
+        let child = input
+            .children()
             .first()
             .copied()
             .expect("progress fill child should exist");
 
-        let child_constraint = Constraint::new(
-            DimensionValue::Fixed(width_px),
-            DimensionValue::Fixed(available_height),
-        );
-        input.measure_child(child_id, &child_constraint)?;
-        output.place_child(child_id, PxPosition::new(Px(0), Px(0)));
+        let child_constraint = Constraint::exact(width_px, available_height);
+        child.measure(&child_constraint)?;
+        result.place_child(child, PxPosition::new(Px(0), Px(0)));
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: width_px,
             height: available_height,
-        })
+        }))
     }
 }
 
@@ -466,7 +465,7 @@ fn render_glass_slider(args: GlassSliderConfig) {
         drag_recognizer,
     );
 
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(GlassSliderLayout {
             track_height: args.track_height.to_px(),
@@ -477,10 +476,10 @@ fn render_glass_slider(args: GlassSliderConfig) {
                 .modifier(Modifier::new().fill_max_size())
                 .tint_color(args.track_tint_color)
                 .blur_radius(args.blur_radius)
-                .shape(Shape::capsule())
+                .shape(Shape::CAPSULE)
                 .border(GlassBorder::new(args.track_border_width.into()))
                 .padding(args.track_border_width)
-                .with_child(move || {
+                .child(move || {
                     glass_slider_progress_fill()
                         .value(args.value)
                         .tint_color(args.progress_tint_color)
@@ -496,32 +495,19 @@ struct GlassSliderLayout {
 }
 
 impl LayoutPolicy for GlassSliderLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let width_dim = input.parent_constraint().width();
-        let self_width = match width_dim {
-            DimensionValue::Fixed(px) => px,
-            DimensionValue::Wrap { max, .. } => max.unwrap_or(self.fallback_width),
-            DimensionValue::Fill { max, .. } => max.expect(
-                "Seems that you are trying to fill an infinite width, which is not allowed",
-            ),
-        };
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let self_width = input.parent_constraint().width().clamp(self.fallback_width);
         let self_height = self.track_height;
 
-        let track_id = input.children_ids()[0];
-        let track_constraint = Constraint::new(
-            DimensionValue::Fixed(self_width),
-            DimensionValue::Fixed(self_height),
-        );
-        input.measure_child(track_id, &track_constraint)?;
-        output.place_child(track_id, PxPosition::new(Px(0), Px(0)));
+        let track = input.children()[0];
+        let track_constraint = Constraint::exact(self_width, self_height);
+        track.measure(&track_constraint)?;
+        result.place_child(track, PxPosition::new(Px(0), Px(0)));
 
-        Ok(ComputedData {
+        Ok(result.with_size(ComputedData {
             width: self_width,
             height: self_height,
-        })
+        }))
     }
 }

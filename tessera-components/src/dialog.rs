@@ -7,11 +7,10 @@
 use std::time::Duration;
 
 use tessera_ui::{
-    Callback, Color, ComputedData, DimensionValue, Dp, FocusScopeNode, FocusTraversalPolicy,
-    MeasurementError, Modifier, Px, PxPosition, RenderSlot, State, current_frame_nanos,
-    layout::{
-        LayoutInput, LayoutOutput, LayoutPolicy, RenderInput, RenderPolicy, layout_primitive,
-    },
+    AxisConstraint, Callback, Color, ComputedData, Dp, FocusScopeNode, FocusTraversalPolicy,
+    LayoutResult, MeasurementError, Modifier, Px, PxPosition, RenderSlot, State,
+    current_frame_nanos,
+    layout::{LayoutPolicy, MeasureScope, RenderInput, RenderPolicy, layout},
     modifier::FocusModifierExt as _,
     provide_context, receive_frame_nanos, remember, tessera, use_context, winit,
 };
@@ -74,35 +73,6 @@ pub enum DialogStyle {
     /// A simple, semi-transparent dark overlay.
     #[default]
     Material,
-}
-
-impl DialogProviderRenderBuilder {
-    fn on_close_request_handle(mut self, on_close_request: Callback) -> Self {
-        self.props.on_close_request = Some(on_close_request);
-        self
-    }
-
-    fn main_content_slot(mut self, main_content: RenderSlot) -> Self {
-        self.props.main_content = Some(main_content);
-        self
-    }
-
-    fn dialog_content_slot(mut self, dialog_content: RenderSlot) -> Self {
-        self.props.dialog_content = Some(dialog_content);
-        self
-    }
-}
-
-impl DialogContentWrapperBuilder {
-    fn on_close_request_handle(mut self, on_close_request: Callback) -> Self {
-        self.props.on_close_request = on_close_request;
-        self
-    }
-
-    fn content_slot(mut self, content: RenderSlot) -> Self {
-        self.props.content = Some(content);
-        self
-    }
 }
 
 /// Controller for [`dialog_provider`], controlling visibility and animation.
@@ -190,8 +160,6 @@ fn render_scrim(style: DialogStyle, on_close_request: Callback, is_open: bool, p
                 .on_click_shared(on_close_request)
                 .tint_color(Color::TRANSPARENT)
                 .modifier(Modifier::new().fill_max_size())
-                .dispersion_height(Dp(0.0))
-                .refraction_height(Dp(0.0))
                 .block_input(true)
                 .blur_radius(Dp(blur_radius as f64))
                 .border(GlassBorder::new(Px(0)))
@@ -202,7 +170,7 @@ fn render_scrim(style: DialogStyle, on_close_request: Callback, is_open: bool, p
                     bottom_left: RoundedCorner::manual(Dp(0.0), 3.0),
                 })
                 .noise_amount(0.0)
-                .with_child(|| {});
+                .child(|| {});
         }
         DialogStyle::Material => {
             let alpha = scrim_alpha_for(progress, is_open);
@@ -216,7 +184,7 @@ fn render_scrim(style: DialogStyle, on_close_request: Callback, is_open: bool, p
                 .on_click_shared(on_close_request)
                 .modifier(Modifier::new().fill_max_size())
                 .block_input(true)
-                .with_child(|| {});
+                .child(|| {});
         }
     }
 }
@@ -249,13 +217,18 @@ fn make_keyboard_handler(
 
 #[tessera]
 fn dialog_content_wrapper(
-    style: DialogStyle,
-    alpha: f32,
-    padding: Dp,
-    just_opened: bool,
-    on_close_request: Callback,
+    style: Option<DialogStyle>,
+    alpha: Option<f32>,
+    padding: Option<Dp>,
+    just_opened: Option<bool>,
+    on_close_request: Option<Callback>,
     content: Option<RenderSlot>,
 ) {
+    let style = style.unwrap_or_default();
+    let alpha = alpha.unwrap_or(1.0);
+    let padding = padding.unwrap_or(Dp(24.0));
+    let just_opened = just_opened.unwrap_or(false);
+    let on_close_request = on_close_request.unwrap_or_default();
     let content = content.expect("dialog_content_wrapper requires content");
     let focus_scope = remember(FocusScopeNode::new).get();
     let modifier = with_keyboard_input(
@@ -272,7 +245,7 @@ fn dialog_content_wrapper(
         focus_scope.restore_focus();
     }
     let policy = DialogContentLayout { alpha };
-    layout_primitive()
+    layout()
         .modifier(modifier)
         .layout_policy(policy.clone())
         .render_policy(policy)
@@ -287,10 +260,10 @@ fn dialog_content_wrapper(
                         .style(Color::TRANSPARENT.into())
                         .modifier(
                             Modifier::new()
-                                .constrain(Some(DimensionValue::WRAP), Some(DimensionValue::WRAP))
+                                .constrain(Some(AxisConstraint::NONE), Some(AxisConstraint::NONE))
                                 .padding_all(Dp(24.0)),
                         )
-                        .with_child(move || match style {
+                        .child(move || match style {
                             DialogStyle::Glass => {
                                 let content = content;
                                 fluid_glass()
@@ -302,10 +275,9 @@ fn dialog_content_wrapper(
                                         bottom_right: RoundedCorner::manual(Dp(28.0), 3.0),
                                         bottom_left: RoundedCorner::manual(Dp(28.0), 3.0),
                                     })
-                                    .refraction_amount(32.0 * alpha)
                                     .block_input(true)
                                     .padding(padding)
-                                    .with_child(move || {
+                                    .child(move || {
                                         content.render();
                                     });
                             }
@@ -328,9 +300,9 @@ fn dialog_content_wrapper(
                                         bottom_left: RoundedCorner::manual(Dp(28.0), 3.0),
                                     })
                                     .block_input(true)
-                                    .with_child(move || {
+                                    .child(move || {
                                         let content = content;
-                                        layout_primitive()
+                                        layout()
                                             .modifier(Modifier::new().padding_all(padding))
                                             .child(move || {
                                                 content.render();
@@ -348,25 +320,23 @@ struct DialogContentLayout {
 }
 
 impl LayoutPolicy for DialogContentLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let Some(child_id) = input.children_ids().first().copied() else {
-            return Ok(ComputedData {
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let Some(child) = input.children().first().copied() else {
+            return Ok(result.with_size(ComputedData {
                 width: Px(0),
                 height: Px(0),
-            });
+            }));
         };
-        let computed = input.measure_child_in_parent_constraint(child_id)?;
-        output.place_child(child_id, PxPosition::ZERO);
-        Ok(computed)
+        let child_constraint = input.parent_constraint().without_min();
+        let computed = child.measure(&child_constraint)?;
+        result.place_child(child, PxPosition::ZERO);
+        Ok(result.with_size(computed.size()))
     }
 }
 
 impl RenderPolicy for DialogContentLayout {
-    fn record(&self, input: &RenderInput<'_>) {
+    fn record(&self, input: &mut RenderInput<'_>) {
         input.metadata_mut().multiply_opacity(self.alpha);
     }
 }
@@ -418,14 +388,17 @@ impl RenderPolicy for DialogContentLayout {
 #[tessera]
 pub fn dialog_provider(
     on_close_request: Option<Callback>,
-    padding: Dp,
-    style: DialogStyle,
-    is_open: bool,
+    padding: Option<Dp>,
+    style: Option<DialogStyle>,
+    is_open: Option<bool>,
     #[prop(skip_setter)] controller: Option<State<DialogController>>,
     main_content: Option<RenderSlot>,
     dialog_content: Option<RenderSlot>,
 ) {
     let on_close_request = on_close_request.unwrap_or_default();
+    let padding = padding.unwrap_or(Dp(24.0));
+    let style = style.unwrap_or_default();
+    let is_open = is_open.unwrap_or(false);
     let main_content = main_content.unwrap_or_else(RenderSlot::empty);
     let dialog_content = dialog_content.unwrap_or_else(RenderSlot::empty);
     let external_controller = controller;
@@ -445,24 +418,26 @@ pub fn dialog_provider(
         }
     }
     dialog_provider_render()
-        .on_close_request_handle(on_close_request)
+        .on_close_request_shared(on_close_request)
         .padding(padding)
         .style(style)
         .controller(controller)
-        .main_content_slot(main_content)
-        .dialog_content_slot(dialog_content);
+        .main_content_shared(main_content)
+        .dialog_content_shared(dialog_content);
 }
 
 #[tessera]
 fn dialog_provider_render(
     on_close_request: Option<Callback>,
-    padding: Dp,
-    style: DialogStyle,
+    padding: Option<Dp>,
+    style: Option<DialogStyle>,
     controller: Option<State<DialogController>>,
     main_content: Option<RenderSlot>,
     dialog_content: Option<RenderSlot>,
 ) {
     let on_close_request = on_close_request.unwrap_or_default();
+    let padding = padding.unwrap_or(Dp(24.0));
+    let style = style.unwrap_or_default();
     let controller = controller.expect("dialog_provider_render requires controller");
     let main_content = main_content.unwrap_or_else(RenderSlot::empty);
     let dialog_content = dialog_content.unwrap_or_else(RenderSlot::empty);
@@ -517,8 +492,8 @@ fn dialog_provider_render(
             .alpha(content_alpha)
             .padding(padding)
             .just_opened(just_opened)
-            .on_close_request_handle(on_close_request)
-            .content_slot(dialog_content);
+            .on_close_request_shared(on_close_request)
+            .content_shared(dialog_content);
     }
 }
 
@@ -566,10 +541,11 @@ fn dialog_provider_render(
 pub fn basic_dialog(
     icon: Option<RenderSlot>,
     #[prop(into)] headline: Option<String>,
-    #[prop(into)] supporting_text: String,
+    #[prop(into)] supporting_text: Option<String>,
     confirm_button: Option<RenderSlot>,
     dismiss_button: Option<RenderSlot>,
 ) {
+    let supporting_text = supporting_text.unwrap_or_default();
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
         .get()
@@ -582,11 +558,11 @@ pub fn basic_dialog(
 
     column()
         .modifier(Modifier::new().constrain(
-            Some(DimensionValue::Wrap {
-                min: Some(Dp(280.0).into()),
-                max: Some(Dp(560.0).into()),
-            }),
-            Some(DimensionValue::WRAP),
+            Some(AxisConstraint::new(
+                Dp(280.0).into(),
+                Some(Dp(560.0).into()),
+            )),
+            Some(AxisConstraint::NONE),
         ))
         .cross_axis_alignment(alignment)
         .children(move || {

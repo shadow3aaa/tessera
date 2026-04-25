@@ -3,14 +3,15 @@
 //! ## Usage
 //!
 //! Use for primary destinations on wide layouts with a collapsible side rail.
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use parking_lot::Mutex;
 use tessera_ui::{
-    Callback, Color, ComputedData, Constraint, DimensionValue, Dp, FocusTraversalPolicy,
-    MeasurementError, Modifier, Px, PxPosition, PxSize, RenderSlot, State,
+    AxisConstraint, Callback, Color, ComputedData, Constraint, Dp, FocusTraversalPolicy,
+    LayoutResult, MeasurementError, Modifier, Px, PxPosition, PxSize, RenderSlot, State,
     accesskit::Role,
     current_frame_nanos,
-    layout::{LayoutInput, LayoutOutput, LayoutPolicy, layout_primitive},
+    layout::{LayoutPolicy, MeasureScope, layout},
     modifier::FocusModifierExt as _,
     provide_context, receive_frame_nanos, remember, tessera, use_context,
 };
@@ -23,7 +24,6 @@ use crate::{
     ripple_state::{RippleSpec, RippleState},
     row::row,
     shape_def::Shape,
-    spacer::spacer,
     surface::{SurfaceStyle, surface},
     text::text,
     theme::{ContentColor, MaterialTheme, provide_text_style},
@@ -68,47 +68,38 @@ enum NavigationRailIconPosition {
     Start,
 }
 
-#[allow(missing_docs)]
-impl NavigationRailBuilder {
-    pub fn item(mut self, item: impl Into<NavigationRailItem>) -> Self {
-        self.props.items.push(item.into());
-        self
-    }
-}
-
-#[allow(missing_docs)]
-impl NavigationRailItemContentBuilder {
-    fn interaction_state_internal(mut self, interaction_state: State<InteractionState>) -> Self {
-        self.props.interaction_state = Some(interaction_state);
-        self
-    }
-
-    fn ripple_state_internal(mut self, ripple_state: State<RippleState>) -> Self {
-        self.props.ripple_state = Some(ripple_state);
-        self
-    }
-}
-
-#[allow(missing_docs)]
-impl NavigationRailItemBuilder {
-    fn controller_internal(mut self, controller: State<NavigationRailController>) -> Self {
-        self.props.controller = Some(controller);
-        self
-    }
+#[derive(Clone)]
+struct NavigationRailCompositionContext {
+    controller: State<NavigationRailController>,
+    selected_index: usize,
+    previous_index: usize,
+    selection_progress: f32,
+    icon_position: NavigationRailIconPosition,
+    indicator_start_width: Dp,
+    item_min_height: Dp,
+    item_spacing: Dp,
+    next_index: Arc<Mutex<usize>>,
 }
 
 #[tessera]
-fn navigation_rail_item_content(
-    item: NavigationRailItem,
-    icon_position: NavigationRailIconPosition,
-    is_selected: bool,
-    was_selected: bool,
-    selection_progress: f32,
-    indicator_start_width: Dp,
-    item_min_height: Dp,
-    #[prop(skip_setter)] interaction_state: Option<State<InteractionState>>,
-    #[prop(skip_setter)] ripple_state: Option<State<RippleState>>,
+fn navigation_rail_item_view_content(
+    item: Option<NavigationRailItemDefinition>,
+    icon_position: Option<NavigationRailIconPosition>,
+    is_selected: Option<bool>,
+    was_selected: Option<bool>,
+    selection_progress: Option<f32>,
+    indicator_start_width: Option<Dp>,
+    item_min_height: Option<Dp>,
+    interaction_state: Option<State<InteractionState>>,
+    ripple_state: Option<State<RippleState>>,
 ) {
+    let item = item.unwrap_or_default();
+    let icon_position = icon_position.unwrap_or_default();
+    let is_selected = is_selected.unwrap_or(false);
+    let was_selected = was_selected.unwrap_or(false);
+    let selection_progress = selection_progress.unwrap_or(0.0);
+    let indicator_start_width = indicator_start_width.unwrap_or(Dp(0.0));
+    let item_min_height = item_min_height.unwrap_or(Dp(0.0));
     let interaction_state = interaction_state.expect("interaction_state must be set");
     let ripple_state = ripple_state.expect("ripple_state must be set");
     let theme = use_context::<MaterialTheme>()
@@ -155,7 +146,7 @@ fn navigation_rail_item_content(
     .round()
     .max(0.0) as i32);
 
-    layout_primitive()
+    layout()
         .layout_policy(NavigationRailItemLayout {
             icon_position,
             has_label,
@@ -167,36 +158,36 @@ fn navigation_rail_item_content(
                 .style(SurfaceStyle::Filled {
                     color: indicator_color,
                 })
-                .shape(Shape::capsule())
+                .shape(Shape::CAPSULE)
                 .modifier(Modifier::new().constrain(
-                    Some(DimensionValue::Fixed(animated_indicator_width_px)),
-                    Some(DimensionValue::Fixed(indicator_height.to_px())),
+                    Some(AxisConstraint::exact(animated_indicator_width_px)),
+                    Some(AxisConstraint::exact(indicator_height.to_px())),
                 ))
                 .show_state_layer(false)
                 .show_ripple(false)
-                .with_child(|| {});
+                .child(|| {});
 
             surface()
                 .style(SurfaceStyle::Filled {
                     color: Color::TRANSPARENT,
                 })
-                .shape(Shape::capsule())
+                .shape(Shape::CAPSULE)
                 .modifier(Modifier::new().size(indicator_base_width, indicator_height))
                 .enabled(true)
                 .interaction_state(interaction_state)
                 .ripple_color(ripple_color)
-                .with_child(move || {
+                .child(move || {
                     surface()
                         .style(SurfaceStyle::Filled {
                             color: Color::TRANSPARENT,
                         })
-                        .shape(Shape::capsule())
+                        .shape(Shape::CAPSULE)
                         .modifier(Modifier::new().size(indicator_base_width, indicator_height))
                         .enabled(true)
                         .ripple_color(ripple_color)
                         .show_state_layer(false)
                         .ripple_state(ripple_state)
-                        .with_child(|| {});
+                        .child(|| {});
                 });
 
             if let Some(draw_icon) = item.icon {
@@ -232,29 +223,23 @@ struct NavigationRailItemLayout {
 }
 
 impl LayoutPolicy for NavigationRailItemLayout {
-    fn measure(
-        &self,
-        input: &LayoutInput<'_>,
-        output: &mut LayoutOutput<'_>,
-    ) -> Result<ComputedData, MeasurementError> {
-        let parent_width = match input.parent_constraint().width() {
-            DimensionValue::Fixed(v) => v,
-            DimensionValue::Wrap { max, .. } => max.unwrap_or(Px::ZERO),
-            DimensionValue::Fill { max, .. } => max.unwrap_or(Px::ZERO),
-        };
+    fn measure(&self, input: &MeasureScope<'_>) -> Result<LayoutResult, MeasurementError> {
+        let mut result = LayoutResult::default();
+        let children = input.children();
+        let parent_width = input
+            .parent_constraint()
+            .width()
+            .resolve_max()
+            .unwrap_or(Px::ZERO);
         let min_height = self.item_min_height.to_px();
-        let parent_height = match input.parent_constraint().height() {
-            DimensionValue::Fixed(v) => v.max(min_height),
-            DimensionValue::Wrap { min, .. } => min.unwrap_or(min_height).max(min_height),
-            DimensionValue::Fill { min, .. } => min.unwrap_or(min_height).max(min_height),
-        };
+        let parent_height = input.parent_constraint().height().clamp(min_height);
 
-        let indicator_background_id = input.children_ids()[0];
-        let indicator_ripple_id = input.children_ids()[1];
+        let indicator_background = children[0];
+        let indicator_ripple = children[1];
         let mut child_index = 2;
 
         let icon_id = if self.has_icon {
-            let id = input.children_ids()[child_index];
+            let id = children[child_index];
             child_index += 1;
             Some(id)
         } else {
@@ -262,32 +247,25 @@ impl LayoutPolicy for NavigationRailItemLayout {
         };
 
         let label_id = if self.has_label {
-            let id = input.children_ids()[child_index];
+            let id = children[child_index];
             Some(id)
         } else {
             None
         };
 
-        let child_constraint = Constraint::new(DimensionValue::WRAP, DimensionValue::WRAP);
-        let children_to_measure: Vec<_> = input
-            .children_ids()
-            .iter()
-            .map(|&child_id| (child_id, child_constraint))
-            .collect();
-        let children_results = input.measure_children(children_to_measure)?;
-
-        let indicator_size = children_results
-            .get(&indicator_background_id)
-            .unwrap_or(&ComputedData::ZERO);
-        let indicator_ripple_size = children_results
-            .get(&indicator_ripple_id)
-            .unwrap_or(&ComputedData::ZERO);
+        let child_constraint = Constraint::NONE;
+        let indicator_size = indicator_background.measure(&child_constraint)?.size();
+        let indicator_ripple_size = indicator_ripple.measure(&child_constraint)?.size();
         let icon_size = icon_id
-            .and_then(|id| children_results.get(&id))
-            .unwrap_or(&ComputedData::ZERO);
+            .map(|id| id.measure(&child_constraint))
+            .transpose()?
+            .map(|size| size.size())
+            .unwrap_or(ComputedData::ZERO);
         let label_size = label_id
-            .and_then(|id| children_results.get(&id))
-            .unwrap_or(&ComputedData::ZERO);
+            .map(|id| id.measure(&child_constraint))
+            .transpose()?
+            .map(|size| size.size())
+            .unwrap_or(ComputedData::ZERO);
 
         let width = parent_width;
         let height = parent_height;
@@ -297,13 +275,13 @@ impl LayoutPolicy for NavigationRailItemLayout {
                 let horizontal_padding = ITEM_HORIZONTAL_PADDING.to_px();
                 let ripple_x = horizontal_padding;
                 let ripple_y = (height - indicator_ripple_size.height) / 2;
-                output.place_child(indicator_ripple_id, PxPosition::new(ripple_x, ripple_y));
+                result.place_child(indicator_ripple, PxPosition::new(ripple_x, ripple_y));
 
                 let indicator_x =
                     ripple_x + (indicator_ripple_size.width - indicator_size.width) / 2;
                 let indicator_y = (height - indicator_size.height) / 2;
-                output.place_child(
-                    indicator_background_id,
+                result.place_child(
+                    indicator_background,
                     PxPosition::new(indicator_x, indicator_y),
                 );
 
@@ -312,7 +290,7 @@ impl LayoutPolicy for NavigationRailItemLayout {
 
                 if let Some(icon_id) = icon_id {
                     let icon_y = (height - icon_size.height) / 2;
-                    output.place_child(icon_id, PxPosition::new(content_x, icon_y));
+                    result.place_child(icon_id, PxPosition::new(content_x, icon_y));
                 }
 
                 if let Some(label_id) = label_id {
@@ -322,10 +300,10 @@ impl LayoutPolicy for NavigationRailItemLayout {
                     } else {
                         content_x
                     };
-                    output.place_child(label_id, PxPosition::new(label_x, label_y));
+                    result.place_child(label_id, PxPosition::new(label_x, label_y));
                 }
 
-                return Ok(ComputedData { width, height });
+                return Ok(result.with_size(ComputedData { width, height }));
             }
             NavigationRailIconPosition::Top => {}
         }
@@ -335,19 +313,19 @@ impl LayoutPolicy for NavigationRailItemLayout {
             let ripple_y = (height - indicator_ripple_size.height) / 2;
             let indicator_x = (width - indicator_size.width) / 2;
             let indicator_y = (height - indicator_size.height) / 2;
-            output.place_child(
-                indicator_background_id,
+            result.place_child(
+                indicator_background,
                 PxPosition::new(indicator_x, indicator_y),
             );
-            output.place_child(indicator_ripple_id, PxPosition::new(ripple_x, ripple_y));
+            result.place_child(indicator_ripple, PxPosition::new(ripple_x, ripple_y));
 
             if let Some(icon_id) = icon_id {
                 let icon_x = (width - icon_size.width) / 2;
                 let icon_y = (height - icon_size.height) / 2;
-                output.place_child(icon_id, PxPosition::new(icon_x, icon_y));
+                result.place_child(icon_id, PxPosition::new(icon_x, icon_y));
             }
 
-            return Ok(ComputedData { width, height });
+            return Ok(result.with_size(ComputedData { width, height }));
         }
 
         let indicator_vertical_padding_px = TOP_ICON_INDICATOR_VERTICAL_PADDING.to_px();
@@ -371,37 +349,45 @@ impl LayoutPolicy for NavigationRailItemLayout {
             + indicator_vertical_padding_px
             + INDICATOR_TOP_TO_LABEL_PADDING.to_px();
 
-        output.place_child(
-            indicator_background_id,
+        result.place_child(
+            indicator_background,
             PxPosition::new(indicator_x, indicator_y),
         );
-        output.place_child(indicator_ripple_id, PxPosition::new(ripple_x, ripple_y));
+        result.place_child(indicator_ripple, PxPosition::new(ripple_x, ripple_y));
 
         if let Some(icon_id) = icon_id {
-            output.place_child(icon_id, PxPosition::new(icon_x, icon_y));
+            result.place_child(icon_id, PxPosition::new(icon_x, icon_y));
         }
 
         if let Some(label_id) = label_id {
-            output.place_child(label_id, PxPosition::new(label_x, label_y));
+            result.place_child(label_id, PxPosition::new(label_x, label_y));
         }
 
-        Ok(ComputedData { width, height })
+        Ok(result.with_size(ComputedData { width, height }))
     }
 }
 
 #[tessera]
-fn navigation_rail_item(
-    #[prop(skip_setter)] controller: Option<State<NavigationRailController>>,
-    index: usize,
-    item: NavigationRailItem,
-    selected_index: usize,
-    previous_index: usize,
-    selection_progress: f32,
-    icon_position: NavigationRailIconPosition,
-    indicator_start_width: Dp,
-    item_min_height: Dp,
+fn navigation_rail_item_view(
+    controller: Option<State<NavigationRailController>>,
+    index: Option<usize>,
+    item: Option<NavigationRailItemDefinition>,
+    selected_index: Option<usize>,
+    previous_index: Option<usize>,
+    selection_progress: Option<f32>,
+    icon_position: Option<NavigationRailIconPosition>,
+    indicator_start_width: Option<Dp>,
+    item_min_height: Option<Dp>,
 ) {
     let controller = controller.expect("controller must be set");
+    let index = index.unwrap_or(0);
+    let item = item.unwrap_or_default();
+    let selected_index = selected_index.unwrap_or(0);
+    let previous_index = previous_index.unwrap_or(0);
+    let selection_progress = selection_progress.unwrap_or(0.0);
+    let icon_position = icon_position.unwrap_or_default();
+    let indicator_start_width = indicator_start_width.unwrap_or(Dp(0.0));
+    let item_min_height = item_min_height.unwrap_or(Dp(0.0));
     let interaction_state = remember(InteractionState::new);
     let ripple_state = remember(RippleState::new);
 
@@ -456,10 +442,10 @@ fn navigation_rail_item(
     };
 
     let modifier = Modifier::new().selectable_with(selectable_args);
-    layout_primitive().modifier(modifier).child({
+    layout().modifier(modifier).child({
         let item = item.clone();
         move || {
-            navigation_rail_item_content()
+            navigation_rail_item_view_content()
                 .item(item.clone())
                 .icon_position(icon_position)
                 .is_selected(is_selected)
@@ -467,10 +453,88 @@ fn navigation_rail_item(
                 .selection_progress(selection_progress)
                 .indicator_start_width(indicator_start_width)
                 .item_min_height(item_min_height)
-                .interaction_state_internal(interaction_state)
-                .ripple_state_internal(ripple_state);
+                .interaction_state(interaction_state)
+                .ripple_state(ripple_state);
         }
     });
+}
+
+#[derive(Clone, PartialEq, Default)]
+struct NavigationRailItemDefinition {
+    label: String,
+    icon: Option<RenderSlot>,
+    on_click: Callback,
+}
+
+/// # navigation_rail_item
+///
+/// Renders a single destination inside [`navigation_rail`].
+///
+/// ## Usage
+///
+/// Declare one primary destination in a navigation rail content slot.
+///
+/// ## Parameters
+///
+/// - `label` — text label shown next to or below the icon.
+/// - `icon` — optional icon rendered for the item.
+/// - `on_click` — callback invoked after the item becomes selected.
+///
+/// ## Examples
+///
+/// ```
+/// use tessera_components::navigation_rail::{navigation_rail, navigation_rail_item};
+/// use tessera_ui::tessera;
+///
+/// #[tessera]
+/// fn demo() {
+///     navigation_rail().content(|| {
+///         navigation_rail_item().label("Home");
+///     });
+/// }
+/// ```
+#[tessera]
+pub fn navigation_rail_item(
+    #[prop(into)] label: Option<String>,
+    icon: Option<RenderSlot>,
+    on_click: Option<Callback>,
+) {
+    let label = label.unwrap_or_default();
+    let on_click = on_click.unwrap_or_default();
+    let composition = use_context::<NavigationRailCompositionContext>()
+        .expect("navigation_rail_item must be used inside navigation_rail")
+        .get();
+    let index = {
+        let mut next_index = composition.next_index.lock();
+        let index = *next_index;
+        *next_index += 1;
+        index
+    };
+
+    layout()
+        .modifier(Modifier::new().padding(Padding::new(
+            Dp::ZERO,
+            Dp::ZERO,
+            Dp::ZERO,
+            composition.item_spacing,
+        )))
+        .child(move || {
+            let item = NavigationRailItemDefinition {
+                label: label.clone(),
+                icon,
+                on_click,
+            };
+            navigation_rail_item_view()
+                .controller(composition.controller)
+                .index(index)
+                .item(item)
+                .selected_index(composition.selected_index)
+                .previous_index(composition.previous_index)
+                .selection_progress(composition.selection_progress)
+                .icon_position(composition.icon_position)
+                .indicator_start_width(composition.indicator_start_width)
+                .item_min_height(composition.item_min_height);
+        });
 }
 
 /// Collapsed or expanded mode for a navigation rail.
@@ -488,34 +552,6 @@ impl NavigationRailValue {
     }
 }
 
-/// Item configuration for [`navigation_rail`].
-#[derive(Clone, PartialEq)]
-pub struct NavigationRailItem {
-    /// Text label shown next to or below the icon.
-    pub label: String,
-    /// Optional icon rendered for the item.
-    pub icon: Option<RenderSlot>,
-    /// Callback invoked after selection changes to this item.
-    pub on_click: Callback,
-}
-
-impl NavigationRailItem {
-    /// Creates a navigation item with the required label.
-    pub fn new(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            icon: None,
-            on_click: Callback::noop(),
-        }
-    }
-}
-
-impl Default for NavigationRailItem {
-    fn default() -> Self {
-        Self::new("")
-    }
-}
-
 /// # navigation_rail
 ///
 /// Navigation rail that switches between collapsed and expanded layouts for
@@ -528,16 +564,16 @@ impl Default for NavigationRailItem {
 /// ## Parameters
 ///
 /// - `controller` — optional external controller.
-/// - `items` — items rendered in the rail.
+/// - `content` — item declarations rendered in the rail.
 /// - `header` — optional header rendered above items.
 ///
 /// ## Examples
 ///
 /// ```
 /// use tessera_components::navigation_rail::{
-///     NavigationRailController, NavigationRailItem, NavigationRailValue, navigation_rail,
+///     NavigationRailController, NavigationRailValue, navigation_rail, navigation_rail_item,
 /// };
-/// use tessera_ui::{remember, tessera};
+/// use tessera_ui::{LayoutResult, remember, tessera};
 ///
 /// #[tessera]
 /// fn demo() {
@@ -545,18 +581,18 @@ impl Default for NavigationRailItem {
 ///     controller.with_mut(|c| c.set_value(NavigationRailValue::Expanded));
 ///     assert!(controller.with(|c| c.is_expanded()));
 ///
-///     let item = NavigationRailItem::new("Home");
-///     assert_eq!(item.label, "Home");
-///
-///     navigation_rail().controller(controller).item(item);
+///     navigation_rail().controller(controller).content(|| {
+///         navigation_rail_item().label("Home");
+///     });
 /// }
 /// ```
 #[tessera]
 pub fn navigation_rail(
     controller: Option<State<NavigationRailController>>,
-    items: Vec<NavigationRailItem>,
+    content: Option<RenderSlot>,
     header: Option<RenderSlot>,
 ) {
+    let content = content.unwrap_or_else(RenderSlot::empty);
     let controller = controller.unwrap_or_else(|| remember(|| NavigationRailController::new(0)));
     let scheme = use_context::<MaterialTheme>()
         .expect("MaterialTheme must be provided")
@@ -597,20 +633,31 @@ pub fn navigation_rail(
     };
     let indicator_start_width =
         Dp((container_width.0 - ITEM_HORIZONTAL_PADDING.0 * 2.0).max(INDICATOR_TOP_WIDTH.0));
+    let composition = NavigationRailCompositionContext {
+        controller,
+        selected_index,
+        previous_index,
+        selection_progress,
+        icon_position,
+        indicator_start_width,
+        item_min_height,
+        item_spacing,
+        next_index: Arc::new(Mutex::new(0)),
+    };
 
     let modifier = Modifier::new()
         .focus_group()
         .focus_traversal_policy(FocusTraversalPolicy::vertical().wrap(true));
-    layout_primitive().modifier(modifier).child({
-        let items = items.clone();
+    layout().modifier(modifier).child({
+        let composition = composition.clone();
         move || {
-            let items = items.clone();
+            let composition = composition.clone();
             surface()
                 .modifier(Modifier::new().fill_max_height().width(container_width))
                 .style(scheme.surface.into())
                 .block_input(true)
-                .with_child(move || {
-                    let items = items.clone();
+                .child(move || {
+                    let content_context = composition.clone();
                     column()
                         .modifier(Modifier::new().fill_max_size().padding(Padding::new(
                             Dp::ZERO,
@@ -632,31 +679,16 @@ pub fn navigation_rail(
                                     .children(move || {
                                         header.render();
                                     });
-                                spacer().modifier(Modifier::new().height(HEADER_BOTTOM_PADDING));
+                                layout().modifier(Modifier::new().height(HEADER_BOTTOM_PADDING));
                             }
 
-                            let last_index = items.len().saturating_sub(1);
-                            for (index, item) in items.iter().cloned().enumerate() {
-                                {
-                                    navigation_rail_item()
-                                        .controller_internal(controller)
-                                        .index(index)
-                                        .item(item.clone())
-                                        .selected_index(selected_index)
-                                        .previous_index(previous_index)
-                                        .selection_progress(selection_progress)
-                                        .icon_position(icon_position)
-                                        .indicator_start_width(indicator_start_width)
-                                        .item_min_height(item_min_height);
-                                };
-
-                                if index != last_index && item_spacing.0 > 0.0 {
-                                    let spacing = item_spacing;
-                                    {
-                                        spacer().modifier(Modifier::new().height(spacing));
-                                    };
-                                }
-                            }
+                            let provided_context = content_context.clone();
+                            provide_context(
+                                move || provided_context.clone(),
+                                move || {
+                                    content.render();
+                                },
+                            );
                         });
                 });
         }
